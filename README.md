@@ -48,3 +48,7 @@ Early release (0.1) for evaluation and comment. Feedback is welcome through GitH
 AE-OS is licensed under the [Apache License, Version 2.0](LICENSE). See [NOTICE](NOTICE) for attribution.
 
 Unless you state otherwise, any contribution you submit for inclusion in this repository is licensed under the Apache License, Version 2.0, with no additional terms or conditions.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Please report security issues privately as described in [SECURITY.md](SECURITY.md).
