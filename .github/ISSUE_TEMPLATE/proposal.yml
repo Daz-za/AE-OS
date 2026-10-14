@@ -1,0 +1,22 @@
+name: Proposal or specification change
+description: Suggest a feature, or a change to the AE-OS specification
+labels: [proposal]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What you are trying to do, and what currently stops you.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: For specification changes, include the effect on existing records and verifiers.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
