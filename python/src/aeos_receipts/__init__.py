@@ -1,0 +1,10 @@
+"""AE-OS Receipts: signed, independently verifiable receipts for AI agent actions."""
+
+__version__ = "0.1.0"
+
+from .canon import Link, canonical_json, cid_str, dag_cbor, json_digest  # noqa: E402
+from .log import (Checkpoint, ReceiptLog, make_record, verify_consistency_doc,  # noqa: E402
+                  verify_receipt)
+
+__all__ = ["Checkpoint", "Link", "ReceiptLog", "canonical_json", "cid_str", "dag_cbor",
+           "json_digest", "make_record", "verify_consistency_doc", "verify_receipt"]
