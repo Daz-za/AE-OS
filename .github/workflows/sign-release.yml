@@ -1,0 +1,47 @@
+# Keyless Sigstore signing of release files. The signing identity is this workflow in Daz-za/ae-os.
+# Usage: create a GitHub release, attach the PDF, then Actions > Sign release > Run workflow with the tag.
+name: Sign release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag whose assets to sign (e.g. paper-v1.0)
+        required: true
+
+permissions:
+  contents: write   # upload signature bundles to the release
+  id-token: write   # OIDC token for Sigstore keyless signing
+
+jobs:
+  sign:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir assets
+          gh release download "${{ inputs.tag }}" --repo "${{ github.repository }}" --dir assets --pattern '*.pdf'
+
+      - name: Checksums and keyless signatures
+        working-directory: assets
+        run: |
+          sha256sum *.pdf > SHA256SUMS
+          cat SHA256SUMS
+          for f in *.pdf SHA256SUMS; do
+            cosign sign-blob --yes "$f" --bundle "$f.sigstore.json"
+          done
+
+      - name: Attach to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: assets
+        run: gh release upload "${{ inputs.tag }}" SHA256SUMS *.sigstore.json --repo "${{ github.repository }}" --clobber
+
+# Readers verify with:
+# cosign verify-blob AE-OS_Research_Paper_v1.0.pdf --bundle AE-OS_Research_Paper_v1.0.pdf.sigstore.json \
+#   --certificate-identity "https://github.com/Daz-za/ae-os/.github/workflows/sign-release.yml@refs/heads/main" \
+#   --certificate-oidc-issuer https://token.actions.githubusercontent.com
