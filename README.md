@@ -1,14 +1,32 @@
-# AE-OS
+<p align="center">
+  <a href="https://ae-os.org">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.png">
+      <img src="assets/logo-light.png" alt="AE-OS" width="220">
+    </picture>
+  </a>
+</p>
 
-The Agent-Native Enterprise Operating System is an early-stage open-source framework and research project by Darren Lentz. It studies how an organisation's core systems could be run by software agents working under human authority, with a signed receipt for every action that an auditor can check independently.
+<p align="center"><strong>The Agent-Native Enterprise Operating System</strong></p>
 
-The research paper and an interactive overview of the architecture are at [ae-os.org](https://ae-os.org).
+<p align="center">
+  <a href="https://ae-os.org">Website</a> ·
+  <a href="https://ae-os.org/#film">Film</a> ·
+  <a href="https://ae-os.org/#architecture">Architecture</a> ·
+  <a href="https://ae-os.org/#research">Research paper</a>
+</p>
+
+<a href="https://ae-os.org"><img src="assets/film.jpg" alt="A 3D model of one company's systems in four layers: people at the top, software agents, a control layer that checks every action, and a ledger that keeps a receipt for each one. A bank with its own agents sits to the left and a subsidiary to the right."></a>
+
+AE-OS is an early-stage open-source framework and research project by Darren Lentz. It studies how an organization's core systems could be run by software agents working under human authority, with a signed receipt for every action that an auditor can check independently.
+
+The image above is a frame from the film on [ae-os.org](https://ae-os.org), which follows one simulated quarter-end close at a fictional company. The site also has the research paper and an interactive map of the architecture.
 
 ## Status
 
 This repository is new. Code will be added here as the open components are published.
 
-## Licence
+## License
 
 AE-OS is licensed under the [Apache License, Version 2.0](LICENSE). See [NOTICE](NOTICE) for attribution.
 
