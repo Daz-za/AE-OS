@@ -1,6 +1,6 @@
 # AE-OS Receipts, version 0 (draft)
 
-Status: draft for comment, 2026-10-14. Author: Darren Lentz. Licensed under Apache 2.0 with the rest of this repository.
+Status: draft for comment, 2026-10-14. Published by the AE-OS project. Licensed under Apache 2.0 with the rest of this repository.
 
 ## Purpose
 

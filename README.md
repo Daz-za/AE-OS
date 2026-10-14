@@ -18,7 +18,7 @@
 
 <a href="https://ae-os.org"><img src="assets/film.jpg" alt="A 3D model of one company's systems in four layers: people at the top, software agents, a control layer that checks every action, and a ledger that keeps a receipt for each one. A bank with its own agents sits to the left and a subsidiary to the right."></a>
 
-AE-OS is an early-stage open-source framework and research project by Darren Lentz. It studies how an organization's core systems could be run by software agents working under human authority, with a signed receipt for every action that an auditor can check independently.
+AE-OS is an early-stage open-source framework and research project. It studies how an organization's core systems could be run by software agents working under human authority, with a signed receipt for every action that an auditor can check independently.
 
 The image above is a frame from the film on [ae-os.org](https://ae-os.org), which follows one simulated quarter-end close at a fictional company. The site also has the research paper and an interactive map of the architecture.
 

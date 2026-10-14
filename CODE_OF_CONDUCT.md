@@ -6,6 +6,6 @@ In short: be respectful and constructive, assume good intent, and focus criticis
 
 ## Reporting
 
-Report unacceptable behavior to the maintainer, Darren Lentz, at [conduct@ae-os.org](mailto:conduct@ae-os.org). Reports are handled confidentially.
+Report unacceptable behavior to the maintainers at [conduct@ae-os.org](mailto:conduct@ae-os.org). Reports are handled confidentially.
 
 The maintainer may remove comments, commits or other contributions that break this code, and may block participants who do so repeatedly.

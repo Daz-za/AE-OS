@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Signed, independently verifiable receipts for AI agent actions (AE-OS)"
 readme = "README.md"
 license = "Apache-2.0"
-authors = [{ name = "Darren Lentz" }]
+authors = [{ name = "The AE-OS Authors" }]
 requires-python = ">=3.9"
 dependencies = ["cryptography>=41"]
 classifiers = [
