@@ -1,10 +1,17 @@
 version: 2
 updates:
+  # Each ecosystem's updates arrive together as one weekly pull request.
   - package-ecosystem: pip
     directory: /python
     schedule:
       interval: weekly
+    groups:
+      python-dependencies:
+        patterns: ["*"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    groups:
+      github-actions:
+        patterns: ["*"]
