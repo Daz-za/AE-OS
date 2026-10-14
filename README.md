@@ -22,9 +22,26 @@ AE-OS is an early-stage open-source framework and research project by Darren Len
 
 The image above is a frame from the film on [ae-os.org](https://ae-os.org), which follows one simulated quarter-end close at a fictional company. The site also has the research paper and an interactive map of the architecture.
 
+## What is here
+
+| Path | What it is |
+|---|---|
+| [`spec/receipts-v0.md`](spec/receipts-v0.md) | AE-OS Receipts format: records, Merkle log, signed checkpoints, receipts and consistency proofs |
+| [`python/`](python/) | `aeos-receipts`, the Python library and command line, including an MCP proxy that records an agent's tool calls |
+| [`examples/`](examples/) | A worked example: an agent pays an invoice, and an auditor checks the evidence |
+
+## Quick start
+
+```
+pip install -e python
+python examples/invoice_demo.py
+```
+
+See [python/README.md](python/README.md) for the command line and the MCP proxy.
+
 ## Status
 
-This repository is new. Code will be added here as the open components are published.
+Early release (0.1) for evaluation and comment. Feedback is welcome through GitHub issues.
 
 ## License
 
