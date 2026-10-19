@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
-from . import __version__, demo, hooks, mcp_proxy, setup, sink, status, ui
+from . import __version__, audit, demo, fulldemo, hooks, mcp_proxy, setup, sink, status, ui
 from .canon import cid_parse, cid_str
 from .log import ReceiptLog, make_record, to_view, verify_consistency_doc, verify_receipt
 from .recorder import Recorder
@@ -159,8 +159,18 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     p = sub.add_parser("demo", help="walk through an example: an agent pays an invoice and "
                        "an auditor checks the evidence")
-    p.add_argument("folder", nargs="?", default="aeos-demo",
-                   help="where to leave the example files (default %(default)s)")
+    p.add_argument("folder", nargs="?",
+                   help="where to leave the example files (default aeos-demo, or "
+                        "aeos-full-demo with --full)")
+    p.add_argument("--full", action="store_true",
+                   help="also run SPIFFE identities, mutual TLS, the MCP gateway and witnesses")
+
+    p = sub.add_parser("audit", help="check an evidence folder: log, agent identities and "
+                       "witness cosignatures")
+    p.add_argument("folder")
+    p.add_argument("--bundle", help="trust bundle (root certificates) you trust")
+    p.add_argument("--public-key", help="the log's public key (hex) you trust")
+    p.add_argument("--witnesses", help="witnesses.json with the witness keys you trust")
 
     p = sub.add_parser("setup", help="answer a few questions and create a ready-to-use log")
     p.add_argument("--name", help="short name for the log")
@@ -192,7 +202,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         return ui.serve(Path(a.log) if a.log else None, Path(a.key) if a.key else None,
                         port=a.port, open_browser=not a.no_browser)
     if a.cmd == "demo":
-        return demo.run(Path(a.folder))
+        if a.full:
+            return fulldemo.run(Path(a.folder or "aeos-full-demo"))
+        return demo.run(Path(a.folder or "aeos-demo"))
+    if a.cmd == "audit":
+        findings, problems = audit.run(Path(a.folder), bundle=a.bundle,
+                                       public_key=a.public_key, witnesses=a.witnesses)
+        for f in findings:
+            print(f"  - {f}")
+        return _report(problems, "the evidence holds together", "audit")
     if a.cmd == "setup":
         wizard = setup.Wizard(assume_defaults=a.yes)
         try:

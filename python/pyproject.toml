@@ -10,7 +10,7 @@ readme = "README.md"
 license = "Apache-2.0"
 authors = [{ name = "Darren Lentz" }]
 requires-python = ">=3.9"
-dependencies = ["cryptography>=41"]
+dependencies = ["cryptography>=42"]
 classifiers = [
   "Programming Language :: Python :: 3",
   "Topic :: Security :: Cryptography",

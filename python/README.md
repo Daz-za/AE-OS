@@ -169,6 +169,17 @@ assert verify_receipt(receipt, log.public_key) == []
 
 `examples/invoice_demo.py` walks through an escalated invoice payment, the auditor's checks and a tampering attempt.
 
+## Identities, gateway and witnesses (preview)
+
+`aeos-receipts demo --full` runs more of the AE-OS architecture on one computer:
+
+- a SPIFFE trust domain issues 15-minute X.509-SVIDs to agents and to an MCP gateway;
+- the agent and the gateway authenticate each other over mutual TLS, and the gateway records every call under the identity in the agent's certificate;
+- expired certificates and certificates not issued under the trust bundle's root are refused during the handshake, and an identity without permission for a tool is refused and recorded;
+- two witnesses cosign the log's checkpoint, and a witness refuses a rewritten history.
+
+It leaves an evidence folder that `aeos-receipts audit FOLDER` checks from end to end. The modules are `identity`, `gateway`, `witness` and `audit`; the formats are in [spec/identity-and-witnesses-draft.md](../spec/identity-and-witnesses-draft.md). The local trust domain stands in for SPIRE and does no machine or workload attestation.
+
 ## Status and limits
 
 Version 0.1 is an early release for evaluation.
