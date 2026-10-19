@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
-from . import __version__, hooks, mcp_proxy, sink
+from . import __version__, demo, hooks, mcp_proxy, setup, sink, status
 from .canon import cid_parse, cid_str
 from .log import ReceiptLog, make_record, to_view, verify_consistency_doc, verify_receipt
 from .recorder import Recorder
@@ -48,19 +48,43 @@ def _write(doc: dict, out: Optional[str]) -> None:
         sys.stdout.write(text)
 
 
-def _report(problems: List[str], ok_message: str) -> int:
+MEANING = {
+    "receipt": ("This record is in the log exactly as shown, and the log's owner signed "
+                "a checkpoint that includes it.",
+                "Do not rely on this receipt. Ask the log's owner for a fresh receipt, and "
+                "check that you used their public key from a source you trust."),
+    "consistency": ("The newer checkpoint contains every record of the older one, "
+                    "unchanged. Nothing was removed or rewritten in between.",
+                    "The log's history differs from what you were shown before. Keep both "
+                    "checkpoints as evidence and raise it with the log's owner."),
+    "log": ("Every record matches its fingerprint, every link points to an earlier record, "
+            "and every signed checkpoint matches the records it covers.",
+            "Records were changed, removed or reordered after they were written. Keep a "
+            "copy of the folder as it is now, and compare it with a backup or with "
+            "receipts issued earlier."),
+}
+
+
+def _report(problems: List[str], ok_message: str, kind: str = "") -> int:
+    good, bad = MEANING.get(kind, ("", ""))
     if problems:
         print("INVALID")
         for p in problems:
             print(f"  - {p}")
+        if bad:
+            print(f"What to do: {bad}")
         return 1
     print(f"VALID: {ok_message}")
+    if good:
+        print(f"What this means: {good}")
     return 0
 
 
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(prog="aeos-receipts",
-                                 description="Signed, verifiable receipts for AI agent actions.")
+                                 description="Signed, verifiable receipts for AI agent actions.",
+                                 epilog="New here? Run 'aeos-receipts demo' to see an example, "
+                                        "then 'aeos-receipts setup' to create your own log.")
     ap.add_argument("--version", action="version", version=__version__)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -86,8 +110,9 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     p = sub.add_parser("receipt", help="export a receipt for one record")
     p.add_argument("log")
-    p.add_argument("ref", help="record index or CID")
-    p.add_argument("--key")
+    p.add_argument("ref", help="record number (as listed by 'show') or CID")
+    p.add_argument("--key", help="signing key file, used to sign a fresh checkpoint if the "
+                                 "latest one does not yet cover the record")
     p.add_argument("-o", "--out")
 
     p = sub.add_parser("verify-receipt", help="check a receipt offline")
@@ -148,6 +173,24 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--fail-open", action="store_true",
                    help="let a tool run even if its call could not be recorded")
 
+    p = sub.add_parser("demo", help="walk through an example: an agent pays an invoice and "
+                       "an auditor checks the evidence")
+    p.add_argument("folder", nargs="?", default="aeos-demo",
+                   help="where to leave the example files (default %(default)s)")
+
+    p = sub.add_parser("setup", help="answer a few questions and create a ready-to-use log")
+    p.add_argument("--name", help="short name for the log")
+    p.add_argument("--log", help="folder for the log")
+    p.add_argument("--key", help="where to keep the signing key")
+    p.add_argument("--agent", help="the agent's identity")
+    p.add_argument("--mode", choices=list(setup.MODES), help="how tool calls reach the log")
+    p.add_argument("--yes", action="store_true", help="accept the suggestion for any "
+                   "question not answered by an option")
+
+    p = sub.add_parser("status", help="summarize a log in plain language")
+    p.add_argument("log")
+    p.add_argument("--key")
+
     argv = list(sys.argv[1:] if argv is None else argv)
     server_cmd: List[str] = []
     if "--" in argv:                       # everything after -- is the MCP server command
@@ -155,6 +198,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         argv, server_cmd = argv[:cut], argv[cut + 1:]
     a = ap.parse_args(argv)
 
+    if a.cmd == "demo":
+        return demo.run(Path(a.folder))
+    if a.cmd == "setup":
+        wizard = setup.Wizard(assume_defaults=a.yes)
+        try:
+            return setup.run(wizard, log=a.log, name=a.name, key=a.key, agent=a.agent,
+                             mode=a.mode)
+        except (KeyboardInterrupt, EOFError):
+            print("\nSetup cancelled; nothing was created.")
+            return 130
     if a.cmd == "init":
         log = ReceiptLog.create(Path(a.log), log_id=a.log_id,
                                 key_path=Path(a.key) if a.key else None)
@@ -166,13 +219,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         doc = json.loads(Path(a.file).read_text())
         return _report(verify_receipt(doc, _public_key(a.public_key)),
                        f"record {doc.get('index')} ({doc.get('cid')}) is in log "
-                       f"{doc.get('log_id')} at checkpoint size {doc['checkpoint']['size']}")
+                       f"{doc.get('log_id')} at checkpoint size {doc['checkpoint']['size']}",
+                       "receipt")
 
     if a.cmd == "verify-consistency":
         doc = json.loads(Path(a.file).read_text())
         return _report(verify_consistency_doc(doc, _public_key(a.public_key)),
                        f"checkpoint size {doc['new']['size']} extends checkpoint size "
-                       f"{doc['old']['size']}")
+                       f"{doc['old']['size']}", "consistency")
 
     key = Path(a.key) if getattr(a, "key", None) else None
 
@@ -222,7 +276,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(json.dumps(log.checkpoint().to_json(), indent=2))
         return 0
     if a.cmd == "receipt":
-        _write(log.receipt(log.entry(a.ref)), a.out)
+        try:
+            e = log.entry(a.ref)
+        except (IndexError, KeyError, ValueError):
+            print(f"No record {a.ref} in this log ({len(log)} records). "
+                  f"See the record numbers with: aeos-receipts show {a.log}", file=sys.stderr)
+            return 1
+        _write(log.receipt(e), a.out)
         return 0
     if a.cmd == "consistency":
         cps = log.checkpoints()
@@ -236,7 +296,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     if a.cmd == "verify":
         rep = log.verify()
         return _report(rep.problems, f"{rep.records} records and {rep.checkpoints} signed "
-                                     f"checkpoints in {log.log_id}")
+                                     f"checkpoints in {log.log_id}", "log")
+    if a.cmd == "status":
+        print("\n".join(status.describe(status.summary(log), a.log)))
+        return 0
     if a.cmd == "show":
         entries = [log.entry(a.ref)] if a.ref else log.entries()
         for e in entries:
