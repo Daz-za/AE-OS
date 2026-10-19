@@ -12,14 +12,16 @@
 <header class="top">
   <div class="brand">AE<span class="dash">–</span>OS</div>
   <nav id="tabs" hidden>
-    <button data-view="overview" class="tab">Overview</button>
+    <button data-view="build" class="tab ws-only" hidden>Build</button>
+    <button data-view="try" class="tab ws-only" hidden>Try it</button>
+    <button data-view="overview" class="tab">Log</button>
     <button data-view="records" class="tab">Records</button>
     <button data-view="agents" class="tab">Agents</button>
     <button data-view="decisions" class="tab">Decisions</button>
     <button data-view="books" class="tab">Books</button>
     <button data-view="audit" class="tab" id="tab-audit" hidden>Audit</button>
     <button data-view="check" class="tab">Check a receipt</button>
-    <button data-view="start" class="tab tab-quiet">Open another log</button>
+    <button data-view="start" class="tab tab-quiet">Open another</button>
   </nav>
 </header>
 
@@ -27,50 +29,83 @@
   <p id="error" class="error" role="alert" hidden></p>
 
   <section id="view-start" class="view" hidden>
-    <h1>Record and check what your AI agents do</h1>
-    <p class="lead">A receipt log keeps a record of each tool an agent uses, who it acted for, and what came back, in a form that shows any later change. The owner can issue a receipt for any record, and an auditor checks it with the log's public key.</p>
+    <h1>Build your AE-OS</h1>
+    <p class="lead">Describe your company once: its people, its AI agents and what each may do, the systems they use, your rules and your books. Then run it here and see each agent call go through every check.</p>
     <div class="cards">
       <article class="card">
-        <h2>See an example</h2>
-        <p>The short example: an AI agent pays a supplier invoice, a controller approves it, and an auditor checks the evidence.</p>
-        <p>The full walk-through adds agent identities, signed authority, payment rules, books of account and witnesses, then runs the audit.</p>
-        <p class="muted">Each example is saved in a new folder here:</p>
-        <p class="path" id="cwd"></p>
+        <h2>Start from the example</h2>
+        <p>Acme, a fictional company, with an accounts payable agent, an example ERP, payment rules and books. Change anything you like.</p>
+        <form id="new-ws-form">
+          <label>New folder for your workspace
+            <input name="folder" placeholder="./my-aeos" autocomplete="off"></label>
+          <button class="primary">Create the workspace</button>
+        </form>
+      </article>
+      <article class="card">
+        <h2>Open a folder</h2>
+        <form id="open-form">
+          <label>A workspace, an evidence folder, or a log folder
+            <input name="folder" placeholder="./my-aeos" autocomplete="off" required></label>
+          <label>Signing key file (optional; needed only for a log made on another computer)
+            <input name="key" placeholder="only for a log made elsewhere" autocomplete="off"></label>
+          <button class="primary">Open</button>
+        </form>
+      </article>
+      <article class="card">
+        <h2>Watch a walk-through</h2>
+        <p>A narrated run of every part of AE-OS, from an agent's first call to the final audit.</p>
+        <p class="muted">Saved in a new folder in <span class="path" id="cwd"></span></p>
         <div class="actions">
           <button id="run-full" class="primary">Run the full walk-through</button>
           <button id="run-demo">Run the short example</button>
         </div>
       </article>
-      <article class="card">
-        <h2>Create a log</h2>
-        <form id="create-form">
-          <label>A short name, such as your organization and process
-            <input name="name" placeholder="acme-accounts-payable" autocomplete="off"></label>
-          <label>The agent's identity, written like a web address
-            <input name="agent" placeholder="spiffe://acme.example/agent/acme-accounts-payable" autocomplete="off"></label>
-          <label>How the agent's tool calls reach the log
-            <select name="mode" id="mode"></select></label>
-          <details>
-            <summary>Folder and signing key locations</summary>
-            <label>Folder for the log
-              <input name="log" placeholder="./acme-accounts-payable-log" autocomplete="off"></label>
-            <label>Signing key file (keep it where agents cannot read it)
-              <input name="key" placeholder="~/.config/aeos/keys/acme-accounts-payable.key" autocomplete="off"></label>
-          </details>
-          <button class="primary">Create the log</button>
-        </form>
-      </article>
-      <article class="card">
-        <h2>Open a log</h2>
-        <form id="open-form">
-          <label>Folder that holds log.json, or an evidence folder
-            <input name="folder" placeholder="./acme-accounts-payable-log" autocomplete="off" required></label>
-          <label>Signing key file (optional; needed to sign checkpoints)
-            <input name="key" placeholder="found automatically when setup created it" autocomplete="off"></label>
-          <button class="primary">Open</button>
-        </form>
-      </article>
     </div>
+    <details class="aside">
+      <summary>Already run an agent and only want to record its tool calls? Create a log</summary>
+      <form id="create-form" class="card">
+        <label>A short name, such as your organization and process
+          <input name="name" placeholder="acme-accounts-payable" autocomplete="off"></label>
+        <label>The agent's identity, written like a web address
+          <input name="agent" placeholder="spiffe://acme.example/agent/acme-accounts-payable" autocomplete="off"></label>
+        <label>How the agent's tool calls reach the log
+          <select name="mode" id="mode"></select></label>
+        <label>Folder for the log
+          <input name="log" placeholder="./acme-accounts-payable-log" autocomplete="off"></label>
+        <label>Signing key file (keep it where agents cannot read it)
+          <input name="key" placeholder="~/.config/aeos/keys/acme-accounts-payable.key" autocomplete="off"></label>
+        <button class="primary">Create the log</button>
+      </form>
+    </details>
+  </section>
+
+  <section id="view-build" class="view" hidden>
+    <div class="headline">
+      <h1 id="build-title">Build</h1>
+      <div class="actions tight">
+        <span id="build-status" class="muted"></span>
+        <button id="build-save" class="primary">Save and apply</button>
+        <button data-view="try" class="jump">Try it →</button>
+      </div>
+    </div>
+    <p class="path" id="build-file"></p>
+    <div id="build-problems" class="error" hidden></div>
+    <div id="build-map" class="flow" aria-label="How a call travels through your AE-OS"></div>
+    <div id="build-form"></div>
+  </section>
+
+  <section id="view-try" class="view" hidden>
+    <h1>Try it</h1>
+    <p>Act as one of your agents. Send a tool call and see the result of each check.</p>
+    <div id="try-scenarios" class="chips"></div>
+    <div class="try">
+      <form id="try-form" class="card"></form>
+      <div id="try-trace" class="card trace" aria-live="polite"></div>
+    </div>
+    <details class="aside" id="try-connect">
+      <summary>Connect your own agent</summary>
+      <div id="connect-body"></div>
+    </details>
   </section>
 
   <section id="view-overview" class="view" hidden>
@@ -90,6 +125,7 @@
     <div class="actions">
       <button id="verify" class="primary">Check the whole log</button>
       <button id="sign">Sign a checkpoint now</button>
+      <button id="seal" hidden>Seal and have the witnesses cosign</button>
       <button id="growth">Download a growth proof</button>
     </div>
     <div id="verify-result" class="chk-result" aria-live="polite"></div>
@@ -126,11 +162,13 @@
     <dl id="decision-counts" class="summary"></dl>
     <label class="inline"><input type="checkbox" id="decisions-all"> Also show the calls that were allowed</label>
     <div id="decisions-list" class="stack"></div>
+    <div id="decision-trace" class="card trace" hidden></div>
   </section>
 
   <section id="view-books" class="view" hidden>
     <h1>Books</h1>
     <p>The journal and trial balance, rebuilt from the entries in the log.</p>
+    <form id="period-form" class="inline-form ws-only" hidden></form>
     <div id="books-body"></div>
   </section>
 

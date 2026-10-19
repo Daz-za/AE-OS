@@ -105,6 +105,44 @@ class TrustDomain:
                                      self.root_key, self.root.subject, now,
                                      dt.timedelta(days=1), 0)
 
+    def save(self, folder: Path) -> None:
+        """Keep the CA keys and certificates (keys readable by the owner only)."""
+        folder.mkdir(parents=True, exist_ok=True)
+        for name, cert, key in (("root", self.root, self.root_key),
+                                ("intermediate", self.intermediate, self.int_key)):
+            (folder / f"{name}.pem").write_bytes(pem(cert))
+            path = folder / f"{name}.key"
+            path.write_bytes(key.private_bytes(serialization.Encoding.PEM,
+                                               serialization.PrivateFormat.PKCS8,
+                                               serialization.NoEncryption()))
+            path.chmod(0o600)
+
+    @classmethod
+    def load(cls, name: str, folder: Path) -> "TrustDomain":
+        """A trust domain saved earlier (see `refresh`)."""
+        td = cls.__new__(cls)
+        td.name = name
+        td.root = x509.load_pem_x509_certificate((folder / "root.pem").read_bytes())
+        td.root_key = serialization.load_pem_private_key((folder / "root.key").read_bytes(), None)
+        td.intermediate = x509.load_pem_x509_certificate(
+            (folder / "intermediate.pem").read_bytes())
+        td.int_key = serialization.load_pem_private_key(
+            (folder / "intermediate.key").read_bytes(), None)
+        td.refresh(folder)
+        return td
+
+    def refresh(self, folder: Path) -> bool:
+        """Replace an intermediate CA that expires within the hour, and save it."""
+        now = _now()
+        if self.intermediate.not_valid_after_utc - now >= dt.timedelta(hours=1):
+            return False
+        self.int_key = ec.generate_private_key(ec.SECP256R1())
+        self.intermediate = self._ca(_name(f"{self.name} intermediate CA"), self.int_key,
+                                     self.root_key, self.root.subject, now,
+                                     dt.timedelta(days=1), 0)
+        self.save(folder)
+        return True
+
     def _ca(self, subject: x509.Name, key, signer, issuer: x509.Name, now: dt.datetime,
             life: dt.timedelta, path_len: int) -> x509.Certificate:
         return (x509.CertificateBuilder().subject_name(subject).issuer_name(issuer)

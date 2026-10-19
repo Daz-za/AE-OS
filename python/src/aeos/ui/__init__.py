@@ -1,4 +1,8 @@
-"""A point-and-click view of a receipt log or an evidence folder in the web browser: `aeos ui`.
+"""A point-and-click view of a workspace, a receipt log or an evidence folder: `aeos ui`.
+
+With a workspace (see workspace.py) the page is also a builder and a playground: it
+edits workspace.json, runs the platform, sends tool calls as an agent and shows each
+check the call passed or failed.
 
 The page is served only to this computer (127.0.0.1). Each launch makes a fresh access
 code that is part of the address the browser opens. Other websites open in the same
@@ -17,13 +21,14 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
-from .. import audit, demo, fulldemo, report, setup, status
+from .. import audit, books, demo, fulldemo, report, setup, status, workspace
 from ..canon import cid_str
 from ..log import ReceiptLog, to_view
 
 HERE = Path(__file__).parent
 STATIC = {"/": ("index.html", "text/html"), "/app.js": ("app.js", "text/javascript"),
           "/check.js": ("check.js", "text/javascript"),
+          "/workspace.js": ("workspace.js", "text/javascript"),
           "/verify.js": ("verify.js", "text/javascript"),
           "/style.css": ("style.css", "text/css"), "/check.css": ("check.css", "text/css")}
 MAX_BODY = 1024 * 1024
@@ -60,6 +65,8 @@ class App:
         self.folder: Optional[Path] = None
         self.key: Optional[Path] = None
         self.evidence: Optional[Path] = None
+        self.platform: Optional[workspace.Platform] = None
+        self.started = False                  # True when this page runs the platform itself
         self.lock = threading.Lock()
         if folder is not None:
             self.open({"folder": str(folder), "key": str(key) if key else ""})
@@ -73,15 +80,40 @@ class App:
         out: Dict[str, Any] = {"folder": str(self.folder) if self.folder else None,
                                "key": str(self.key) if self.key else None,
                                "evidence": str(self.evidence) if self.evidence else None,
-                               "cwd": str(Path.cwd()), "modes": setup.MODES}
+                               "cwd": str(Path.cwd()), "modes": setup.MODES,
+                               "workspace": self.platform is not None}
+        if self.platform is not None:
+            out["organization"] = self.platform.doc["organization"]["name"]
         if self.folder is not None:
             s = status.summary(self._log())
             out["status"] = s
             out["lines"] = status.describe(s, str(self.folder))
         return out
 
+    def close(self) -> None:
+        """Stop the platform if this page started it."""
+        if self.platform is not None and self.started:
+            self.platform.stop()
+        self.platform, self.started = None, False
+
+    def _open_workspace(self, folder: Path) -> Dict[str, Any]:
+        self.close()
+        try:
+            self.platform, self.started = workspace.connect(folder)
+        except workspace.WorkspaceError as e:
+            raise UserError(f"The workspace cannot run yet: {e}. Fix workspace.json, or "
+                            f"run: aeos check {folder}") from None
+        self.folder = (folder / "log").resolve()
+        self.key = (folder / "private" / "log-signing.key").resolve()
+        self.evidence = folder.resolve()
+        return self.state({})
+
     def open(self, req: Dict[str, Any]) -> Dict[str, Any]:
-        folder, evidence = report.locate(Path(str(req.get("folder") or "")).expanduser())
+        given = Path(str(req.get("folder") or "")).expanduser()
+        if (given / workspace.FILE).exists():
+            return self._open_workspace(given)
+        self.close()
+        folder, evidence = report.locate(given)
         if not (folder / "log.json").exists():
             raise UserError(f"There is no receipt log in {folder}. Choose the folder that "
                             "holds log.json, or an evidence folder.")
@@ -104,9 +136,96 @@ class App:
             n += 1
         return folder
 
+    def new_workspace(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        folder = self._new_folder(req, "my-aeos")
+        try:
+            workspace.create(folder)
+        except workspace.WorkspaceError as e:
+            raise UserError(str(e)) from None
+        return self._open_workspace(folder)
+
+    def _platform(self) -> workspace.Platform:
+        if self.platform is None:
+            raise UserError("Open a workspace first, or start one from the example.")
+        return self.platform
+
+    def ws(self, _: Dict[str, Any]) -> Dict[str, Any]:
+        """The workspace as the builder and playground need it."""
+        p = self._platform()
+        doc = workspace.load(p.folder)
+        erp = [s for s in doc.get("systems") or [] if s.get("type") == "example-erp"]
+        invoices = []
+        for s in erp:
+            state = p.private / "state" / f"{s['id']}.json"
+            paid = json.loads(state.read_text()) if state.exists() else {}
+            invoices += [{**i, "amount_minor": workspace.minor(i["amount"]),
+                          "status": "paid" if i["invoice"] in paid else i.get("status")}
+                         for i in s.get("invoices") or []]
+        ledger = p.ledger
+        return {"doc": doc, "running": p.doc, "folder": str(p.folder),
+                "file": str(p.folder / workspace.FILE),
+                "problems": workspace.check(doc, p.folder),
+                "tools": workspace.tool_names(p.doc, p.folder),
+                "served_here": self.started, "port": p.port or
+                (workspace.running(p.folder) or {}).get("port"),
+                "connect": str(p.private / "connect"), "invoices": invoices,
+                "periods": dict(sorted(ledger.periods.items())) if ledger else {},
+                "domain": p.domain, "names": p.names(),
+                "changed": doc != p.doc}
+
+    def ws_save(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        """Save workspace.json; when this page runs the platform, restart it to apply."""
+        p = self._platform()
+        doc = req.get("doc")
+        problems = workspace.check(doc, p.folder)
+        if problems:
+            return {"saved": False, "problems": problems}
+        workspace.save(p.folder, doc)
+        if self.started:
+            self._open_workspace(p.folder)
+            return {"saved": True, "applied": True, **self.ws({})}
+        return {"saved": True, "applied": False, **self.ws({})}
+
+    def ws_call(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        p = self._platform()
+        args = req.get("args") or {}
+        if not isinstance(args, dict):
+            raise UserError("The arguments must be a JSON object, such as {\"invoice\": \"INV-1001\"}.")
+        try:
+            return p.call(str(req.get("agent")), str(req.get("tool")), args)
+        except workspace.WorkspaceError as e:
+            raise UserError(str(e)) from None
+
+    def ws_approve(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        p = self._platform()
+        try:
+            return p.approve(str(req.get("escalation")), str(req.get("person")),
+                             "reject" if req.get("verdict") == "reject" else "approve")
+        except workspace.WorkspaceError as e:
+            raise UserError(str(e)) from None
+
+    def ws_period(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        p = self._platform()
+        try:
+            p.change_period(str(req.get("period")), "open" if req.get("state") == "open"
+                            else "closed", str(req.get("person")))
+        except (workspace.WorkspaceError, books.Refused) as e:
+            raise UserError(str(e)) from None
+        return self.ws({})
+
+    def ws_seal(self, _: Dict[str, Any]) -> Dict[str, Any]:
+        return self._platform().seal()
+
+    def trace(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            return report.trace(self._log(), str(req.get("ref", "")), self._names())
+        except (IndexError, KeyError, ValueError) as e:
+            raise UserError(f"No tool call found for record {req.get('ref')}: {e}") from None
+
     def full_demo(self, req: Dict[str, Any]) -> Dict[str, Any]:
         folder = self._new_folder(req, "aeos-full-demo")
         lines: List[str] = []
+        self.close()
         if fulldemo.run(folder, out=lines.append) != 0:
             raise UserError("The walk-through stopped: " + " ".join(lines[-3:]))
         self.open({"folder": str(folder)})
@@ -127,8 +246,20 @@ class App:
     def agents(self, _: Dict[str, Any]) -> Dict[str, Any]:
         return report.agents(self._log())
 
+    def _names(self) -> Dict[str, str]:
+        if self.platform is not None:
+            return self.platform.names()
+        return workspace.names_of(self.evidence) if self.evidence else {}
+
     def decisions(self, req: Dict[str, Any]) -> Dict[str, Any]:
-        return report.decisions(self._log(), everything=str(req.get("all")) in ("1", "true"))
+        view = report.decisions(self._log(), everything=str(req.get("all")) in ("1", "true"))
+        names = self._names()
+        for d in view["decisions"]:
+            for k in ("agent", "on_behalf_of"):
+                d[k] = names.get(d.get(k) or "", d.get(k))
+            for a in d["approvals"]:
+                a["by"] = names.get(a.get("by") or "", a.get("by"))
+        return view
 
     def books(self, _: Dict[str, Any]) -> Dict[str, Any]:
         return report.books_view(self._log(), report.chart(self.evidence))
@@ -136,6 +267,7 @@ class App:
     def demo(self, req: Dict[str, Any]) -> Dict[str, Any]:
         folder = self._new_folder(req, "aeos-demo")
         lines: List[str] = []
+        self.close()
         demo.run(folder, out=lines.append)
         self.folder, self.key = (folder / "log").resolve(), (folder / "log" / "signing.key").resolve()
         self.evidence = None
@@ -148,6 +280,7 @@ class App:
                 for k in ("log", "name", "key", "agent", "mode")}
         if opts["mode"] is not None and opts["mode"] not in setup.MODES:
             raise UserError("Choose how the agent's tool calls reach the log.")
+        self.close()
         if setup.run(wizard, **opts) != 0:
             raise UserError(" ".join(x.strip() for x in lines[1:] if x.strip()))
         slug = setup._slug(opts["name"] or "acme-accounts-payable")
@@ -212,6 +345,10 @@ ROUTES: Dict[Tuple[str, str], Callable[[App, Dict[str, Any]], Dict[str, Any]]] =
     ("GET", "/api/growth"): App.growth, ("POST", "/api/full-demo"): App.full_demo,
     ("POST", "/api/audit"): App.audit, ("GET", "/api/agents"): App.agents,
     ("GET", "/api/decisions"): App.decisions, ("GET", "/api/books"): App.books,
+    ("GET", "/api/trace"): App.trace, ("POST", "/api/new-workspace"): App.new_workspace,
+    ("GET", "/api/ws"): App.ws, ("POST", "/api/ws/save"): App.ws_save,
+    ("POST", "/api/ws/call"): App.ws_call, ("POST", "/api/ws/approve"): App.ws_approve,
+    ("POST", "/api/ws/period"): App.ws_period, ("POST", "/api/ws/seal"): App.ws_seal,
 }
 
 
@@ -281,7 +418,7 @@ def make_handler(app: App, code: str, port_ref: List[int]):
             try:
                 with app.lock:
                     self._json(200, route(app, req))
-            except UserError as e:
+            except (UserError, workspace.WorkspaceError, books.Refused) as e:
                 self._json(400, {"error": str(e)})
             except (OSError, ValueError, KeyError) as e:
                 self._json(500, {"error": f"Something went wrong: {e}"})
@@ -318,5 +455,6 @@ def serve(folder: Optional[Path] = None, key: Optional[Path] = None, port: int =
         out("\nClosed.")
     finally:
         server.server_close()
+        app.close()
     return 0
 

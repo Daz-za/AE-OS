@@ -34,6 +34,7 @@ def page(tmp_path, monkeypatch):
     yield call
     server.shutdown()
     server.server_close()
+    app.close()
 
 
 def test_static_files_are_served_and_packaged(page):
@@ -116,3 +117,33 @@ def test_full_walk_through_shows_agents_decisions_books_and_audit(page, tmp_path
     assert status == 200 and json.loads(body)["evidence"] == state["evidence"]
     page("/api/demo", {})                                     # the short example has no evidence
     assert page("/api/audit", {})[0] == 400
+
+
+def test_workspace_build_try_and_trace(page, tmp_path):
+    status, body = page("/api/new-workspace", {"folder": str(tmp_path / "acme")})
+    assert status == 200 and json.loads(body)["workspace"]
+    ws = json.loads(page("/api/ws")[1])
+    assert ws["problems"] == [] and "erp.invoice.pay" in ws["tools"]
+
+    doc = ws["doc"]
+    doc["agents"][0]["authorized_by"] = "nobody"
+    saved = json.loads(page("/api/ws/save", {"doc": doc})[1])
+    assert not saved["saved"] and saved["problems"]
+    doc["agents"][0]["authorized_by"] = "controller"
+    doc["rules"]["approval_above"] = "100.00"
+    saved = json.loads(page("/api/ws/save", {"doc": doc})[1])
+    assert saved["saved"] and saved["applied"]
+
+    status, body = page("/api/ws/call", {"agent": "accounts-payable", "tool": "erp.invoice.pay",
+                                         "args": {"invoice": "INV-1001", "amount_minor": 420000}})
+    answer = json.loads(body)
+    assert answer["trace"]["outcome"] == "waiting"
+    status, body = page("/api/ws/approve", {"escalation": answer["trace"]["escalation"],
+                                            "person": "cfo"})
+    assert json.loads(body)["trace"]["outcome"] == "done"
+    trace = json.loads(page(f"/api/trace?ref={answer['trace']['call']}")[1])
+    assert trace["outcome"] == "answered"
+    decisions = json.loads(page("/api/decisions")[1])["decisions"]
+    assert decisions[0]["agent"] == "Accounts payable agent"
+    assert json.loads(page("/api/ws/seal", {})[1])["witnesses"]
+    assert json.loads(page("/api/audit", {})[1])["ok"]

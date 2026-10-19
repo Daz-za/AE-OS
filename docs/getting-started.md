@@ -59,9 +59,9 @@ To update later, run `pipx upgrade aeos`. If you installed it under its earlier 
 aeos ui
 ```
 
-This opens a page in your web browser where you can run the examples, create a log, look through its records and check receipts, without typing further commands. After the full walk-through, the Agents, Decisions, Books and Audit tabs show who acted, what was refused and why, the books of account and the auditor's check. The page runs on your computer only. Close it by pressing Ctrl+C in the terminal.
+This opens a page in your web browser. Choose **Create the workspace** to start from Acme, an example company. The **Build** tab describes the company: its people, its AI agents and what each may do, the systems with their tools, the rules, the books and the witnesses. The **Try it** tab lets you act as an agent, send a tool call, and watch it pass or fail each check. The page can also run the examples and open any log. It runs on your computer only. Close it by pressing Ctrl+C in the terminal.
 
-The rest of this guide does the same things with commands.
+When you are ready to connect your own tools, rules or agents, read [building.md](building.md). The rest of this guide covers the commands for recording and checking a log.
 
 ## 3. See an example
 

@@ -318,10 +318,11 @@ def _check_books(log: ReceiptLog, principal_keys: Dict[str, bytes], setup: Dict[
     if s["signers"]:
         text += (". The period changes are signed by the controller"
                  + ("s " if len(s["signers"]) > 1 else " ") + ", ".join(s["signers"]))
-    text += (f". The trial balance rebuilt from the entries shows "
-             f"{delegation.money(s['debits'], cur)} of debits and "
-             f"{delegation.money(s['credits'], cur)} of credits"
-             + ("" if not found else " (except as listed below)"))
+    if n:
+        text += (f". The trial balance rebuilt from the entries shows "
+                 f"{delegation.money(s['debits'], cur)} of debits and "
+                 f"{delegation.money(s['credits'], cur)} of credits")
+    text += "" if not found else " (except as listed below)"
     findings.append(text)
 
 

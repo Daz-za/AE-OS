@@ -32,20 +32,20 @@ The image above is a frame from the film on [ae-os.org](https://ae-os.org), whic
 | [`python/`](python/) | `aeos`, the Python library and command line (first called `aeos-receipts`). It records agents' tool calls from MCP servers, gateways, OpenTelemetry traces and Claude Code hooks, and includes a preview of identities, delegated authority, policy, books of account, an MCP gateway and witnesses |
 | [`rust/`](rust/) | `aeos-verify`, a separate verifier in Rust, sharing no code with the Python library, that auditors can use to check receipts, consistency proofs and whole logs |
 | [`testvectors/`](testvectors/) | Shared test vectors that keep the Python, Rust and browser implementations in agreement |
-| [`docs/`](docs/) | A getting-started guide for people new to the command line |
+| [`docs/`](docs/) | A getting-started guide for people new to the command line, and a guide to building your own AE-OS |
 | [`examples/`](examples/) | A worked example: an agent pays an invoice, and an auditor checks the evidence |
 
 ## Quick start
 
 ```
 pipx install "git+https://github.com/Daz-za/ae-os#subdirectory=python"
-aeos ui        # work in your web browser: run the examples, create or open a log
-aeos demo      # the same example, explained step by step in the terminal
-aeos setup     # answer a few questions to create your own log
-aeos demo --full   # identities, delegated authority, policy, books, an MCP gateway and witnesses
+aeos new my-aeos   # describe your organization in one file, starting from an example
+aeos ui my-aeos    # build it and try calls as an agent in your web browser
+aeos up my-aeos    # run it for your own agents to connect to
+aeos demo --full   # a narrated walk-through of every part, ending with an audit
 ```
 
-New to the command line? [docs/getting-started.md](docs/getting-started.md) walks through installing on Linux, macOS and Windows.
+New to the command line? [docs/getting-started.md](docs/getting-started.md) walks through installing on Linux, macOS and Windows. [docs/building.md](docs/building.md) shows how to connect your own tools, rules and agents.
 
 To work on the code, clone the repository and run `pip install -e python`.
 
