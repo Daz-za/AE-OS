@@ -8,7 +8,9 @@ here=$(cd "$(dirname "$0")" && pwd)
 out="$here/../python/src/aeos/policies/payments.wasm"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-opa build -t wasm -e aeos/payments/decision "$here/payments.rego" -o "$tmp/bundle.tar.gz"
+# Build from inside policy/ so the module records the relative file name, not this
+# machine's path, and every checkout builds the same bytes.
+(cd "$here" && opa build -t wasm -e aeos/payments/decision payments.rego -o "$tmp/bundle.tar.gz")
 tar -xzf "$tmp/bundle.tar.gz" -C "$tmp" /policy.wasm 2>/dev/null || tar -xzf "$tmp/bundle.tar.gz" -C "$tmp"
 if [ "${1:-}" = "--check" ]; then
   if cmp -s "$tmp/policy.wasm" "$out"; then
