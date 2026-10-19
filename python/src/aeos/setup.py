@@ -34,11 +34,6 @@ def default_key_dir() -> Path:
     return Path(base) / "aeos" / "keys"
 
 
-def earlier_key_dir() -> Path:
-    """Where keys were kept when the package was called aeos-receipts."""
-    return default_key_dir().parent.parent / "aeos-receipts" / "keys"
-
-
 class Wizard:
     def __init__(self, ask: Callable[[str], str] = input, out: Callable[[str], None] = print,
                  assume_defaults: bool = False) -> None:

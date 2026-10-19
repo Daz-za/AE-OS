@@ -32,10 +32,10 @@ The exit status is 0 when the evidence is valid, 1 when it is invalid, and 2 for
 
 ## Use it as a library
 
-The library crate is `aeos-receipts`; the command-line binary is `aeos-verify`.
+The library crate and the command-line binary are both called `aeos-verify`.
 
 ```rust
-use aeos_receipts::verify_receipt;
+use aeos_verify::verify_receipt;
 
 let public_key: Vec<u8> = /* the log's 32-byte Ed25519 public key */;
 let receipt: serde_json::Value = serde_json::from_str(&std::fs::read_to_string("receipt.json")?)?;

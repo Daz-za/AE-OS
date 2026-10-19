@@ -51,7 +51,7 @@ On every system, close and reopen the terminal after `pipx ensurepath` so it can
 aeos --version
 ```
 
-To update later, run the install command above again with `--force` at the end. `pipx upgrade` does not fetch new code for a tool installed from GitHub. If you installed it under its earlier name, run `pipx uninstall aeos-receipts` and then the install command above.
+To update later, run the install command above again with `--force` at the end. `pipx upgrade` does not fetch new code for a tool installed from GitHub.
 
 ## 2. Work in your web browser
 

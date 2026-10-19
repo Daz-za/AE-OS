@@ -29,7 +29,7 @@ The image above is a frame from the film on [ae-os.org](https://ae-os.org), whic
 | [`spec/receipts-v0.md`](spec/receipts-v0.md) | AE-OS Receipts format: records, Merkle log, signed checkpoints, receipts and consistency proofs |
 | [`spec/identity-and-witnesses-draft.md`](spec/identity-and-witnesses-draft.md) | Draft: SPIFFE identities, delegated authority, policy and approvals, books of account, the mutual-TLS gateway, witness cosignatures and evidence folders |
 | [`policy/`](policy/) | The example payment rules in Rego, and the script that compiles them to WebAssembly |
-| [`python/`](python/) | `aeos`, the Python library and command line (first called `aeos-receipts`). It records agents' tool calls from MCP servers, gateways, OpenTelemetry traces and Claude Code hooks, and includes a preview of identities, delegated authority, policy, books of account, an MCP gateway and witnesses |
+| [`python/`](python/) | `aeos`, the Python library and command line. It records agents' tool calls from MCP servers, gateways, OpenTelemetry traces and Claude Code hooks, and includes a preview of identities, delegated authority, policy, books of account, an MCP gateway and witnesses |
 | [`rust/`](rust/) | `aeos-verify`, a separate verifier in Rust, sharing no code with the Python library, that auditors can use to check receipts, consistency proofs and whole logs |
 | [`testvectors/`](testvectors/) | Shared test vectors that keep the Python, Rust and browser implementations in agreement |
 | [`docs/`](docs/) | A getting-started guide for people new to the command line, and a guide to building your own AE-OS |

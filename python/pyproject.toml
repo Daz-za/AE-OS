@@ -22,7 +22,6 @@ test = ["pytest>=7"]
 
 [project.scripts]
 aeos = "aeos.cli:main"
-aeos-receipts = "aeos.cli:main"   # the earlier name, kept so existing scripts work
 
 [project.urls]
 Homepage = "https://ae-os.org"

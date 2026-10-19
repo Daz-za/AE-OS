@@ -15,8 +15,6 @@ pip install -e python          # or, from a clone of this repository
 
 Then run `aeos ui` to work in your web browser, or try `aeos demo` and create a log of your own with `aeos setup`. The [getting-started guide](../docs/getting-started.md) covers each step for people new to the command line.
 
-This package was first called `aeos-receipts`. The `aeos-receipts` command and `import aeos_receipts` remain available as aliases of `aeos`. Logs set up under the earlier name keep their signing keys in `~/.config/aeos-receipts/keys/`, where `aeos ui` still finds them.
-
 Requires Python 3.10 or later, with the `cryptography`, `biscuit-python` and `wasmtime` packages (installed automatically). Rebuilding the example policy needs [OPA](https://www.openpolicyagent.org/); running it does not.
 
 ## Record an agent's MCP tool calls
