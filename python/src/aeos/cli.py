@@ -14,18 +14,24 @@
     aeos ingest LOG FILE --agent ID [--format events|otlp]
     aeos hook LOG --agent ID [--allow-tool T]...      (Claude Agent SDK / Claude Code)
     aeos agents FOLDER | aeos decisions FOLDER [--all] | aeos books FOLDER   [--json]
+    aeos trace FOLDER REF [--json]
+    aeos new FOLDER | aeos check FOLDER | aeos up FOLDER [--port N]
+    aeos call FOLDER --as AGENT TOOL [key=value]... [--approve-as PERSON] [--json]
+    aeos period FOLDER YYYY-MM open|close --as PERSON | aeos seal FOLDER
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import signal
 import sys
+import threading
 from pathlib import Path
 from typing import List, Optional
 
 from . import (__version__, audit, demo, fulldemo, hooks, mcp_proxy, report, setup, sink,
-               status, ui)
+               status, ui, workspace)
 from .canon import cid_parse, cid_str
 from .log import ReceiptLog, make_record, to_view, verify_consistency_doc, verify_receipt
 from .recorder import Recorder
@@ -209,6 +215,39 @@ def main(argv: Optional[List[str]] = None) -> int:
             p.add_argument("--all", action="store_true", help="include the calls that were "
                            "allowed")
 
+    p = sub.add_parser("trace", help="show each check one tool call passed or failed")
+    p.add_argument("folder", help="a log folder, an evidence folder or a workspace")
+    p.add_argument("ref", help="the call's record number or CID (see aeos decisions --all)")
+    p.add_argument("--json", action="store_true", help="print JSON instead of text")
+
+    p = sub.add_parser("new", help="create a workspace: one file describing your company's "
+                       "people, agents, tools, rules and books")
+    p.add_argument("folder")
+    p = sub.add_parser("check", help="find mistakes in a workspace's workspace.json")
+    p.add_argument("folder")
+    p = sub.add_parser("up", help="run a workspace: identities, gateway, rules, books and log")
+    p.add_argument("folder")
+    p.add_argument("--port", type=int, default=0, help="the gateway's port on 127.0.0.1 "
+                   "(default: any free)")
+    p = sub.add_parser("call", help="make one tool call as one of a workspace's agents and "
+                       "show each check")
+    p.add_argument("folder")
+    p.add_argument("--as", dest="agent", required=True, help="the agent's id")
+    p.add_argument("tool")
+    p.add_argument("args", nargs="*", help="arguments as key=value, such as invoice=INV-1001")
+    p.add_argument("--approve-as", help="if the call is sent for approval, approve it as "
+                   "this person and repeat it")
+    p.add_argument("--json", action="store_true", help="print JSON instead of text")
+    p = sub.add_parser("period", help="open or close a month in the books, signed by a "
+                       "controller")
+    p.add_argument("folder")
+    p.add_argument("period", help="the month, as YYYY-MM")
+    p.add_argument("state", choices=["open", "close"])
+    p.add_argument("--as", dest="person", required=True, help="the controller's id")
+    p = sub.add_parser("seal", help="sign a checkpoint of a workspace's log and have the "
+                       "witnesses cosign it")
+    p.add_argument("folder")
+
     argv = list(sys.argv[1:] if argv is None else argv)
     server_cmd: List[str] = []
     if "--" in argv:                       # everything after -- is the MCP server command
@@ -247,6 +286,26 @@ def main(argv: Optional[List[str]] = None) -> int:
             _write(view, None)
         else:
             print("\n".join(lines(view)))
+        return 0
+    if a.cmd in ("new", "check", "up", "call", "period", "seal"):
+        try:
+            return _workspace(a)
+        except workspace.WorkspaceError as e:
+            print(f"aeos {a.cmd}: {e}", file=sys.stderr)
+            return 2
+    if a.cmd == "trace":
+        folder, evidence = report.locate(Path(a.folder))
+        log = ReceiptLog.open(folder, read_only=True)
+        names = workspace.names_of(evidence) if evidence else {}
+        try:
+            view = report.trace(log, a.ref, names)
+        except (IndexError, KeyError, ValueError) as e:
+            print(f"aeos trace: {e}", file=sys.stderr)
+            return 2
+        if a.json:
+            _write(view, None)
+        else:
+            print("\n".join(report.lines_trace(view)))
         return 0
     if a.cmd == "setup":
         wizard = setup.Wizard(assume_defaults=a.yes)
@@ -361,6 +420,82 @@ def main(argv: Optional[List[str]] = None) -> int:
                              allow_tools=a.allow_tool, store_content=a.store_content,
                              checkpoint_every=a.checkpoint_every)
     return 2
+
+
+def _workspace(a: argparse.Namespace) -> int:
+    folder = Path(a.folder)
+    if a.cmd == "new":
+        workspace.create(folder)
+        print(f"Created {folder / workspace.FILE}: Acme, an example company with people, "
+              "agents, an example ERP, payment rules and books.\nNext:")
+        print(f"  aeos ui {folder}      build and try it in your web browser")
+        print(f"  aeos up {folder}      run it here, for agents to connect to")
+        return 0
+    if a.cmd == "check":
+        problems = workspace.check(workspace.load(folder), folder)
+        if problems:
+            print("Fix these in workspace.json:")
+            for p in problems:
+                print(f"  - {p}")
+            return 1
+        print("Ready: the workspace can run.")
+        return 0
+    if a.cmd == "up":
+        if workspace.running(folder):
+            print(f"{folder} is already running.", file=sys.stderr)
+            return 2
+        p = workspace.Platform(folder)
+        port = p.start(port=a.port)
+        print(f"{p.doc['organization']['name']} is running. The gateway listens on "
+              f"127.0.0.1:{port} as {p.gateway_id}.")
+        print("Each agent connects with the files in "
+              f"{p.private / 'connect'}/<agent>/ (certificate, key, token, gateway.json):")
+        for ag in p.doc["agents"]:
+            print(f"  {ag['id']:<20} {', '.join(ag.get('tools') or [])}")
+        print(f"Try it from another terminal:  aeos call {folder} --as "
+              f"{p.doc['agents'][0]['id']} TOOL key=value")
+        print("Press Ctrl+C to stop; the log is then sealed and cosigned.")
+
+        def interrupt(*_: object) -> None:
+            raise KeyboardInterrupt
+        signal.signal(signal.SIGTERM, interrupt)
+        try:
+            threading.Event().wait()
+        except KeyboardInterrupt:
+            pass
+        p.stop()
+        print("Stopped. Check the evidence with:  aeos audit " + str(folder))
+        return 0
+    p, started = workspace.connect(folder)
+    try:
+        if a.cmd == "seal":
+            got = p.seal()
+            print(f"Sealed {got['size']} records; cosigned by {', '.join(got['witnesses'])}.")
+            return 0
+        if a.cmd == "period":
+            state = "open" if a.state == "open" else "closed"
+            p.change_period(a.period, state, a.person)
+            print(f"{a.period} is {state}, signed by {a.person}.")
+            return 0
+        out = p.call(a.agent, a.tool, workspace.parse_args(a.args))
+        answers = [out]
+        esc = (out.get("trace") or {}).get("escalation")
+        if esc and a.approve_as and (out.get("trace") or {}).get("outcome") == "waiting":
+            answers.append(p.approve(esc, a.approve_as))
+        if a.json:
+            _write({"answers": answers}, None)
+            return 0 if answers[-1]["ok"] else 1
+        for ans in answers:
+            if ans.get("trace"):
+                print("\n".join(report.lines_trace(ans["trace"])))
+            print("Answer: " + (json.dumps(ans["result"]) if ans.get("result") is not None
+                                else ans["text"]))
+        if esc and not a.approve_as:
+            print("To approve it, repeat the call with --approve-as PERSON.")
+        return 0 if answers[-1]["ok"] else 1
+    finally:
+        if started:
+            p.stop()
 
 
 if __name__ == "__main__":

@@ -155,7 +155,41 @@ class Books:
         self.entries: Dict[str, Tuple[Entry, Dict[str, Any]]] = {}   # document -> record
         self.reversed: Dict[str, str] = {}                            # document -> reversal
         self.next_number: Dict[str, int] = {}                         # year -> next number
+        self._scanned = 0
         self._lock = threading.Lock()
+
+    def restore(self) -> "Books":
+        """Rebuild periods, entries and numbering from what this log already holds."""
+        with self._lock:
+            self._catch_up()
+        return self
+
+    def _catch_up(self) -> None:
+        """Apply records added since the last look, such as a period change signed in
+        another process. Applying a record twice changes nothing."""
+        entries = self.log.entries()
+        for e in entries[self._scanned:]:
+            rec = self.log.record(e)
+            body = rec.get("body") or {}
+            if body.get("entity") != self.entity or body.get("ledger") != self.ledger:
+                continue
+            if rec.get("kind") == "period.transition":
+                try:
+                    t = PeriodTransition(**{k: body[k] for k in ("entity", "ledger", "period",
+                                                                 "state", "by", "time")},
+                                         signature=body["signature"])
+                except (KeyError, TypeError):
+                    continue
+                if t.by in self.controllers and t.verify(self.controllers[t.by]):
+                    self.periods[t.period] = t.state
+            elif rec.get("kind") == "journal.entry" and rec.get("agent") == self.agent:
+                document = str(body["document"])
+                self.entries[document] = (e, rec)
+                if body.get("reverses"):
+                    self.reversed[str(body["reverses"])] = document
+                year, number = document.rsplit("/", 2)[-2:]
+                self.next_number[year] = max(self.next_number.get(year, 1), int(number) + 1)
+        self._scanned = len(entries)
 
     def transition(self, t: PeriodTransition) -> Entry:
         """Record a controller's signed period change and apply it."""
@@ -167,6 +201,7 @@ class Books:
         if t.by not in self.controllers or not t.verify(self.controllers[t.by]):
             raise Refused(["the period change is not signed by a controller"])
         with self._lock:
+            self._catch_up()
             e = self.log.append(make_record(
                 "period.transition", t.by, subject=f"{t.entity}/{t.ledger}/{t.period}",
                 body={**t.fields(), "signature": t.signature}))
@@ -187,6 +222,7 @@ class Books:
         {"date", "text", "reverses": "<document>"} to reverse an earlier entry.
         """
         with self._lock:
+            self._catch_up()
             date, reverses = args.get("date"), args.get("reverses")
             original = None
             if reverses is not None:

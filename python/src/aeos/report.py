@@ -126,15 +126,18 @@ def decisions(log: ReceiptLog, everything: bool = False) -> Dict[str, Any]:
             for ref in refs:
                 approvals.setdefault(ref, []).append(answer)
     calls: Dict[str, Dict[str, Any]] = {}
+    call_index: Dict[str, int] = {}
     for e in log.entries():
         rec = log.record(e)
         if rec.get("kind") == "tool.call":
             calls[cid_str(e.cid)] = rec
+            call_index[cid_str(e.cid)] = e.index
         if rec.get("kind") != "policy.decision":
             continue
         # The books record their refusals under their own identity; the call names the caller.
-        call = next((calls[cid_str(p)] for p in rec.get("parents") or []
-                     if cid_str(p) in calls), None)
+        parent = next((cid_str(p) for p in rec.get("parents") or [] if cid_str(p) in calls),
+                      None)
+        call = calls[parent] if parent else None
         caller = call or rec
         body = rec.get("body") or {}
         check = CHECKS.get(str(body.get("policy")), str(body.get("policy")))
@@ -149,6 +152,8 @@ def decisions(log: ReceiptLog, everything: bool = False) -> Dict[str, Any]:
         if body.get("amount"):
             item["amount"] = money(int(body["amount"]), str(body.get("currency") or "USD"))
         item["approvals"] = approvals.get(cid_str(e.cid), [])
+        if parent:
+            item["call"] = call_index[parent]
         items.append(item)
     return {"counts": {k: dict(v) for k, v in counts.items()}, "decisions": items,
             "everything": everything}
@@ -208,6 +213,147 @@ def books_view(log: ReceiptLog, accounts: Optional[Dict[str, str]] = None) -> Di
                          "balanced": debits == credits}
         out.append(led)
     return {"ledgers": out, "refused": refused}
+
+
+# The checks a gateway call passes, in the order the gateway runs them.
+STEPS = [("identity", "Identity"), ("allow", "Allow list"), ("authority", "Delegated authority"),
+         ("approval", "Approval"), ("rules", "Rules"), ("tool", "Tool"),
+         ("books", "Books of account"), ("receipt", "Receipt")]
+
+
+def trace(log: ReceiptLog, ref: str, names: Optional[Dict[str, str]] = None
+          ) -> Dict[str, Any]:
+    """Each check one tool call passed or failed, from the records linked to it.
+
+    `ref` is the call's index or CID, or the index or CID of any record linked to it.
+    `names` gives readable names for SPIFFE IDs, such as a workspace's people and agents.
+    Each step has a state: "pass", "fail", "wait" (sent to a person), or "skip" (not
+    reached, or not part of this setup).
+    """
+    entries = log.entries()
+    target = log.entry(str(ref))
+    rec = log.record(target)
+    if rec.get("kind") != "tool.call":
+        cids = {cid_str(e.cid): e for e in entries}
+        parent = next((cids[cid_str(p)] for p in reversed(rec.get("parents") or [])
+                       if cid_str(p) in cids
+                       and log.record(cids[cid_str(p)]).get("kind") == "tool.call"), None)
+        if parent is None:
+            raise ValueError(f"record {target.index} is not a tool call and is not linked to one")
+        target, rec = parent, log.record(parent)
+    call_cid, tool = target.cid, str(rec.get("subject"))
+
+    def nm(who: Any) -> str:
+        return (names or {}).get(str(who), str(who))
+
+    linked = [(e, log.record(e)) for e in entries[target.index + 1:]]
+    linked = [(e, r) for e, r in linked if call_cid in (r.get("parents") or [])]
+    session = None
+    if rec.get("parents"):
+        try:
+            session = log.record(log.entry(cid_str(rec["parents"][0])))
+        except (KeyError, IndexError):
+            session = None
+    sbody = (session or {}).get("body") or {}
+    steps: Dict[str, Dict[str, Any]] = {k: {"step": k, "label": label, "state": "skip",
+                                            "text": ""} for k, label in STEPS}
+
+    def put(key: str, state: str, text: str, index: Optional[int] = None) -> None:
+        steps[key].update(state=state, text=text)
+        if index is not None:
+            steps[key]["record"] = index
+
+    if sbody.get("authenticated_by") == "x509-svid-mtls":
+        put("identity", "pass", f"Proved it is {nm(rec.get('agent'))} with certificate "
+            f"{bytes(sbody['svid_sha256']).hex()[:12]}… over mutual TLS")
+    else:
+        put("identity", "skip", f"Named as {nm(rec.get('agent'))}; no certificate was checked")
+    escalation = None
+    for e, r in linked:
+        body = r.get("body") or {}
+        policy, decision = body.get("policy"), body.get("decision")
+        reasons = "; ".join(REASONS.get(x, x) for x in body.get("reasons") or [])
+        if r.get("kind") == "policy.decision" and policy == "aeos-allow-list/v0":
+            put("allow", "fail", f"{tool} is not on this agent's list of tools", e.index)
+        elif r.get("kind") == "policy.decision" and policy == "aeos-capability/v0":
+            if decision == "allow":
+                amount = body.get("amount") or 0
+                put("authority", "pass", f"Within the authority {nm(r.get('obo'))} signed"
+                    + (f", for {money(int(amount), str(body.get('currency') or 'USD'))}"
+                       if amount else ""), e.index)
+            else:
+                put("authority", "fail", reasons, e.index)
+        elif r.get("kind") == "approval":
+            who, answer = body.get("approver") or r.get("agent"), body.get("decision")
+            put("approval", "pass" if answer == "approve" else "fail",
+                f"{'Approved' if answer == 'approve' else 'Rejected'} by {nm(who)}, "
+                "with a signature over this exact call", e.index)
+        elif r.get("kind") == "policy.decision" and policy == "aeos-policy/v0":
+            if decision == "allow":
+                put("rules", "pass", "The rules allow it", e.index)
+            elif decision == "escalate":
+                escalation = cid_str(e.cid)
+                put("rules", "wait", f"Sent to a person: {reasons}", e.index)
+                put("approval", "wait", "Waiting for someone on the approvers list", e.index)
+            else:
+                put("rules", "fail", reasons, e.index)
+        elif r.get("kind") == "policy.decision" and policy == "aeos-books/v0":
+            put("books", "fail", reasons, e.index)
+        elif r.get("kind") == "journal.entry":
+            put("books", "pass", f"Booked as document {body.get('document')}", e.index)
+        elif r.get("kind") == "tool.result":
+            if body.get("outcome") == "error":
+                put("tool", "fail", "The tool ran and reported an error"
+                    if steps["books"]["state"] != "fail" else "The books refused the entry",
+                    e.index)
+            else:
+                put("tool", "pass", f"{tool} ran", e.index)
+    if sbody.get("allow_list") is not None and steps["allow"]["state"] == "skip":
+        put("allow", "pass", f"{tool} is on this agent's list of tools")
+    if sbody.get("authorization") and steps["authority"]["state"] == "skip":
+        put("authority", "fail", "No decision was recorded")
+    if steps["rules"]["state"] == "skip" and "policy_sha256" not in sbody:
+        steps["rules"]["text"] = "No rules are set for this gateway"
+    if steps["authority"]["state"] == "skip" and not sbody.get("authorization"):
+        steps["authority"]["text"] = "This gateway does not ask for a capability token"
+    for k, _ in STEPS:
+        if steps[k]["state"] == "skip" and not steps[k]["text"]:
+            steps[k]["text"] = "Did not run" if k == "tool" else "Not reached"
+    cps = log.checkpoints()
+    last = max([target.index] + [e.index for e, _ in linked])
+    sealed = next((c for c in cps if c.size > last), None)
+    put("receipt", "pass", f"Recorded as record {target.index}, with {len(linked)} linked "
+        "record" + ("" if len(linked) == 1 else "s") + ("; sealed in a signed checkpoint"
+                                                        if sealed else
+                                                        "; sealed at the next checkpoint"),
+        target.index)
+    shown = [steps[k] for k, _ in STEPS
+             if not (k == "approval" and steps[k]["state"] == "skip")
+             and not (k == "books" and steps[k]["state"] == "skip" and tool != books.TOOL)]
+    outcome = ("waiting" if escalation and steps["approval"]["state"] == "wait" else
+               "done" if steps["tool"]["state"] == "pass" and
+               steps["books"]["state"] != "fail" else "refused")
+    return {"call": target.index, "cid": cid_str(call_cid), "tool": tool,
+            "agent": rec.get("agent"), "agent_name": nm(rec.get("agent")),
+            "on_behalf_of": rec.get("obo"),
+            "on_behalf_of_name": nm(rec.get("obo")) if rec.get("obo") else None,
+            "time": rec.get("ts"),
+            "args_sha256": bytes(rec["body"]["args_sha256"]).hex()
+            if isinstance((rec.get("body") or {}).get("args_sha256"), bytes) else None,
+            "outcome": outcome, "escalation": escalation, "steps": shown}
+
+
+def lines_trace(view: Dict[str, Any]) -> List[str]:
+    marks = {"pass": "ok  ", "fail": "NO  ", "wait": "WAIT", "skip": "--  "}
+    out = [f"Call {view['call']}: {view.get('agent_name') or view['agent']} used {view['tool']}"
+           + (f" for {view.get('on_behalf_of_name') or view['on_behalf_of']}"
+              if view.get("on_behalf_of") else "")
+           + f" at {when(view.get('time'))}"]
+    for s in view["steps"]:
+        out.append(f"  {marks[s['state']]}  {s['label']:<20} {s['text']}")
+    out.append({"done": "Result: it ran.", "waiting": "Result: waiting for a person's approval.",
+                "refused": "Result: refused."}[view["outcome"]])
+    return out
 
 
 def _name(who: Optional[str]) -> str:
