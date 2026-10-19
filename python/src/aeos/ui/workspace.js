@@ -149,7 +149,7 @@ export function workspaceViews({ api, act, el, show, refresh }) {
   async function loadSetup() {
     await act(null, async () => {
       await load();
-      const d = diagram("setup", "setup-diagram", { compact: true, onPick: ({ step }) => { current = step; drawSetup(); } });
+      const d = diagram("setup", "setup-diagram", { compact: true, onPick: ({ step }) => { current = step; drawSetup(); $("setup-steps").scrollIntoView({ behavior: "smooth", block: "start" }); } });
       d.setSteps(ws.steps);
       if (!ws.steps.some((s) => s.id === current)) current = "organization";
       await drawSetup();
@@ -177,8 +177,11 @@ export function workspaceViews({ api, act, el, show, refresh }) {
     const panel = $("setup-panel");
     const runLabel = s.id === "gateway" ? (ws.serving ? "Restart the gateway" : "Start the gateway")
       : s.state === "todo" ? "Run this step" : s.state === "changed" ? "Run again with the changes" : "Run again";
-    const run = button(runLabel, (e) => runStep(e.target, s.id), "primary");
-    const next = i < steps.length - 1 ? button("Next step →", () => { current = steps[i + 1].id; drawSetup(); }) : null;
+    const ready = s.state === "done" && (s.id !== "gateway" || ws.serving);
+    const run = button(runLabel, (e) => runStep(e.target, s.id), ready ? "" : "primary");
+    const next = i < steps.length - 1 ? button("Next step →", () => { current = steps[i + 1].id; drawSetup(); }, ready ? "primary" : "")
+      : null;
+    drawGuide(done === steps.length);
     const settings = settingsFor(s.id);
     panel.replaceChildren(...[
       el("p", { className: "kicker", textContent: `Step ${i + 1} of ${steps.length}` }),
@@ -186,8 +189,8 @@ export function workspaceViews({ api, act, el, show, refresh }) {
       el("p", { textContent: s.text }),
       el("p", { className: "links" }, s.section ? howLink(s.section) : null, s.film ? filmLink(s.film) : null,
         out(`${SOURCE}/${s.module}.py`, `Module: aeos.${s.module} ↗`)),
-      settings ? el("details", { className: "settings", open: s.state !== "done" },
-        el("summary", { textContent: "Settings" }), settings,
+      settings ? el("details", { className: "settings", open: s.state === "changed" || dirty },
+        el("summary", { textContent: "Change the settings (optional)" }), settings,
         el("div", { className: "actions tight" }, button("Save changes", (e) => saveDraft(e.target)), el("span", { id: "setup-dirty", className: "muted", textContent: dirty ? "Unsaved changes" : "" })),
         el("div", { id: "setup-problems", className: "error", hidden: true })) : null,
       el("div", { className: "actions" }, run, next),
@@ -196,6 +199,27 @@ export function workspaceViews({ api, act, el, show, refresh }) {
     if (s.state !== "todo" || s.id === "organization") {
       try { drawMade(s.id, await api(`/api/ws/step?step=${s.id}`)); } catch (e) { $("setup-made").replaceChildren(el("p", { className: "error", textContent: e.message })); }
     }
+  }
+
+  // Where a newcomer goes once the company is set up: the close, or for a workspace
+  // without the film's agents, a call of their own.
+  function afterSetup() {
+    const film = ws.chapters.some((ch) => !ch.missing.length);
+    return button(film ? "Next: Run the close →" : "Next: Try a call →", () => show(film ? "close" : "try"), "primary");
+  }
+
+  function drawGuide(allDone) {
+    const name = ws.running.organization.name;
+    const g = $("setup-guide");
+    if (allDone && ws.serving) {
+      return g.replaceChildren(el("p", { className: "kicker", textContent: "Set up is done" }),
+        el("p", { textContent: `${name} is set up and its gateway is running. Open any step to see what it made, or move on.` }),
+        el("div", { className: "actions tight" }, afterSetup()));
+    }
+    g.replaceChildren(el("p", { className: "kicker", textContent: "What to do here" }),
+      el("p", { textContent: allDone
+        ? `Every step has run, but the gateway is not running. Press Set up everything to start it.`
+        : `Build ${name} the way the architecture does, one part at a time. Work through the steps in order: read what the step does, press Run this step (on the last step, Start the gateway), and look at what it made underneath. Then press Next step. Everything is filled in from the film, so change the settings only if you want to. To do every step at once, press Set up everything.` }));
   }
 
   async function runStep(btn, step) {

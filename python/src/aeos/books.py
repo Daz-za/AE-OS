@@ -1,4 +1,4 @@
-"""Books of account: a preview of the AE-OS Accounting Kernel.
+"""Books of account: the AE-OS Accounting Kernel, on a small scale.
 
 The evidence log records what agents and people did. The books record what that means in
 the accounts, and they keep their own rules: a Merkle proof shows an entry is unchanged,
@@ -17,9 +17,9 @@ records each time they are needed. Before an entry is recorded the books check t
 A refused entry is recorded as a `policy.decision` deny and uses no document number, so
 each series of document numbers (entity and year) has no gaps.
 
-This preview keeps one ledger for one legal entity, in one currency. The books service runs
-as a tool inside the gateway process; its SPIFFE ID names it in records, and it is not
-issued a certificate.
+One `Books` keeps one ledger of one legal entity, in one currency; a workspace keeps one for
+each of its entities in the same log. The books service runs as a tool inside the gateway
+process; its SPIFFE ID names it in records, and it is not issued a certificate.
 """
 from __future__ import annotations
 

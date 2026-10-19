@@ -75,7 +75,8 @@ function render(s) {
   $("tabs").hidden = !s.folder;
   $("tab-audit").hidden = !s.evidence || !s.status;
   $("seal").hidden = !s.workspace;
-  $("cwd").textContent = s.cwd;
+  document.querySelectorAll(".cwd").forEach((n) => { n.textContent = s.cwd; });
+  drawContinue(s);
   if (!s.folder) return show("start");
   const st = s.status;
   if (!st) return;
@@ -104,6 +105,17 @@ function render(s) {
   if (s.story) { renderStory(s.story, s.story_kind); $("story").hidden = false; }
   if (s.next_steps) { $("next-steps-text").textContent = s.next_steps; $("next-steps").hidden = false; }
   if (checkMounted) { mountCheck($("check"), { publicKey: st.public_key }); }
+}
+
+// Workspaces already in this folder, so someone who closed the page can go back to theirs.
+function drawContinue(s) {
+  const list = s.workspaces || [];
+  $("continue").hidden = !list.length || !!s.folder;
+  $("continue-list").replaceChildren(...list.map((f) => {
+    const b = el("button", { textContent: `Continue ${f.split(/[\\/]/).pop()}` });
+    b.addEventListener("click", () => act(b, async () => fresh(await api("/api/open", { folder: f }))));
+    return b;
+  }));
 }
 
 // The demo's narration, written for a terminal, as numbered steps with paragraphs.
@@ -140,7 +152,7 @@ function fresh(s) {
   $("decision-trace").hidden = true;
   start = 0;
   render(s);
-  show(s.workspace ? (s.status ? "arch" : "setup") : "overview");
+  show(s.workspace ? "setup" : "overview");
 }
 
 async function showChecks(ref, box, button) {
@@ -282,7 +294,7 @@ async function loadBooks() {
     if (state && state.workspace) await wsv.drawPeriods();
     const r = await api("/api/books");
     const body = $("books-body");
-    if (!r.ledgers.length && !r.refused.length) return body.replaceChildren(el("p", { className: "muted", textContent: "This log holds no books of account. The full walk-through has an example." }));
+    if (!r.ledgers.length && !r.refused.length) return body.replaceChildren(el("p", { className: "muted", textContent: "This log holds no books of account. The guided tour and the narrated example both keep books." }));
     const parts = [];
     for (const led of r.ledgers) {
       parts.push(el("h2", { textContent: `${led.entity} · ${led.ledger}${led.currency ? ` · ${led.currency}` : ""}` }));
@@ -328,8 +340,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   for (const t of document.querySelectorAll(".tab, .jump")) t.addEventListener("click", () => show(t.dataset.view));
   $("run-demo").addEventListener("click", (e) => act(e.target, async () => fresh(await api("/api/demo", {}))));
   $("run-full").addEventListener("click", (e) => act(e.target, async () => {
-    e.target.textContent = "Running the walk-through…";
-    try { fresh(await api("/api/full-demo", {})); } finally { e.target.textContent = "Run the full walk-through"; }
+    e.target.textContent = "Running the example…";
+    try { fresh(await api("/api/full-demo", {})); } finally { e.target.textContent = "Run the narrated example"; }
   }));
   $("decisions-all").addEventListener("change", loadDecisions);
   $("run-audit").addEventListener("click", (e) => act(e.target, async () => {
@@ -383,6 +395,6 @@ document.addEventListener("DOMContentLoaded", async () => {
       select.append(Object.assign(document.createElement("option"), { value: k, textContent: v, selected: k === "later" }));
     }
     render(s);
-    if (s.folder) show(s.workspace ? (s.status ? "arch" : "setup") : "overview");
+    if (s.folder) show(s.workspace ? "setup" : "overview");
   });
 });

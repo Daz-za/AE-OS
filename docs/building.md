@@ -26,14 +26,14 @@ aeos ui my-aeos
 
 `aeos new` starts from Kestrel Foods, the company in the film on [ae-os.org](https://ae-os.org): a food group with a UK subsidiary, a bank, and a quarter-end close run by agents under one instruction from the CFO. `aeos new my-aeos --example acme` starts from Acme, a smaller example that pays supplier invoices.
 
-The page has these views:
+Follow the numbered views in order. Each view says what to do there and has a button to the next.
 
 | View | What it does |
 |---|---|
+| **1 Set up** | Builds the company the way the architecture does, one step at a time: the organization, the certificate authority, the people, the agents, their SPIFFE identities, the receipt log, the books, the rules, the systems, the delegated authority and the gateway. Each step has optional settings, a link to the part of the site it matches, and shows what it made, such as the certificate chain or each agent's capability token |
+| **2 Run the close** | The film's chapters as real calls through the gateway: the instruction, the agents at work, the controls, the intercompany match, the CFO's decision and the audit. It uses Kestrel Foods' agents and books, so a workspace started from Acme uses **Try a call** instead |
+| **3 Try a call** | Act as any agent, send any tool call and see each check |
 | **Architecture** | The layers from [How it works](https://ae-os.org/how-it-works), drawn from your workspace: people, agents, the controls, the systems and the ledger. Each call travels through the parts it touches, and each check lights green, amber or red. A live record lists everything the log receives, including calls from the command line or your own agents |
-| **Set up** | Builds the company the way the architecture does, one step at a time: the organization, the certificate authority, the people, the agents, their SPIFFE identities, the receipt log, the books, the rules, the systems, the delegated authority and the gateway. Each step has its settings, a link to the part of the site it matches, and shows what it made, such as the certificate chain or each agent's capability token |
-| **Run the close** | The film's chapters as real calls through the gateway: the instruction, the agents at work, the controls, the intercompany match, the CFO's decision and the audit |
-| **Try a call** | Act as any agent, send any tool call and see each check |
 | **Build with it** | Each part as a module of the toolkit, with the code and the command that use it on its own |
 | **Edit** | The whole `workspace.json` at once |
 
@@ -193,7 +193,7 @@ Leaving the `with` block seals the log. The parts are also usable on their own: 
 
 To give an auditor the evidence, copy the folder without `private/`. They run `aeos audit` on it, with your public keys, which they get from you through a channel they trust.
 
-## Limits of this preview
+## Limits
 
 - The people's signing keys are files in `private/people/`, so the platform can sign an authority or an approval for a person when you ask it to. In production each person signs with their own passkey or smart card.
 - The local identity service stands in for SPIRE and does no machine or workload attestation.

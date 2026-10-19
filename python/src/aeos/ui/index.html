@@ -12,10 +12,11 @@
 <header class="top">
   <div class="brand">AE<span class="dash">–</span>OS</div>
   <nav id="tabs-ws" class="ws-only" hidden aria-label="Workspace">
+    <button data-view="setup" class="tab"><span class="tab-n">1</span>Set up</button>
+    <button data-view="close" class="tab"><span class="tab-n">2</span>Run the close</button>
+    <button data-view="try" class="tab"><span class="tab-n">3</span>Try a call</button>
+    <span class="nav-gap" aria-hidden="true"></span>
     <button data-view="arch" class="tab">Architecture</button>
-    <button data-view="setup" class="tab">Set up</button>
-    <button data-view="close" class="tab">Run the close</button>
-    <button data-view="try" class="tab">Try a call</button>
     <button data-view="modules" class="tab">Build with it</button>
     <button data-view="edit" class="tab">Edit</button>
   </nav>
@@ -36,48 +37,62 @@
   <p id="error" class="error" role="alert" hidden></p>
 
   <section id="view-start" class="view" hidden>
-    <h1>Build your AE-OS</h1>
-    <p class="lead">Set up a company on AE-OS step by step and watch each part of the architecture work: identities, delegated authority, the gateway's checks, the rules, the books and the signed record. Everything is filled in from the Kestrel Foods film on ae-os.org, and you can change any of it.</p>
-    <div class="cards">
-      <article class="card">
-        <h2>Kestrel Foods</h2>
-        <p>The company in the film: a US food group with a UK subsidiary and a quarter-end close run by agents under one instruction from the CFO.</p>
-        <form id="new-ws-form">
-          <input type="hidden" name="example" value="kestrel">
-          <label>New folder for the workspace
-            <input name="folder" placeholder="./kestrel-foods" autocomplete="off"></label>
-          <button class="primary">Create the workspace</button>
-        </form>
-      </article>
-      <article class="card">
-        <h2>Open a folder</h2>
-        <form id="open-form">
-          <label>A workspace, an evidence folder, or a log folder
-            <input name="folder" placeholder="./my-aeos" autocomplete="off" required></label>
-          <label>Signing key file (optional; needed only for a log made on another computer)
-            <input name="key" placeholder="only for a log made elsewhere" autocomplete="off"></label>
-          <button class="primary">Open</button>
-        </form>
-      </article>
-      <article class="card">
-        <h2>Watch a walk-through</h2>
-        <p>A narrated run of every part of AE-OS for Acme, a smaller example that pays supplier invoices.</p>
-        <p class="muted">Saved in a new folder in <span class="path" id="cwd"></span></p>
-        <div class="actions">
-          <button id="run-full" class="primary">Run the full walk-through</button>
-          <button id="run-demo">Run the short example</button>
-        </div>
-      </article>
+    <h1>Welcome to AE-OS</h1>
+    <p class="lead">This page builds a small, working AE-OS on your computer and shows how each part of it works. It uses Kestrel Foods, the company in the film on ae-os.org, so everything is already filled in. Nothing leaves this computer.</p>
+    <div id="continue" class="continue" hidden>
+      <h2>Continue where you left off</h2>
+      <div id="continue-list" class="actions tight"></div>
     </div>
+    <article class="card hero">
+      <p class="kicker">Start here</p>
+      <h2>The guided tour</h2>
+      <ol class="tour-steps">
+        <li><strong>Set up.</strong> Build Kestrel Foods one part at a time: its certificate authority, its people and AI agents, their identities, the books, the rules and the gateway.</li>
+        <li><strong>Run the close.</strong> Watch the agents work through the quarter-end close from the film, and decide as the CFO when the rules stop a write-down.</li>
+        <li><strong>Try a call.</strong> Act as any agent, then look at the evidence an auditor would check.</li>
+      </ol>
+      <form id="new-ws-form">
+        <input type="hidden" name="example" value="kestrel">
+        <button class="primary big">Start the guided tour</button>
+        <details class="where">
+          <summary>Change where it is saved</summary>
+          <label><span>It is saved in a new folder in <span class="path cwd"></span>. To use another folder, type its name:</span>
+            <input name="folder" placeholder="kestrel-foods" autocomplete="off"></label>
+        </details>
+      </form>
+      <p class="muted">You can stop at any time. To come back later, run <code>aeos ui</code> in the same folder and choose the workspace under Continue where you left off.</p>
+    </article>
+    <h2 class="other">Other ways in</h2>
+    <details class="aside">
+      <summary>Open a folder you already have</summary>
+      <form id="open-form" class="card">
+        <label>A workspace, an evidence folder, or a log folder
+          <input name="folder" placeholder="./my-aeos" autocomplete="off" required></label>
+        <label>Signing key file (optional; needed only for a log made on another computer)
+          <input name="key" placeholder="only for a log made elsewhere" autocomplete="off"></label>
+        <button class="primary">Open</button>
+      </form>
+    </details>
     <details class="aside">
       <summary>Start from Acme's supplier payments instead</summary>
       <form id="new-acme-form" class="card">
         <input type="hidden" name="example" value="acme">
-        <p>Acme pays supplier invoices through an example ERP, with payment rules and one set of books.</p>
+        <p>A smaller company that pays supplier invoices through an example ERP, with payment rules and one set of books. It has no quarter-end close, so you send its calls under Try a call.</p>
         <label>New folder for the workspace
           <input name="folder" placeholder="./acme" autocomplete="off"></label>
-        <button class="primary">Create the workspace</button>
+        <button class="primary">Create the Acme workspace</button>
       </form>
+    </details>
+    <details class="aside">
+      <summary>Watch a narrated example of Acme's supplier payments</summary>
+      <div class="card">
+        <p>AE-OS builds Acme's supplier payments in one go and explains each part in writing, then leaves an evidence folder to look through. The short example follows one invoice payment and the auditor's check.</p>
+        <p class="muted">Saved in a new folder in <span class="path cwd"></span></p>
+        <div class="actions">
+          <button id="run-full" class="primary">Run the narrated example</button>
+          <button id="run-demo">Run the short example</button>
+        </div>
+      </div>
     </details>
     <details class="aside">
       <summary>Record the tool calls of an agent you already run</summary>
@@ -102,7 +117,10 @@
       <h1 id="arch-title">Architecture</h1>
       <div class="actions tight"><span id="arch-status" class="muted"></span></div>
     </div>
-    <p class="lead">The layers from the How it works page on ae-os.org, built from this workspace. Faint parts are not set up yet. Each call travels through the parts it touches, and each check lights green when it passes, amber when it waits for a person, or red when it refuses. Select a part to see what it is.</p>
+    <div class="guide">
+      <p class="kicker">What to do here</p>
+      <p>This diagram shows the whole company in the layers of the How it works page on ae-os.org. Select any part to read what it is and open its step under Set up. Faint parts are not set up yet. Calls made on any page, or by your own agents, travel through the parts they touch: each check lights green when it passes, amber when it waits for a person, and red when it refuses.</p>
+    </div>
     <div id="arch-diagram" class="arch-host"></div>
     <div id="arch-detail" class="card arch-detail" hidden></div>
     <h2>Live record</h2>
@@ -118,25 +136,34 @@
         <button id="setup-all" class="primary">Set up everything</button>
       </div>
     </div>
-    <p>Build the company the way the architecture does, one part at a time. Each step is filled in from the film. Change its settings, run it, and see what it made.</p>
-    <div id="setup-diagram" class="arch-host small"></div>
+    <div id="setup-guide" class="guide"></div>
     <div class="setup">
       <ol id="setup-steps" class="stepper"></ol>
       <div id="setup-panel" class="card setup-panel"></div>
     </div>
+    <h2>The architecture so far</h2>
+    <p class="muted">Each part appears here when the step that makes it has run. Select a part to open its step.</p>
+    <div id="setup-diagram" class="arch-host small"></div>
   </section>
 
   <section id="view-close" class="view" hidden>
     <h1>Run the close</h1>
-    <p>The quarter-end close from the film, as real calls through the gateway. Play each chapter and watch the calls move through the architecture.</p>
+    <div class="guide">
+      <p class="kicker">What to do here</p>
+      <p>This is the quarter-end close from the film, sent as real calls through the gateway. Play the chapters in order, starting at the top. Each one shows its calls moving through the diagram and lists what happened underneath. Press <strong>Show each check</strong> on any result to see why it passed or stopped. In the chapter where the CFO decides, you choose for the CFO.</p>
+    </div>
     <label class="inline pin"><input type="checkbox" id="close-pin" checked> Keep the diagram in view while scrolling</label>
     <div id="close-diagram" class="arch-host small sticky"></div>
     <div id="close-chapters" class="chapters"></div>
+    <div class="next-view"><span class="muted">When you have played every chapter:</span><button class="primary jump" data-view="try">Next: Try a call →</button></div>
   </section>
 
   <section id="view-try" class="view" hidden>
     <h1>Try a call</h1>
-    <p>Act as one of the agents. Send any tool call and see the result of each check.</p>
+    <div class="guide">
+      <p class="kicker">What to do here</p>
+      <p>Act as one of the agents. The quickest start is one of the example buttons in the row marked Try: each sends a call at once. Or choose an agent, a tool and its details, then press <strong>Send as</strong> and the agent's name. The panel beside the form lists each check in the order the gateway ran it. To see the controls refuse a call, choose a tool the agent was not given.</p>
+    </div>
     <div id="try-diagram" class="arch-host small"></div>
     <div id="try-scenarios" class="chips"></div>
     <div class="try">
@@ -147,11 +174,15 @@
       <summary>Connect your own agent</summary>
       <div id="connect-body"></div>
     </details>
+    <div class="next-view"><span class="muted">Then look at the evidence the calls left:</span><button class="primary jump" data-view="overview">Next: The evidence →</button></div>
   </section>
 
   <section id="view-modules" class="view" hidden>
     <h1>Build with it</h1>
-    <p class="lead">Every part of the architecture is a module of the open-source toolkit. Use the modules together, or add any one of them to your own platform.</p>
+    <div class="guide">
+      <p class="kicker">What to do here</p>
+      <p>Every part of the architecture is a module of the open-source toolkit. Use them together, as this workspace does, or take any one into your own platform. Each module below has a short Python example that runs on its own, and the command that does the same from the terminal. Copy any example into your own Python file to try it.</p>
+    </div>
     <div id="modules-body"></div>
   </section>
 
@@ -163,7 +194,10 @@
         <button id="edit-save" class="primary">Check and save</button>
       </div>
     </div>
-    <p>The whole workspace as one file. Each step under Set up has a form for its part; here you can change everything at once, or copy the file to start your own company.</p>
+    <div class="guide">
+      <p class="kicker">What to do here</p>
+      <p>The whole workspace as one file, <code>workspace.json</code>. Each step under Set up has a form for its part; here you can change everything at once, or copy the file to describe your own company. Press <strong>Check and save</strong>, then run the changed steps again under Set up.</p>
+    </div>
     <p class="path" id="edit-file"></p>
     <div id="edit-problems" class="error" hidden></div>
     <textarea id="edit-json" rows="30" spellcheck="false" aria-label="workspace.json"></textarea>
@@ -179,6 +213,10 @@
     <div id="next-steps" class="story" hidden>
       <h2>Next steps</h2>
       <pre id="next-steps-text"></pre>
+    </div>
+    <div id="evidence-guide" class="guide ws-only" hidden>
+      <p class="kicker">What to do here</p>
+      <p>This is the evidence: every record the log holds, sealed by signed checkpoints. Look through the tabs marked Evidence at the top: <strong>Records</strong> lists every record, <strong>Agents</strong> who acted, <strong>Decisions</strong> what was refused or sent to a person and why, and <strong>Books</strong> the journal and trial balance. Finish with <strong>Audit</strong>, the check an auditor runs on the whole folder.</p>
     </div>
     <h2>Summary</h2>
     <p>A signed checkpoint seals the records the log holds at that moment. A growth proof shows that a later checkpoint still contains every earlier record unchanged, and needs two checkpoints.</p>

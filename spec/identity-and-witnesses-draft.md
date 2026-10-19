@@ -1,6 +1,6 @@
 # AE-OS identity, delegation, policy, books, gateway and witnesses (draft)
 
-Status: draft, implemented in the Python package as a preview (`identity.py`, `delegation.py`, `policy.py`, `books.py`, `gateway.py`, `witness.py`, `audit.py`). The receipt log format in [receipts-v0.md](receipts-v0.md) is unchanged; everything here sits beside it. Formats may change before they are frozen with test vectors.
+Status: draft, implemented in the Python package (`identity.py`, `delegation.py`, `policy.py`, `books.py`, `gateway.py`, `witness.py`, `audit.py`). The receipt log format is defined in [receipts-v0.md](receipts-v0.md), and the formats here sit beside it. Formats may change before they are frozen with test vectors.
 
 ## 1. Workload identity
 
@@ -8,13 +8,13 @@ Agents, gateways and tools are identified by [SPIFFE IDs](https://github.com/spi
 
 | Property | Value |
 |---|---|
-| Leaf key | ECDSA P-256, for the workload alone (the preview's issuer generates it; under SPIRE it never leaves the workload) |
-| Lifetime | 15 minutes; SPIRE renews at half the lifetime (the preview issues new SVIDs on request) |
+| Leaf key | ECDSA P-256, for the workload alone (the Python issuer generates it; under SPIRE it never leaves the workload) |
+| Lifetime | 15 minutes; SPIRE renews at half the lifetime (a workspace renews every 5 minutes) |
 | Leaf extensions | CA=false; key usage digitalSignature, keyEncipherment, keyAgreement; extended key usage clientAuth and serverAuth; exactly one URI SAN, the SPIFFE ID |
 | Issuer | an intermediate CA (P-256) under the trust domain's root CA (P-384) |
 | Trust bundle | the root certificate, given to every relying party |
 
-In production SPIRE issues SVIDs after attesting the node and the workload. The preview's `TrustDomain` issues them directly and does no attestation.
+In production SPIRE issues SVIDs after attesting the node and the workload. The Python `TrustDomain` issues them directly and does no attestation.
 
 ## 2. Delegated authority
 
@@ -31,7 +31,7 @@ When the gateway holds an authorization service's key, an agent can call tools o
 | `currency` | ISO 4217 code |
 | `not_after` | expiry, milliseconds since the Unix epoch |
 
-The person signs it with Ed25519 over `"aeos/intent-envelope/v0\n" || DAG-CBOR(envelope)`. The envelope is named by its CIDv1 (dag-cbor, sha2-256). The preview signs with an Ed25519 key file. Signing with a passkey or smart card after step-up authentication will need a WebAuthn assertion format, which this draft does not yet define.
+The person signs it with Ed25519 over `"aeos/intent-envelope/v0\n" || DAG-CBOR(envelope)`. The envelope is named by its CIDv1 (dag-cbor, sha2-256). The Python implementation signs with an Ed25519 key file. Signing with a passkey or smart card after step-up authentication needs a WebAuthn assertion format, which this draft does not define.
 
 An authorization service checks the signature and mints a [Biscuit](https://doc.biscuitsec.org/reference/specifications) (v3, Ed25519 root key) whose authority block is:
 
@@ -54,7 +54,7 @@ To authorize a call, the gateway supplies the facts `subject` (the SPIFFE ID fro
 
 A policy is written in Rego and compiled with `opa build -t wasm -e <entrypoint>` (OPA WebAssembly ABI 1.2 or later). The gateway refuses a module that lists any host built-in function. The gateway runs it with wasmtime in a new instance for each decision. The module may import only its memory (4 MiB, growing to at most 16 MiB), `opa_abort` and `opa_builtin0`–`opa_builtin4`, and the built-in hooks refuse every call. Each decision may use at most 50,000,000 units of wasmtime fuel, roughly one per instruction. The entrypoint returns `{"decision": "allow" | "deny" | "escalate", "reasons": [...]}`.
 
-The input is `{"tool", "agent", "principal", "arguments"}`, plus facts the gateway looks up for the call (the example policy uses `invoice`) and, when the agent repeats an escalated call, `approval` as `{"approver", "decision"}`. The policy's data (thresholds, lists) is loaded with the module when the gateway is created, and every decision records its SHA-256. The example policy is `policy/payments.rego`; `policy/build.sh` rebuilds `python/src/aeos/policies/payments.wasm`, and CI checks that the committed module matches a build with a pinned OPA version.
+The input is `{"tool", "agent", "principal", "arguments"}`, plus facts the gateway looks up for the call (the example policy uses `invoice`) and, when the agent repeats an escalated call, `approval` as `{"approver", "decision"}`. The policy's data (thresholds, lists) is loaded with the module when the gateway is created, and every decision records its SHA-256. The example policies are `policy/close.rego`, for the quarter-end close, and `policy/payments.rego`, for supplier payments; `policy/build.sh` rebuilds the modules in `python/src/aeos/policies/`, and CI checks that the committed module matches a build with a pinned OPA version.
 
 The gateway does not run a call the policy escalates. It answers with the escalation's CID, and the agent repeats the call with a person's signed approval. The person signs an **approval**, the DAG-CBOR map
 
@@ -71,7 +71,7 @@ with Ed25519 over `"aeos/approval/v0\n" || DAG-CBOR(approval)`. The agent repeat
 
 ## 4. Books of account
 
-The evidence log records what agents and people did. The books record what it means in the accounts, under their own rules (the research paper's Accounting Kernel, invariants I7 and I9). The preview keeps one ledger of one legal entity, in one currency, and records the books in the same log as the rest of the evidence.
+The evidence log records what agents and people did. The books record what it means in the accounts, under their own rules (the research paper's Accounting Kernel, invariants I7 and I9). Each legal entity has its own books: one ledger, in one currency, with its own periods and document numbers. The books of every entity are recorded in the same log as the rest of the evidence.
 
 A **period transition** opens or closes one posting period. A controller signs the DAG-CBOR map
 
@@ -90,12 +90,13 @@ Agents post through the gateway with the tool `ledger.post`. Its arguments are:
 
 | Argument | Meaning |
 |---|---|
+| `entity` | the legal entity whose books take the entry; the first entity's when absent |
 | `date` | the entry's date, `YYYY-MM-DD`; its period is `YYYY-MM` |
 | `text` | a description |
 | `lines` | for a new entry: a list of `{"account", "debit_minor"}` or `{"account", "credit_minor"}`, amounts as positive whole numbers of minor units (cents for USD) |
 | `reverses` | for a reversal, in place of `lines`: the document number of the entry to reverse |
 
-For example: `{"date": "2026-10-19", "text": "Freight invoice INV-20470", "lines": [{"account": "5200", "debit_minor": 125000}, {"account": "2000", "credit_minor": 125000}]}`.
+For example: `{"entity": "ACME-US", "date": "2026-10-19", "text": "Freight invoice INV-20470", "lines": [{"account": "5200", "debit_minor": 125000}, {"account": "2000", "credit_minor": 125000}]}`.
 
 The books service checks that:
 
@@ -103,7 +104,7 @@ The books service checks that:
 2. the period of its date is open;
 3. a reversal names an entry in the books that has not been reversed already, and sends no `lines`: its lines are the original's, with debits and credits swapped.
 
-An entry that fails is recorded as a `policy.decision` with decision `deny`, policy `aeos-books/v0` and plain `reasons`, linked to the call, and uses no document number. An entry that passes gets the next document number in its series, `<entity>/<year>/<number>` with six digits, and is recorded as a `journal.entry` record (agent = the books service) whose parents are the `tool.call` and, for a reversal, the reversed entry. Its body is `entity`, `ledger`, `document`, `period`, `date`, `currency`, `text`, `lines` and, for a reversal, `reverses` (the reversed document's number). A reversal swaps the debits and credits of the original and is dated in an open period; the original stays unchanged. Balances are computed from the entries each time they are needed. In this preview the books service runs as a tool inside the gateway process; its SPIFFE ID names it in records, and it is not issued a certificate. Postings move no money, so a capability token's amount limit and budget do not apply to them.
+An entry that fails is recorded as a `policy.decision` with decision `deny`, policy `aeos-books/v0` and plain `reasons`, linked to the call, and uses no document number. An entry that passes gets the next document number in its series, `<entity>/<year>/<number>` with six digits, and is recorded as a `journal.entry` record (agent = the books service) whose parents are the `tool.call` and, for a reversal, the reversed entry. Its body is `entity`, `ledger`, `document`, `period`, `date`, `currency`, `text`, `lines` and, for a reversal, `reverses` (the reversed document's number). A reversal swaps the debits and credits of the original and is dated in an open period; the original stays unchanged. Balances are computed from the entries each time they are needed. The books service runs as a tool inside the gateway process; its SPIFFE ID names it in records, and it is not issued a certificate. Postings move no money, so a capability token's amount limit and budget do not apply to them.
 
 ## 5. Gateway
 
@@ -176,19 +177,18 @@ A checkpoint is final for an auditor when at least k of the n witnesses the audi
 
 An auditor should pass the trust bundle, the log's public key, the witness keys, the authorization service's key and the people's keys from sources they trust (`--bundle`, `--public-key`, `--witnesses`, `--authority-key`, `--principals`).
 
-## 8. Not yet covered
+## 8. Outside this draft
 
-- A shared, durable budget: the preview keeps it in one gateway's memory, so a restart resets it and gateways do not share it.
-- Durable escalations: open escalations are kept in one gateway's memory, so a restart discards them. Approvals carry a time but no expiry.
+- A shared budget: each gateway meters it in its own memory, so gateways do not share it. A workspace rebuilds the budget spent, and the escalations still open, from the log when it starts. Approvals carry a time but no expiry.
 - Checking the facts a policy decided on: the audit replays each decision on the recorded invoice facts and does not check them against the ERP.
-- Revocation of tokens before they expire (Biscuit revocation IDs are not yet checked).
+- Revocation of tokens before they expire (Biscuit revocation IDs are not checked).
 - Agent manifests (APOs) that pin each tool's definition digest.
-- Books for several ledgers and legal entities, and for several currencies with exchange rates (the paper's transaction, local and group currencies).
+- Several ledgers for one entity, and several currencies with exchange rates (the paper's transaction, local and group currencies).
 - Restricted and special periods.
 - Amounts calculated by a cited calculation (invariant I8).
 - Checking an entry's lines against the call that asked for it, and checking that a refused entry was refused for the right reason: the log keeps only a digest of each call's arguments.
 - Host built-in functions for policies (time, cryptography, network lookups), and policy data that changes while the gateway runs.
 - Audience-bound JWT-SVIDs on MCP calls.
-- Recording the signer's SVID chain CID in every record (the preview records the leaf's fingerprint in `session.start` only).
+- Recording the signer's SVID chain CID in every record (the gateway records the leaf's fingerprint in `session.start` only).
 - Each record signed with the actor's SVID key, as the research paper describes.
 - Machine and workload attestation (SPIRE), and kernel-level enforcement.
