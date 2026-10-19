@@ -147,3 +147,18 @@ def test_workspace_build_try_and_trace(page, tmp_path):
     assert decisions[0]["agent"] == "Accounts payable agent"
     assert json.loads(page("/api/ws/seal", {})[1])["witnesses"]
     assert json.loads(page("/api/audit", {})[1])["ok"]
+
+
+def test_changes_that_cannot_start_are_not_saved(page, tmp_path):
+    import sys
+    page("/api/new-workspace", {"folder": str(tmp_path / "acme")})
+    doc = json.loads(page("/api/ws")[1])["doc"]
+    doc["systems"].append({"id": "broken", "type": "mcp-stdio", "tools": [],
+                           "command": [sys.executable, "-c", "import sys; sys.exit(1)"]})
+    saved = json.loads(page("/api/ws/save", {"doc": doc})[1])
+    assert not saved["saved"] and "could not start" in saved["problems"][0]
+    ws = json.loads(page("/api/ws")[1])                  # still open and running
+    assert all(s["id"] != "broken" for s in ws["doc"]["systems"])
+    status, body = page("/api/ws/call", {"agent": "reporting", "tool": "erp.invoice.list",
+                                         "args": {}})
+    assert status == 200 and json.loads(body)["ok"]

@@ -207,3 +207,14 @@ def test_up_serves_agents_from_another_process(ws, capsys):
     assert "Stopped" in out
     assert not (ws / "private" / "running.json").exists()
     assert audit.run(ws)[1] == []
+
+
+def test_a_missing_mcp_program_or_file_is_named(ws):
+    doc = workspace.load(ws)
+    doc["systems"].append({"id": "a", "type": "mcp-stdio", "command": ["no-such-program-x"],
+                           "tools": []})
+    doc["systems"].append({"id": "b", "type": "mcp-stdio", "command": [sys.executable,
+                                                                     "server.py"], "tools": []})
+    problems = workspace.check(doc, ws)
+    assert "system a: the program no-such-program-x was not found on this computer" in problems
+    assert "system b: there is no file server.py in the workspace folder" in problems

@@ -234,9 +234,15 @@ def check(doc: Any, folder: Optional[Path] = None) -> List[str]:
                 except Exception as e:
                     p.append(f"system {sid}: {s.get('file')} could not be loaded ({e})")
         elif kind == "mcp-stdio":
-            if not isinstance(s.get("command"), list) or not s.get("command"):
+            cmd = s.get("command")
+            if not isinstance(cmd, list) or not cmd:
                 p.append(f"system {sid}: command must be a list, such as "
-                         '["python3", "server.py"]')
+                         '["python", "server.py"]')
+            elif shutil.which(str(cmd[0])) is None:
+                p.append(f"system {sid}: the program {cmd[0]} was not found on this computer")
+            elif folder is not None and len(cmd) > 1 and str(cmd[1]).endswith(".py") \
+                    and not (Path(folder) / str(cmd[1])).is_file():
+                p.append(f"system {sid}: there is no file {cmd[1]} in the workspace folder")
             if not isinstance(s.get("tools"), list):
                 p.append(f"system {sid}: list the server's tools under tools, so agents can be "
                          "given them")
@@ -554,6 +560,13 @@ class Platform:
 
     def start(self, port: int = 0) -> int:
         """Prepare the evidence folder and serve the gateway; returns its port."""
+        try:
+            return self._start(port)
+        except Exception:
+            self.stop(seal=False)              # leave nothing half started
+            raise
+
+    def _start(self, port: int) -> int:
         with self._lock:
             self.open()
             f, priv = self.folder, self.private
