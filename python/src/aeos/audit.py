@@ -9,13 +9,17 @@ An evidence folder holds a receipt log plus what is needed to check who acted:
     log/            the receipt log, with cosignatures.jsonl from the witnesses
     intents/        the signed intent envelopes, and tokens/ the capability tokens the
                     agents presented, when the gateway required them
+    policies/       the compiled policy modules (<sha256>.wasm) and their data
+                    (data-<sha256>.json), when the gateway ran a policy
 
 The audit recomputes the whole log, then checks that each session was opened with an SVID whose
 fingerprint the gateway recorded, and that this SVID was valid for the recorded identity
 at that moment, and that the latest
 checkpoint carries enough valid witness cosignatures. Where the gateway required capability
 tokens, it replays each recorded decision from the token, the person's signed intent and
-the facts in the record, and checks that every call that ran was allowed. In a real audit the auditor takes
+the facts in the record, and checks that every call that ran was allowed. Where it ran a
+policy, it runs the same compiled module on the recorded input again, checks each
+person's approval, and checks that every call that ran had the policy's allow. In a real audit the auditor takes
 the trust bundle, the log's public key, the witnesses' keys, the authorization service's
 key and each person's key from sources they trust,
 not from the folder under review; `audit` accepts them as options for that reason.
@@ -27,7 +31,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import delegation, identity, witness
+from . import delegation, identity, policy, witness
 from .canon import cid_str
 from .log import ReceiptLog
 
@@ -96,6 +100,14 @@ def run(folder: Path, *, bundle: Optional[Path] = None, public_key: Optional[str
                           .read_text())
         _check_capabilities(log, folder, manifest, key,
                             {k: bytes.fromhex(v) for k, v in pdoc.items()}, findings, problems)
+
+    if manifest.get("policies"):
+        pkeys = {}
+        if manifest.get("principals"):
+            pdoc = json.loads((Path(principals) if principals else folder / manifest["principals"])
+                              .read_text())
+            pkeys = {k: bytes.fromhex(v) for k, v in pdoc.items()}
+        _check_policies(log, folder / manifest["policies"], pkeys, findings, problems)
 
     wfile = Path(witnesses) if witnesses else folder / manifest["witnesses"]
     wdoc = json.loads(wfile.read_text())
@@ -192,3 +204,87 @@ def _replay(rec: Dict[str, Any], tokens: Dict[str, bytes],
     if spent.get(env.cid, 0) + amount > env.budget_minor:
         return False, "the intent's budget would be exceeded"
     return True, ""
+
+
+def _check_policies(log: ReceiptLog, folder: Path, principal_keys: Dict[str, bytes],
+                    findings: List[str], problems: List[str]) -> None:
+    """Replay each policy decision, check approvals, and check that calls that ran were
+    allowed by the policy."""
+    modules = {f.stem: f.read_bytes() for f in folder.glob("*.wasm")}
+    data = {}
+    for f in folder.glob("data-*.json"):
+        doc = json.loads(f.read_text())
+        data[policy.data_sha256(doc).hex()] = doc
+    records = [(e, log.record(e)) for e in log.entries()]
+    by_cid = {cid_str(e.cid): r for e, r in records}
+    ran = {cid_str(r["parents"][0]) for _, r in records if r["kind"] == "tool.result"
+           and r["parents"] and r["body"].get("outcome") != "error"}
+    governed = {cid_str(e.cid) for e, r in records if r["kind"] == "session.start"
+                and "policy_sha256" in r["body"]}
+    allowed, counts, before, approvals = set(), {}, len(problems), 0
+    for e, rec in records:
+        body = rec["body"]
+        if rec["kind"] == "approval":
+            approvals += 1
+            problems += [f"record {e.index}: {p}" for p in _check_approval(rec, by_cid,
+                                                                             principal_keys)]
+            continue
+        if rec["kind"] != "policy.decision" or body.get("policy") != policy.POLICY:
+            continue
+        recorded = body.get("decision")
+        counts[recorded] = counts.get(recorded, 0) + 1
+        if "input_json" not in body:                # refused before the policy ran
+            if recorded != "deny":
+                problems.append(f"record {e.index}: a decision without its input must be deny")
+            continue
+        wasm = modules.get(body["policy_sha256"].hex())
+        doc = data.get(body["data_sha256"].hex())
+        if wasm is None or doc is None:
+            problems.append(f"record {e.index}: the policy module or its data is not in the "
+                            "evidence")
+            continue
+        again, errs = policy.replay(wasm, doc, body.get("entrypoint", ""),
+                                    json.loads(body["input_json"]))
+        if errs:
+            problems.append(f"record {e.index}: {errs[0]}")
+        elif again["decision"] != recorded:
+            problems.append(f"record {e.index}: the gateway recorded {recorded}, but the "
+                            f"policy gives {again['decision']} on the recorded input")
+        if recorded == "allow":
+            allowed.add(cid_str(rec["parents"][0]) if rec["parents"] else "")
+    for e, rec in records:
+        call = cid_str(e.cid)
+        if rec["kind"] == "tool.call" and rec["parents"] and \
+                cid_str(rec["parents"][0]) in governed and call in ran and call not in allowed:
+            problems.append(f"record {e.index}: the call ran without the policy's allow")
+    n = sum(counts.values())
+    findings.append(f"Each of the {n} policy decisions ({counts.get('allow', 0)} allowed, "
+                    f"{counts.get('escalate', 0)} escalated, {counts.get('deny', 0)} refused) "
+                    "gives the recorded answer when the same compiled policy runs again on the "
+                    f"recorded input, and each of the {approvals} approvals is signed by its "
+                    "approver and answers an escalated call"
+                    + ("" if len(problems) == before else " (except as listed below)"))
+
+
+
+def _check_approval(rec: Dict[str, Any], by_cid: Dict[str, Dict[str, Any]],
+                    principal_keys: Dict[str, bytes]) -> List[str]:
+    b = rec["body"]
+    try:
+        a = delegation.Approval(escalation=b["escalation"], approver=b["approver"],
+                                decision=b["decision"], tool=b["tool"],
+                                args_sha256=b["args_sha256"], time=b["time"],
+                                signature=b["signature"])
+    except KeyError:
+        return ["the approval record is incomplete"]
+    out = []
+    if rec["agent"] != a.approver or not a.verify(principal_keys.get(a.approver, b"")):
+        out.append(f"the approval is not signed by {a.approver}")
+    esc = by_cid.get(a.escalation)
+    if esc is None or esc["body"].get("decision") != "escalate" or esc["subject"] != a.tool:
+        out.append("the approval does not answer an escalation in this log")
+    else:
+        call = by_cid.get(cid_str(esc["parents"][0])) if esc["parents"] else None
+        if call is None or call["body"].get("args_sha256") != a.args_sha256:
+            out.append("the approval is for a different call from the one escalated")
+    return out

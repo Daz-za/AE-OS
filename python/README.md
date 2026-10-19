@@ -17,7 +17,7 @@ Then run `aeos ui` to work in your web browser, or try `aeos demo` and create a 
 
 This package was first called `aeos-receipts`. The `aeos-receipts` command and `import aeos_receipts` remain available as aliases of `aeos`. Logs set up under the earlier name keep their signing keys in `~/.config/aeos-receipts/keys/`, where `aeos ui` still finds them.
 
-Requires Python 3.10 or later, with the `cryptography` and `biscuit-python` packages (installed automatically).
+Requires Python 3.10 or later, with the `cryptography`, `biscuit-python` and `wasmtime` packages (installed automatically). Rebuilding the example policy needs [OPA](https://www.openpolicyagent.org/); running it does not.
 
 ## Record an agent's MCP tool calls
 
@@ -171,7 +171,7 @@ assert verify_receipt(receipt, log.public_key) == []
 
 `examples/invoice_demo.py` walks through an escalated invoice payment, the auditor's checks and a tampering attempt.
 
-## Identities, delegated authority, gateway and witnesses (preview)
+## Identities, delegated authority, policy, gateway and witnesses (preview)
 
 `aeos demo --full` runs more of the AE-OS architecture on one computer:
 
@@ -179,9 +179,10 @@ assert verify_receipt(receipt, log.public_key) == []
 - a person signs an intent envelope (which tools, the limit per payment, the total budget, the expiry), and an authorization service turns it into a [Biscuit](https://www.biscuitsec.org/) capability token bound to the agent's SPIFFE ID; the agent can add checks to hand a narrower token to a helper, and nobody can remove one;
 - the agent and the gateway authenticate each other over mutual TLS; the gateway checks the token against the identity in the agent's certificate, the tool, the amount and the time, meters the intent's budget, and records every call and decision;
 - expired certificates and certificates not issued under the trust bundle's root are refused during the handshake, and an identity without permission for a tool is refused and recorded;
+- payment rules written in Rego (`policy/payments.rego`) and compiled to WebAssembly run in a wasmtime sandbox on every call; a payment above the threshold waits for a person's signed approval, and the person who authorized the agent may not approve it;
 - two witnesses cosign the log's checkpoint, and a witness refuses a rewritten history.
 
-It leaves an evidence folder that `aeos audit FOLDER` checks from end to end. The audit replays every authorization decision from the token and the signed intent. The modules are `identity`, `delegation`, `gateway`, `witness` and `audit`; the formats are in [spec/identity-and-witnesses-draft.md](../spec/identity-and-witnesses-draft.md). The local trust domain stands in for SPIRE and does no machine or workload attestation.
+It leaves an evidence folder that `aeos audit FOLDER` checks from end to end. The audit replays every authorization decision from the token and the signed intent. The audit also runs the same compiled policy on each recorded input. The modules are `identity`, `delegation`, `policy`, `gateway`, `witness` and `audit`; the formats are in [spec/identity-and-witnesses-draft.md](../spec/identity-and-witnesses-draft.md). The local trust domain stands in for SPIRE and does no machine or workload attestation.
 
 ## Status and limits
 
