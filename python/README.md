@@ -155,7 +155,7 @@ Auditors who prefer not to install anything can check receipts and growth proofs
 
 ## Work in the web browser
 
-`aeos ui` opens a page on this computer where you can run the example, create or open a log, look through its records, download receipts, sign checkpoints and check receipts from other logs. It is served only at 127.0.0.1, this computer's own address. Each launch makes a new access code that is part of the address; other websites open in the same browser do not have it and cannot use the page. Use `aeos ui ./ap-log` to open a log directly, and `--no-browser` to print the address without opening a browser, then open it in a browser on the same computer.
+`aeos ui` opens a page on this computer where you can run the short example or the full walk-through, create or open a log, look through its records, download receipts, sign checkpoints and check receipts from other logs. For an evidence folder it also shows who acted, what was refused or sent to a person and why, the journal and trial balance, and runs the audit. It is served only at 127.0.0.1, this computer's own address. Each launch makes a new access code that is part of the address; other websites open in the same browser do not have it and cannot use the page. Use `aeos ui ./ap-log` (or `aeos ui ./aeos-full-demo`) to open a log or evidence folder directly, and `--no-browser` to print the address without opening a browser, then open it in a browser on the same computer.
 
 ## Use it as a library
 
@@ -183,7 +183,15 @@ assert verify_receipt(receipt, log.public_key) == []
 - a books service keeps Acme's general ledger: an entry is recorded only if it balances and its date is in an open period, only a controller's signed period change opens or closes a period, and a correction is a reversal, dated in an open period, that cites the original entry, which stays unchanged;
 - two witnesses cosign the log's checkpoint, and a witness refuses a rewritten history.
 
-It leaves an evidence folder that `aeos audit FOLDER` checks from end to end. The audit replays every authorization decision from the token and the signed intent, runs the same compiled policy again on each recorded input, and rebuilds the books from their entries. The modules are `identity`, `delegation`, `policy`, `books`, `gateway`, `witness` and `audit`; the formats are in [spec/identity-and-witnesses-draft.md](../spec/identity-and-witnesses-draft.md). The local trust domain stands in for SPIRE and does no machine or workload attestation.
+It leaves an evidence folder that `aeos audit FOLDER` checks from end to end. These commands describe it in plain language, and also accept a log folder:
+
+```
+aeos agents FOLDER      # who acted: people, agents and services, and what each did
+aeos decisions FOLDER   # what was refused or sent to a person, and why (--all adds the allowed calls)
+aeos books FOLDER       # periods, journal entries, refused entries and the trial balance
+```
+
+Each takes `--json` for other programs. They read what the log holds; `aeos audit` is the command that checks it. The audit replays every authorization decision from the token and the signed intent, runs the same compiled policy again on each recorded input, and rebuilds the books from their entries. The modules are `identity`, `delegation`, `policy`, `books`, `gateway`, `witness` and `audit`; the formats are in [spec/identity-and-witnesses-draft.md](../spec/identity-and-witnesses-draft.md). The local trust domain stands in for SPIRE and does no machine or workload attestation.
 
 ## Status and limits
 

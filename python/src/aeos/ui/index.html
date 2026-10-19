@@ -10,10 +10,14 @@
 </head>
 <body>
 <header class="top">
-  <div class="brand">AE<span class="dash">–</span>OS <span class="product">Receipts</span></div>
+  <div class="brand">AE<span class="dash">–</span>OS</div>
   <nav id="tabs" hidden>
     <button data-view="overview" class="tab">Overview</button>
     <button data-view="records" class="tab">Records</button>
+    <button data-view="agents" class="tab">Agents</button>
+    <button data-view="decisions" class="tab">Decisions</button>
+    <button data-view="books" class="tab">Books</button>
+    <button data-view="audit" class="tab" id="tab-audit" hidden>Audit</button>
     <button data-view="check" class="tab">Check a receipt</button>
     <button data-view="start" class="tab tab-quiet">Open another log</button>
   </nav>
@@ -28,9 +32,14 @@
     <div class="cards">
       <article class="card">
         <h2>See an example</h2>
-        <p>An AI agent pays a supplier invoice, a controller approves it, and an auditor checks the evidence. The example log is saved in a new folder here:</p>
+        <p>The short example: an AI agent pays a supplier invoice, a controller approves it, and an auditor checks the evidence.</p>
+        <p>The full walk-through adds agent identities, signed authority, payment rules, books of account and witnesses, then runs the audit.</p>
+        <p class="muted">Each example is saved in a new folder here:</p>
         <p class="path" id="cwd"></p>
-        <button id="run-demo" class="primary">Run the example</button>
+        <div class="actions">
+          <button id="run-full" class="primary">Run the full walk-through</button>
+          <button id="run-demo">Run the short example</button>
+        </div>
       </article>
       <article class="card">
         <h2>Create a log</h2>
@@ -54,7 +63,7 @@
       <article class="card">
         <h2>Open a log</h2>
         <form id="open-form">
-          <label>Folder that holds log.json
+          <label>Folder that holds log.json, or an evidence folder
             <input name="folder" placeholder="./acme-accounts-payable-log" autocomplete="off" required></label>
           <label>Signing key file (optional; needed to sign checkpoints)
             <input name="key" placeholder="found automatically when setup created it" autocomplete="off"></label>
@@ -103,6 +112,34 @@
       <span id="page-info"></span>
       <button id="next">Later records</button>
     </div>
+  </section>
+
+  <section id="view-agents" class="view" hidden>
+    <h1>Agents</h1>
+    <p>Each person, agent and service in the log, how it connected and what it did.</p>
+    <div id="agents-list" class="stack"></div>
+  </section>
+
+  <section id="view-decisions" class="view" hidden>
+    <h1>Decisions</h1>
+    <p>Calls that a check refused or sent to a person, with the reasons recorded at the time.</p>
+    <dl id="decision-counts" class="summary"></dl>
+    <label class="inline"><input type="checkbox" id="decisions-all"> Also show the calls that were allowed</label>
+    <div id="decisions-list" class="stack"></div>
+  </section>
+
+  <section id="view-books" class="view" hidden>
+    <h1>Books</h1>
+    <p>The journal and trial balance, rebuilt from the entries in the log.</p>
+    <div id="books-body"></div>
+  </section>
+
+  <section id="view-audit" class="view" hidden>
+    <h1>Audit</h1>
+    <p>Checks the whole evidence folder: the log, the agents' certificates, the delegated authority, each decision, the books and the witnesses' cosignatures.</p>
+    <p class="muted">This page uses the keys found in the folder. In a real audit, take the keys from sources you trust and run <code>aeos audit</code> with them.</p>
+    <div class="actions"><button id="run-audit" class="primary">Run the audit</button></div>
+    <div id="audit-result" class="chk-result" aria-live="polite"></div>
   </section>
 
   <section id="view-check" class="view" hidden>

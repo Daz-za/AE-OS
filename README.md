@@ -39,7 +39,7 @@ The image above is a frame from the film on [ae-os.org](https://ae-os.org), whic
 
 ```
 pipx install "git+https://github.com/Daz-za/ae-os#subdirectory=python"
-aeos ui        # work in your web browser: run the example, create or open a log
+aeos ui        # work in your web browser: run the examples, create or open a log
 aeos demo      # the same example, explained step by step in the terminal
 aeos setup     # answer a few questions to create your own log
 aeos demo --full   # identities, delegated authority, policy, books, an MCP gateway and witnesses

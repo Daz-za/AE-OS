@@ -40,6 +40,9 @@ function show(view) {
   for (const s of document.querySelectorAll(".view")) s.hidden = s.id !== `view-${view}`;
   for (const t of document.querySelectorAll(".tab")) t.classList.toggle("active", t.dataset.view === view);
   if (view === "records") loadRecords();
+  if (view === "agents") loadAgents();
+  if (view === "decisions") loadDecisions();
+  if (view === "books") loadBooks();
   if (view === "check" && !checkMounted && state && state.status) {
     mountCheck($("check"), { publicKey: state.status.public_key });
     checkMounted = true;
@@ -60,6 +63,7 @@ const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 function render(s) {
   state = s;
   $("tabs").hidden = !s.folder;
+  $("tab-audit").hidden = !s.evidence;
   $("cwd").textContent = s.cwd;
   if (!s.folder) return show("start");
   const st = s.status;
@@ -85,13 +89,13 @@ function render(s) {
   $("sign").disabled = !st.can_sign || unsealed <= 0;
   $("growth").disabled = st.checkpoints < 2;
   $("public-key").textContent = st.public_key;
-  if (s.story) { renderStory(s.story); $("story").hidden = false; }
+  if (s.story) { renderStory(s.story, s.story_kind); $("story").hidden = false; }
   if (s.next_steps) { $("next-steps-text").textContent = s.next_steps; $("next-steps").hidden = false; }
   if (checkMounted) { mountCheck($("check"), { publicKey: st.public_key }); }
 }
 
 // The demo's narration, written for a terminal, as numbered steps with paragraphs.
-function renderStory(text) {
+function renderStory(text, kind) {
   const steps = [];
   for (const line of text.split("\n")) {
     const m = line.match(/^(\d+)\. (.*)$/);
@@ -106,7 +110,9 @@ function renderStory(text) {
     ol.append(li);
   }
   const intro = Object.assign(document.createElement("p"), {
-    textContent: "An AI agent pays a supplier invoice at Acme, a fictional company, and an auditor checks the evidence. Look through the records, or try checking payment-receipt.json under Check a receipt. It is in the aeos-demo folder, one level up from the log folder.",
+    textContent: kind === "full"
+      ? "Acme, a fictional company, lets an AI agent pay supplier invoices and book them, and an auditor checks the evidence. See who acted under Agents, what was refused and why under Decisions, the journal under Books, and run the auditor's check under Audit."
+      : "An AI agent pays a supplier invoice at Acme, a fictional company, and an auditor checks the evidence. Look through the records, or try checking payment-receipt.json under Check a receipt. It is in the aeos-demo folder, one level up from the log folder.",
   });
   $("story-text").replaceChildren(intro, ol);
 }
@@ -116,6 +122,9 @@ function fresh(s) {
   $("next-steps").hidden = true;
   $("verify-result").replaceChildren();
   $("verify-result").className = "chk-result";
+  $("audit-result").replaceChildren();
+  $("audit-result").className = "chk-result";
+  $("decisions-all").checked = false;
   start = 0;
   render(s);
   show("overview");
@@ -174,6 +183,102 @@ async function loadRecords() {
   });
 }
 
+const el = (tag, props = {}, ...kids) => {
+  const n = Object.assign(document.createElement(tag), props);
+  n.append(...kids.filter((k) => k !== null && k !== undefined && k !== ""));
+  return n;
+};
+const WORDS = { allow: "Allowed", deny: "Refused", escalate: "Sent to a person" };
+
+async function loadAgents() {
+  await act(null, async () => {
+    const r = await api("/api/agents");
+    const list = $("agents-list");
+    if (!r.identities.length) return list.replaceChildren(el("p", { className: "muted", textContent: "No one has acted in this log yet." }));
+    list.replaceChildren(...r.identities.map((a) => {
+      const facts = [];
+      const how = a.connected.filter((c) => c !== "not stated").map((c) => (c === "x509-svid-mtls" ? "a certificate over mutual TLS" : c));
+      if (a.sessions) facts.push(`Connected ${plural(a.sessions, "time", "times")}${how.length ? `, authenticated by ${how.join(", ")}` : ""}`);
+      if (a.on_behalf_of.length) facts.push(`Acted for ${a.on_behalf_of.join(", ")}`);
+      if (a.calls) facts.push(`Tool calls (${a.calls}): ${Object.entries(a.tools).map(([t, n]) => `${t} (${n})`).join(", ")}`);
+      if (a.refused) facts.push(`Calls refused: ${a.refused}`);
+      if (a.escalated) facts.push(`Calls sent to a person for approval: ${a.escalated}`);
+      if (a.approvals) facts.push(`Approvals given: ${a.approvals}`);
+      if (a.period_changes) facts.push(`Signed ${plural(a.period_changes, "period change", "period changes")}`);
+      if (a.entries) facts.push(`Wrote ${plural(a.entries, "journal entry", "journal entries")}`);
+      facts.push(`Active ${when(a.first)} to ${when(a.last)}`);
+      return el("article", { className: "item" },
+        el("div", { className: "item-head" }, el("span", { className: `badge role-${a.role}`, textContent: a.role }), el("strong", { className: "id", textContent: a.id })),
+        el("ul", {}, ...facts.map((f) => el("li", { textContent: f }))));
+    }));
+  });
+}
+
+async function loadDecisions() {
+  await act(null, async () => {
+    const r = await api(`/api/decisions?all=${$("decisions-all").checked ? 1 : 0}`);
+    $("decision-counts").replaceChildren(...Object.entries(r.counts).flatMap(([check, c]) => [
+      el("dt", { textContent: check }),
+      el("dd", { textContent: Object.entries(c).map(([d, n]) => `${n} ${(WORDS[d] || d).toLowerCase()}`).join(", ") }),
+    ]));
+    const list = $("decisions-list");
+    if (!r.decisions.length) return list.replaceChildren(el("p", { className: "muted", textContent: Object.keys(r.counts).length ? "Nothing was refused or sent to a person." : "No decisions in this log yet." }));
+    list.replaceChildren(...r.decisions.map((d) => {
+      const who = `${d.agent} called ${d.tool}${d.on_behalf_of ? ` for ${d.on_behalf_of}` : ""}${d.amount ? `, ${d.amount}` : ""}`;
+      const approvals = d.approvals.map((x) => el("p", { className: "approval", textContent: `${x.answer === "approve" ? "Approved" : "Rejected"} by ${x.by} (record ${x.index})` }));
+      return el("article", { className: "item" },
+        el("div", { className: "item-head" },
+          el("span", { className: `badge tag-${d.decision}`, textContent: WORDS[d.decision] || d.decision }),
+          el("strong", { textContent: d.check }),
+          el("span", { className: "muted", textContent: `Record ${d.index} · ${when(d.time)}` })),
+        el("p", { className: "id", textContent: who }),
+        d.reasons.length ? el("ul", {}, ...d.reasons.map((x) => el("li", { textContent: x }))) : null,
+        ...approvals);
+    }));
+  });
+}
+
+function table(head, rows) {
+  const cell = (c, i) => el("td", { textContent: c, className: i > 0 ? "num" : "" });
+  return el("div", { className: "table-wrap" }, el("table", { className: "ledger" },
+    el("thead", {}, el("tr", {}, ...head.map((h, i) => el("th", { textContent: h, className: i > 0 ? "num" : "" })))),
+    el("tbody", {}, ...rows.map((r) => el("tr", { className: r.cls || "" },
+      ...(r.span ? [el("td", { textContent: r.span, colSpan: head.length })] : r.cells.map(cell)))))));
+}
+
+async function loadBooks() {
+  await act(null, async () => {
+    const r = await api("/api/books");
+    const body = $("books-body");
+    if (!r.ledgers.length && !r.refused.length) return body.replaceChildren(el("p", { className: "muted", textContent: "This log holds no books of account. The full walk-through has an example." }));
+    const parts = [];
+    for (const led of r.ledgers) {
+      parts.push(el("h2", { textContent: `${led.entity} · ${led.ledger}${led.currency ? ` · ${led.currency}` : ""}` }));
+      if (led.periods.length) {
+        parts.push(el("div", { className: "periods" }, ...led.periods.map((p) =>
+          el("span", { className: `badge period-${p.state}`, textContent: `${p.name}: ${p.state}`, title: `Signed by ${p.by}` }))));
+      }
+      parts.push(el("h3", { textContent: "Journal" }));
+      const rows = [];
+      for (const e of led.entries) {
+        rows.push({ cls: "entry", span: `${e.document} · ${e.date} · ${e.text}${e.reverses ? ` (reverses ${e.reverses})` : ""}` });
+        for (const ln of e.lines) rows.push({ cells: [`${ln.account} ${ln.name}`, ln.debit, ln.credit] });
+      }
+      parts.push(table(["Entry and account", "Debit", "Credit"], rows));
+      parts.push(el("h3", { textContent: "Trial balance" }));
+      const tb = led.trial_balance.map((x) => ({ cells: [`${x.account} ${x.name}`, x.debit, x.credit] }));
+      tb.push({ cls: "total", cells: ["Total", led.totals.debit, led.totals.credit] });
+      parts.push(table(["Account", "Debit", "Credit"], tb));
+      if (!led.totals.balanced) parts.push(el("p", { className: "error", textContent: "The trial balance does not balance." }));
+    }
+    if (r.refused.length) {
+      parts.push(el("h3", { textContent: "Entries the books refused" }));
+      parts.push(el("ul", {}, ...r.refused.map((x) => el("li", { textContent: `Record ${x.index}, ${when(x.time)}: ${x.reasons.join("; ")}` }))));
+    }
+    body.replaceChildren(...parts);
+  });
+}
+
 function formData(form) {
   return Object.fromEntries([...new FormData(form)].map(([k, v]) => [k, String(v).trim()]).filter(([, v]) => v));
 }
@@ -181,6 +286,22 @@ function formData(form) {
 document.addEventListener("DOMContentLoaded", async () => {
   for (const t of document.querySelectorAll(".tab")) t.addEventListener("click", () => show(t.dataset.view));
   $("run-demo").addEventListener("click", (e) => act(e.target, async () => fresh(await api("/api/demo", {}))));
+  $("run-full").addEventListener("click", (e) => act(e.target, async () => {
+    e.target.textContent = "Running the walk-through…";
+    try { fresh(await api("/api/full-demo", {})); } finally { e.target.textContent = "Run the full walk-through"; }
+  }));
+  $("decisions-all").addEventListener("change", loadDecisions);
+  $("run-audit").addEventListener("click", (e) => act(e.target, async () => {
+    const r = await api("/api/audit", {});
+    const box = $("audit-result");
+    box.className = "chk-result " + (r.ok ? "chk-ok" : "chk-bad");
+    box.replaceChildren(
+      el("p", { className: "chk-title", textContent: r.ok ? "Valid. Every audit check passed." : "Not valid." }),
+      ...(r.problems.length ? [el("ul", {}, ...r.problems.map((x) => el("li", { textContent: x })))] : []),
+      el("ul", {}, ...r.findings.map((x) => el("li", { textContent: x }))),
+      el("p", { textContent: (r.ok ? "What this means: " : "What to do: ") + r.meaning }),
+    );
+  }));
   $("open-form").addEventListener("submit", (e) => {
     e.preventDefault();
     act(e.submitter, async () => fresh(await api("/api/open", formData(e.target))));

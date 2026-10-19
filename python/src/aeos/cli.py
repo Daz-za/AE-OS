@@ -13,6 +13,7 @@
     aeos sink LOG --agent ID [--listen HOST:PORT] [--token-file FILE]
     aeos ingest LOG FILE --agent ID [--format events|otlp]
     aeos hook LOG --agent ID [--allow-tool T]...      (Claude Agent SDK / Claude Code)
+    aeos agents FOLDER | aeos decisions FOLDER [--all] | aeos books FOLDER   [--json]
 """
 from __future__ import annotations
 
@@ -23,7 +24,8 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
-from . import __version__, audit, demo, fulldemo, hooks, mcp_proxy, setup, sink, status, ui
+from . import (__version__, audit, demo, fulldemo, hooks, mcp_proxy, report, setup, sink,
+               status, ui)
 from .canon import cid_parse, cid_str
 from .log import ReceiptLog, make_record, to_view, verify_consistency_doc, verify_receipt
 from .recorder import Recorder
@@ -188,7 +190,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                    "question not answered by an option")
 
     p = sub.add_parser("ui", help="open a point-and-click view in the web browser")
-    p.add_argument("log", nargs="?", help="log folder to open (optional)")
+    p.add_argument("log", nargs="?", help="log folder or evidence folder to open (optional)")
     p.add_argument("--key", help="signing key file (found automatically when setup made it)")
     p.add_argument("--port", type=int, default=0, help="port on 127.0.0.1 (default: any free)")
     p.add_argument("--no-browser", action="store_true", help="print the address only")
@@ -196,6 +198,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     p = sub.add_parser("status", help="summarize a log in plain language")
     p.add_argument("log")
     p.add_argument("--key")
+
+    for name, text in (("agents", "list who acted: people, agents and services, and what each did"),
+                       ("decisions", "list what was refused or sent to a person, and why"),
+                       ("books", "show the books of account: periods, journal and trial balance")):
+        p = sub.add_parser(name, help=text)
+        p.add_argument("folder", help="a log folder, or an evidence folder from demo --full")
+        p.add_argument("--json", action="store_true", help="print JSON instead of text")
+        if name == "decisions":
+            p.add_argument("--all", action="store_true", help="include the calls that were "
+                           "allowed")
 
     argv = list(sys.argv[1:] if argv is None else argv)
     server_cmd: List[str] = []
@@ -218,6 +230,24 @@ def main(argv: Optional[List[str]] = None) -> int:
         for f in findings:
             print(f"  - {f}")
         return _report(problems, "the evidence holds together", "audit")
+    if a.cmd in ("agents", "decisions", "books"):
+        folder, evidence = report.locate(Path(a.folder))
+        if not (folder / "log.json").exists():
+            print(f"There is no receipt log in {a.folder}. Give the folder that holds "
+                  "log.json, or an evidence folder.", file=sys.stderr)
+            return 2
+        log = ReceiptLog.open(folder, read_only=True)
+        if a.cmd == "agents":
+            view, lines = report.agents(log), report.lines_agents
+        elif a.cmd == "decisions":
+            view, lines = report.decisions(log, everything=a.all), report.lines_decisions
+        else:
+            view, lines = report.books_view(log, report.chart(evidence)), report.lines_books
+        if a.json:
+            _write(view, None)
+        else:
+            print("\n".join(lines(view)))
+        return 0
     if a.cmd == "setup":
         wizard = setup.Wizard(assume_defaults=a.yes)
         try:

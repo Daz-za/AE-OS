@@ -1,4 +1,4 @@
-"""A point-and-click view of a receipt log in the web browser: `aeos ui`.
+"""A point-and-click view of a receipt log or an evidence folder in the web browser: `aeos ui`.
 
 The page is served only to this computer (127.0.0.1). Each launch makes a fresh access
 code that is part of the address the browser opens. Other websites open in the same
@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
-from .. import demo, setup, status
+from .. import audit, demo, fulldemo, report, setup, status
 from ..canon import cid_str
 from ..log import ReceiptLog, to_view
 
@@ -38,6 +38,9 @@ def find_key(folder: Path) -> Optional[Path]:
     """The signing key for a log: in its folder (demo logs), or where setup keeps keys."""
     if (folder / "signing.key").exists():
         return folder / "signing.key"
+    if (folder.parent / "evidence.json").exists() and \
+            (folder.parent / "private" / "log-signing.key").exists():
+        return folder.parent / "private" / "log-signing.key"      # demo --full keeps it here
     try:
         log_id = json.loads((folder / "log.json").read_text()).get("log_id", "")
     except (OSError, ValueError):
@@ -56,6 +59,7 @@ class App:
     def __init__(self, folder: Optional[Path] = None, key: Optional[Path] = None) -> None:
         self.folder: Optional[Path] = None
         self.key: Optional[Path] = None
+        self.evidence: Optional[Path] = None
         self.lock = threading.Lock()
         if folder is not None:
             self.open({"folder": str(folder), "key": str(key) if key else ""})
@@ -68,6 +72,7 @@ class App:
     def state(self, _: Dict[str, Any]) -> Dict[str, Any]:
         out: Dict[str, Any] = {"folder": str(self.folder) if self.folder else None,
                                "key": str(self.key) if self.key else None,
+                               "evidence": str(self.evidence) if self.evidence else None,
                                "cwd": str(Path.cwd()), "modes": setup.MODES}
         if self.folder is not None:
             s = status.summary(self._log())
@@ -76,10 +81,10 @@ class App:
         return out
 
     def open(self, req: Dict[str, Any]) -> Dict[str, Any]:
-        folder = Path(str(req.get("folder") or "")).expanduser()
+        folder, evidence = report.locate(Path(str(req.get("folder") or "")).expanduser())
         if not (folder / "log.json").exists():
             raise UserError(f"There is no receipt log in {folder}. Choose the folder that "
-                            "holds log.json.")
+                            "holds log.json, or an evidence folder.")
         key = Path(str(req["key"])).expanduser() if req.get("key") else find_key(folder)
         if key is not None and not key.exists():
             raise UserError(f"There is no signing key file at {key}.")
@@ -88,18 +93,53 @@ class App:
         except ValueError as e:
             raise UserError(f"This log cannot be opened: {e}.") from None
         self.folder, self.key = folder.resolve(), key.resolve() if key else None
+        self.evidence = evidence.resolve() if evidence else None
         return self.state({})
 
-    def demo(self, req: Dict[str, Any]) -> Dict[str, Any]:
-        folder = Path(str(req.get("folder") or "aeos-demo")).expanduser()
-        n = 2
+    def _new_folder(self, req: Dict[str, Any], default: str) -> Path:
+        base = str(req.get("folder") or default)
+        folder, n = Path(base).expanduser(), 2
         while folder.exists() and any(folder.iterdir()):
-            folder = Path(f"{str(req.get('folder') or 'aeos-demo')}-{n}").expanduser()
+            folder = Path(f"{base}-{n}").expanduser()
             n += 1
+        return folder
+
+    def full_demo(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        folder = self._new_folder(req, "aeos-full-demo")
+        lines: List[str] = []
+        if fulldemo.run(folder, out=lines.append) != 0:
+            raise UserError("The walk-through stopped: " + " ".join(lines[-3:]))
+        self.open({"folder": str(folder)})
+        return {**self.state({}), "story": "\n".join(lines), "story_kind": "full"}
+
+    def _evidence(self) -> Path:
+        if self.evidence is None:
+            raise UserError("This needs an evidence folder, such as the one the full "
+                            "walk-through makes. Open the folder that holds evidence.json.")
+        return self.evidence
+
+    def audit(self, _: Dict[str, Any]) -> Dict[str, Any]:
+        findings, problems = audit.run(self._evidence())
+        good, bad = status.MEANING["audit"]
+        return {"ok": not problems, "findings": findings, "problems": problems,
+                "meaning": good if not problems else bad}
+
+    def agents(self, _: Dict[str, Any]) -> Dict[str, Any]:
+        return report.agents(self._log())
+
+    def decisions(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        return report.decisions(self._log(), everything=str(req.get("all")) in ("1", "true"))
+
+    def books(self, _: Dict[str, Any]) -> Dict[str, Any]:
+        return report.books_view(self._log(), report.chart(self.evidence))
+
+    def demo(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        folder = self._new_folder(req, "aeos-demo")
         lines: List[str] = []
         demo.run(folder, out=lines.append)
         self.folder, self.key = (folder / "log").resolve(), (folder / "log" / "signing.key").resolve()
-        return {**self.state({}), "story": "\n".join(lines)}
+        self.evidence = None
+        return {**self.state({}), "story": "\n".join(lines), "story_kind": "short"}
 
     def create(self, req: Dict[str, Any]) -> Dict[str, Any]:
         lines: List[str] = []
@@ -115,6 +155,7 @@ class App:
         key = Path(opts["key"]).expanduser() if opts["key"] else \
             setup.default_key_dir() / f"{slug}.key"
         self.folder, self.key = folder.resolve(), key.resolve() if key else None
+        self.evidence = None
         steps = (folder / "NEXT-STEPS.txt").read_text()
         return {**self.state({}), "next_steps": steps}
 
@@ -168,7 +209,9 @@ ROUTES: Dict[Tuple[str, str], Callable[[App, Dict[str, Any]], Dict[str, Any]]] =
     ("POST", "/api/demo"): App.demo, ("POST", "/api/create"): App.create,
     ("GET", "/api/records"): App.records, ("POST", "/api/verify"): App.verify,
     ("POST", "/api/checkpoint"): App.checkpoint, ("GET", "/api/receipt"): App.receipt,
-    ("GET", "/api/growth"): App.growth,
+    ("GET", "/api/growth"): App.growth, ("POST", "/api/full-demo"): App.full_demo,
+    ("POST", "/api/audit"): App.audit, ("GET", "/api/agents"): App.agents,
+    ("GET", "/api/decisions"): App.decisions, ("GET", "/api/books"): App.books,
 }
 
 
