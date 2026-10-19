@@ -247,7 +247,7 @@ def check(doc: Any, folder: Optional[Path] = None) -> List[str]:
             continue
         aid = a.get("id")
         if a.get("authorized_by") not in persons:
-            p.append(f"agent {aid}: authorized_by must name one of the people")
+            p.append(f"agent {aid}: authorized by must name one of the people")
         unknown = [t for t in a.get("tools") or [] if t not in tools]
         if unknown:
             p.append(f"agent {aid}: no system provides {', '.join(unknown)}")
@@ -259,7 +259,7 @@ def check(doc: Any, folder: Optional[Path] = None) -> List[str]:
             p.append(f"agent {aid}: {e}")
         hours = a.get("valid_hours", 8)
         if not isinstance(hours, (int, float)) or not 0 < hours <= 24 * 31:
-            p.append(f"agent {aid}: valid_hours must be between 1 and 744")
+            p.append(f"agent {aid}: hours valid must be between 1 and 744")
     rules = doc.get("rules") or {"type": "none"}
     kind = rules.get("type")
     if kind not in RULE_TYPES:
@@ -268,14 +268,14 @@ def check(doc: Any, folder: Optional[Path] = None) -> List[str]:
         try:
             minor(rules.get("approval_above", "0"))
         except ValueError as e:
-            p.append(f"rules: approval_above: {e}")
+            p.append(f"rules: the approval amount: {e}")
         if not any(x.get("approver") for x in persons.values()):
             p.append("rules: mark at least one person as an approver, or payments above "
                      "the approval amount can never be approved")
     elif kind == "wasm":
         f = Path(folder or ".") / str(rules.get("file", ""))
         if not rules.get("file") or (folder is not None and not f.is_file()):
-            p.append("rules: file must name a compiled policy (.wasm) in the workspace folder")
+            p.append("rules: file must name your compiled rules (.wasm) in the workspace folder")
         if not rules.get("entrypoint"):
             p.append("rules: entrypoint must name the rule that gives the decision, such as "
                      "acme/payments/decision")
@@ -289,14 +289,14 @@ def check(doc: Any, folder: Optional[Path] = None) -> List[str]:
             p.append("books: the chart of accounts needs at least one account")
         if not any(x.get("controller") for x in persons.values()):
             p.append("books: mark at least one person as a controller, who opens and closes "
-                     "periods")
+                     "months")
     w = doc.get("witnesses") or {}
     names = w.get("names") or []
     if not names or not all(isinstance(n, str) and _ID.match(n) for n in names):
         p.append("witnesses: give at least one witness name of lower-case letters, digits and "
                  "hyphens")
     elif not isinstance(w.get("required"), int) or not 1 <= w["required"] <= len(names):
-        p.append("witnesses: required must be between 1 and the number of witnesses")
+        p.append("witnesses: how many must cosign must be between 1 and the number of witnesses")
     return p
 
 

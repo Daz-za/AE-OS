@@ -5,7 +5,7 @@ const STEP_ICON = { pass: "✓", fail: "✕", wait: "…", skip: "–" };
 const OUTCOME = {
   done: ["Done", "tag-allow", "Every check passed and the tool ran."],
   waiting: ["Waiting for approval", "tag-escalate", "The rules sent this call to a person. It has not run."],
-  answered: ["Sent to a person", "tag-escalate", "This call waited for a person, who answered it. The agent then repeated the call with the answer."],
+  answered: ["Answered by a person", "tag-escalate", "This call waited for a person, who answered it. The agent then repeated the call with the answer."],
   refused: ["Refused", "tag-deny", "A check refused the call. Nothing ran past that point."],
 };
 const STATUSES = ["approved for payment", "awaiting approval"];
@@ -60,12 +60,12 @@ export function workspaceViews({ api, act, el, show, refresh }) {
   function drawMap() {
     const rules = doc.rules || { type: "none" };
     const ruleText = rules.type === "payments"
-      ? `Approval above ${(doc.books || {}).currency || "USD"} ${rules.approval_above}; ${list(rules.sanctioned_suppliers || []).length} sanctioned`
+      ? `Approval above ${(doc.books || {}).currency || "USD"} ${rules.approval_above}; ${list(rules.sanctioned_suppliers || []).length} sanctioned suppliers`
       : rules.type === "wasm" ? `Your rules: ${rules.file}` : "No rules";
     const nodes = [
       ["sec-people", "People", "Sign each agent's authority, approve, close months", people().map((p) => p.name || p.id)],
       ["sec-agents", "Agents", "Act only within what a person signed", (doc.agents || []).map((a) => a.name || a.id)],
-      ["sec-rules", "Gateway", "Identity · Allow list · Authority · Rules", [ruleText]],
+      ["sec-rules", "Gateway", "Identity · Allow list · Delegated authority · Rules", [ruleText]],
       ["sec-systems", "Systems and books", "Where the tools are", [...(doc.systems || []).map((s) => s.id), ...(doc.books ? [`Books ${doc.books.entity}`] : [])]],
       ["sec-witnesses", "Log and witnesses", "Every step recorded and sealed", [`${(doc.witnesses || {}).required || 0} of ${((doc.witnesses || {}).names || []).length} witnesses cosign`]],
     ];
@@ -88,7 +88,7 @@ export function workspaceViews({ api, act, el, show, refresh }) {
     const tools = allTools();
     const org = doc.organization;
     const parts = [];
-    parts.push(section("sec-org", "Organization", "The trust domain names every identity, such as spiffe://acme.example/agent/accounts-payable.",
+    parts.push(section("sec-org", "Organization", "A domain name your organization controls. Every person, agent and service gets an identity under it, such as spiffe://acme.example/agent/accounts-payable.",
       el("div", { className: "grid2" },
         field("Name", org.name, (v) => { org.name = v; }),
         field("Trust domain", org.trust_domain, (v) => { org.trust_domain = v; }, { placeholder: "acme.example" }))));
@@ -143,10 +143,10 @@ export function workspaceViews({ api, act, el, show, refresh }) {
       }),
       ...(rules.type === "payments" ? [el("div", { className: "grid2" },
         field("Payments above this amount need approval", rules.approval_above, (v) => { rules.approval_above = v; }),
-        field("Sanctioned suppliers (comma separated)", (rules.sanctioned_suppliers || []).join(", "), (v) => { rules.sanctioned_suppliers = list(v); })),
+        field("Sanctioned supplier IDs (comma separated)", (rules.sanctioned_suppliers || []).join(", "), (v) => { rules.sanctioned_suppliers = list(v); })),
       el("p", { className: "muted", textContent: approvers.length ? `Approvers: ${approvers.join(", ")}. The person who authorized an agent cannot approve its payments.` : "Mark at least one person as an approver." })] : []),
       ...(rules.type === "wasm" ? [el("div", { className: "grid2" },
-        field("Compiled policy file", rules.file, (v) => { rules.file = v; }),
+        field("Compiled rules file (.wasm)", rules.file, (v) => { rules.file = v; }),
         field("Entrypoint", rules.entrypoint, (v) => { rules.entrypoint = v; })),
       jsonField("Data for the rules (JSON)", rules.data || {}, (v) => { rules.data = v; })] : [])));
 
@@ -168,7 +168,7 @@ export function workspaceViews({ api, act, el, show, refresh }) {
         button("Add an account", () => { b.accounts[String(9000 + Object.keys(b.accounts).length)] = "New account"; markDirty(); rebuild(); }))] : [])));
 
     const w = doc.witnesses || (doc.witnesses = { names: [], required: 1 });
-    parts.push(section("sec-witnesses", "Log and witnesses", "Witnesses cosign each sealed checkpoint and refuse a log that shows them two different histories.",
+    parts.push(section("sec-witnesses", "Log and witnesses", "Witnesses are independent services that countersign each checkpoint, a signed summary of the log so far. They refuse a log that shows them two different histories.",
       el("div", { className: "grid2" },
         field("Witnesses (comma separated)", w.names.join(", "), (v) => { w.names = list(v); }),
         field("How many must cosign", w.required, (v) => { w.required = v; }, { type: "number" }))));
@@ -297,7 +297,7 @@ export function workspaceViews({ api, act, el, show, refresh }) {
     $("connect-body").replaceChildren(
       el("p", { textContent: `While this page or aeos up runs, your own agent connects to the gateway${ws.port ? ` on port ${ws.port}` : ""} with its certificate and token from ${ws.connect}.` }),
       el("pre", { className: "code", textContent: `from aeos import workspace\n\nagent = workspace.remote_client("${ws.folder}", "${agent}")\nagent.initialize()\nprint(agent.call("erp.invoice.get", ${sample}))\nagent.close()` }),
-      el("p", { className: "muted", textContent: "The certificates are renewed every few minutes; create the client again to pick up new ones. The builder's guide in the repository covers more." }));
+      el("p", { className: "muted", textContent: "The certificates are renewed every few minutes; create the client again to pick up new ones. For more, see docs/building.md in the repository." }));
   }
 
   function argFields() {

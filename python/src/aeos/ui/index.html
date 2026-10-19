@@ -30,7 +30,7 @@
 
   <section id="view-start" class="view" hidden>
     <h1>Build your AE-OS</h1>
-    <p class="lead">Describe your company once: its people, its AI agents and what each may do, the systems they use, your rules and your books. Then run it here and watch every agent call pass each check.</p>
+    <p class="lead">Describe your company once: its people, its AI agents and what each may do, the systems they use, your rules and your books. Then run it here and see each agent call go through every check.</p>
     <div class="cards">
       <article class="card">
         <h2>Start from the example</h2>
@@ -46,14 +46,14 @@
         <form id="open-form">
           <label>A workspace, an evidence folder, or a log folder
             <input name="folder" placeholder="./my-aeos" autocomplete="off" required></label>
-          <label>Signing key file (optional; found automatically when it can be)
+          <label>Signing key file (optional; needed only for a log made on another computer)
             <input name="key" placeholder="only for a log made elsewhere" autocomplete="off"></label>
           <button class="primary">Open</button>
         </form>
       </article>
       <article class="card">
         <h2>Watch a walk-through</h2>
-        <p>Every part working together, narrated step by step, ending with an audit.</p>
+        <p>A narrated run of every part of AE-OS, from an agent's first call to the final audit.</p>
         <p class="muted">Saved in a new folder in <span class="path" id="cwd"></span></p>
         <div class="actions">
           <button id="run-full" class="primary">Run the full walk-through</button>
@@ -96,7 +96,7 @@
 
   <section id="view-try" class="view" hidden>
     <h1>Try it</h1>
-    <p>Act as one of your agents. Send a tool call and watch it pass each check.</p>
+    <p>Act as one of your agents. Send a tool call and see the result of each check.</p>
     <div id="try-scenarios" class="chips"></div>
     <div class="try">
       <form id="try-form" class="card"></form>

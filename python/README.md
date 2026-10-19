@@ -153,6 +153,10 @@ The auditor should get the public key from a source they trust, not from the fil
 
 Auditors who prefer not to install anything can check receipts and growth proofs in a web browser at [ae-os.org/verify](https://ae-os.org/verify). The page runs [`verify.js`](src/aeos/ui/verify.js), the same checker that `aeos ui` uses; the files stay on the auditor's device. Its tests (`node --test src/aeos/ui/verify.test.mjs`) run the shared test vectors.
 
+## Build a workspace
+
+`aeos new FOLDER` writes `workspace.json`, one file that describes an organization: people, agents with their tools and limits, systems that provide tools (an example ERP, a Python file, or an MCP server), rules, books of account and witnesses. `aeos ui FOLDER` edits it and lets you send calls as an agent and see each check; `aeos up FOLDER` runs it for other programs; `aeos call`, `aeos period`, `aeos seal` and `aeos trace` work from the terminal. The folder is also an evidence folder for `aeos audit`. See [docs/building.md](../docs/building.md).
+
 ## Work in the web browser
 
 `aeos ui` opens a page on this computer where you can run the short example or the full walk-through, create or open a log, look through its records, download receipts, sign checkpoints and check receipts from other logs. For an evidence folder it also shows who acted, what was refused or sent to a person and why, the journal and trial balance, and runs the audit. It is served only at 127.0.0.1, this computer's own address. Each launch makes a new access code that is part of the address; other websites open in the same browser do not have it and cannot use the page. Use `aeos ui ./ap-log` (or `aeos ui ./aeos-full-demo`) to open a log or evidence folder directly, and `--no-browser` to print the address without opening a browser, then open it in a browser on the same computer.
@@ -200,4 +204,4 @@ Version 0.1 is an early release for evaluation.
 - The signing key is a file. Keep it outside the log directory (`--key`) and away from the agent; hardware or KMS keys are planned.
 - The whole log is held in memory and hashed on load, which suits logs up to a few hundred thousand records. Each `aeos hook` call loads the log, so start a new log per agent or per period when a single log grows large.
 - A receipt proves a record is in the log. Whether the log is complete depends on the agent being able to reach its tools only through a recorded path: the proxy, a gateway that reports to the sink, or the hook.
-- The gateway meters each intent's total budget in its own memory: a restart resets it, and several gateways do not share it.
+- The gateway meters each intent's total budget in its own memory, and several gateways do not share it. A workspace rebuilds the budget spent from the log when it starts.

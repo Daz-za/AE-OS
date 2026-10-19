@@ -34,11 +34,11 @@ def test_the_example_is_ready_and_mistakes_are_named(ws):
     doc["people"][1]["approver"] = False
     doc["witnesses"]["required"] = 3
     problems = workspace.check(doc, ws)
-    assert "agent accounts-payable: authorized_by must name one of the people" in problems
+    assert "agent accounts-payable: authorized by must name one of the people" in problems
     assert "agent accounts-payable: no system provides crm.customer.get" in problems
     assert "agent accounts-payable: the budget is smaller than the limit per call" in problems
     assert any(p.startswith("rules: mark at least one person as an approver") for p in problems)
-    assert any(p.startswith("witnesses: required") for p in problems)
+    assert any(p.startswith("witnesses: how many") for p in problems)
     with pytest.raises(workspace.WorkspaceError):
         workspace.save(ws, doc)
     with pytest.raises(workspace.WorkspaceError):

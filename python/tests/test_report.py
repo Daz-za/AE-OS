@@ -29,7 +29,7 @@ def test_commands_on_an_evidence_folder(tmp_path, capsys):
     assert "Books of account: 2 refused" in out
     # A refusal by the books names the agent that asked, not the books service.
     assert "agent/accounts-payable called ledger.post" in out
-    assert "the tool is not on the session's allow list" in out
+    assert "the tool is not on this agent's list of tools" in out
 
     assert cli.main(["agents", str(folder / "log"), "--json"]) == 0
     ids = {a["id"]: a for a in json.loads(capsys.readouterr().out)["identities"]}

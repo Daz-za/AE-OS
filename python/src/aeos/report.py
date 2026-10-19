@@ -24,7 +24,7 @@ CHECKS = {
     "aeos-policy/v0": "Payment rules",
     "aeos-books/v0": "Books of account",
 }
-REASONS = {"tool-not-in-allow-list": "the tool is not on the session's allow list"}
+REASONS = {"tool-not-in-allow-list": "the tool is not on this agent's list of tools"}
 
 
 def when(ms: Optional[int]) -> str:
@@ -317,7 +317,7 @@ def trace(log: ReceiptLog, ref: str, names: Optional[Dict[str, str]] = None
     if steps["rules"]["state"] == "skip" and "policy_sha256" not in sbody:
         steps["rules"]["text"] = "No rules are set for this gateway"
     if steps["authority"]["state"] == "skip" and not sbody.get("authorization"):
-        steps["authority"]["text"] = "This gateway does not ask for a capability token"
+        steps["authority"]["text"] = "This gateway does not check delegated authority"
     for k, _ in STEPS:
         if steps[k]["state"] == "skip" and not steps[k]["text"]:
             steps[k]["text"] = "Did not run" if k == "tool" else "Not reached"
@@ -341,7 +341,7 @@ def trace(log: ReceiptLog, ref: str, names: Optional[Dict[str, str]] = None
     put("receipt", "pass", f"Recorded as record {target.index}, with {len(linked)} linked "
         "record" + ("" if len(linked) == 1 else "s") + ("; sealed in a signed checkpoint"
                                                         if sealed else
-                                                        "; sealed at the next checkpoint"),
+                                                        "; not sealed yet, and the next checkpoint will seal it"),
         target.index)
     shown = [steps[k] for k, _ in STEPS
              if not (k == "approval" and steps[k]["state"] == "skip")
@@ -369,7 +369,7 @@ def lines_trace(view: Dict[str, Any]) -> List[str]:
     for s in view["steps"]:
         out.append(f"  {marks[s['state']]}  {s['label']:<20} {s['text']}")
     out.append({"done": "Result: it ran.", "waiting": "Result: waiting for a person's approval.",
-                "answered": "Result: sent to a person, who answered with a repeated call.",
+                "answered": "Result: a person answered, and the agent repeated the call with that answer.",
                 "refused": "Result: refused."}[view["outcome"]])
     return out
 
