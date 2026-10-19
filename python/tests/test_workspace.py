@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from aeos import audit, cli, workspace
+from aeos import audit, cli, report, workspace
 
 FAKE_MCP = Path(__file__).with_name("fake_mcp_server.py")
 TODAY = f"{dt.date.today():%Y-%m-%d}"
@@ -73,7 +73,10 @@ def test_calls_pass_each_check_and_the_evidence_audits(ws):
         done = p.approve(esc, "cfo")
         assert done["ok"] and done["result"]["payment"].startswith("PAY-")
         assert steps(done)["approval"] == "pass"
-        assert "Chief financial officer" in done["trace"]["steps"][3]["text"]
+        approval = next(s for s in done["trace"]["steps"] if s["step"] == "approval")
+        assert "Chief financial officer" in approval["text"]
+        first = report.trace(p.log, str(waiting["trace"]["call"]))
+        assert first["outcome"] == "answered"
 
         sanctioned = p.call("accounts-payable", "erp.invoice.pay",
                             {"invoice": "INV-1003", "amount_minor": 95_000})

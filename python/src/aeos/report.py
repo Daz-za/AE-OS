@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import books
-from .canon import cid_str
+from .canon import cid_parse, cid_str
 from .delegation import money
 from .log import ReceiptLog
 
@@ -217,7 +217,7 @@ def books_view(log: ReceiptLog, accounts: Optional[Dict[str, str]] = None) -> Di
 
 # The checks a gateway call passes, in the order the gateway runs them.
 STEPS = [("identity", "Identity"), ("allow", "Allow list"), ("authority", "Delegated authority"),
-         ("approval", "Approval"), ("rules", "Rules"), ("tool", "Tool"),
+         ("rules", "Rules"), ("approval", "Approval"), ("tool", "Tool"),
          ("books", "Books of account"), ("receipt", "Receipt")]
 
 
@@ -273,6 +273,7 @@ def trace(log: ReceiptLog, ref: str, names: Optional[Dict[str, str]] = None
         body = r.get("body") or {}
         policy, decision = body.get("policy"), body.get("decision")
         reasons = "; ".join(REASONS.get(x, x) for x in body.get("reasons") or [])
+        reasons = reasons[:1].upper() + reasons[1:]
         if r.get("kind") == "policy.decision" and policy == "aeos-allow-list/v0":
             put("allow", "fail", f"{tool} is not on this agent's list of tools", e.index)
         elif r.get("kind") == "policy.decision" and policy == "aeos-capability/v0":
@@ -290,10 +291,11 @@ def trace(log: ReceiptLog, ref: str, names: Optional[Dict[str, str]] = None
                 "with a signature over this exact call", e.index)
         elif r.get("kind") == "policy.decision" and policy == "aeos-policy/v0":
             if decision == "allow":
-                put("rules", "pass", "The rules allow it", e.index)
+                put("rules", "pass", "The rules allow it" + (
+                    ", with the approval" if steps["approval"]["state"] == "pass" else ""), e.index)
             elif decision == "escalate":
                 escalation = cid_str(e.cid)
-                put("rules", "wait", f"Sent to a person: {reasons}", e.index)
+                put("rules", "wait", f"Sent to a person: {reasons[:1].lower() + reasons[1:]}", e.index)
                 put("approval", "wait", "Waiting for someone on the approvers list", e.index)
             else:
                 put("rules", "fail", reasons, e.index)
@@ -319,6 +321,20 @@ def trace(log: ReceiptLog, ref: str, names: Optional[Dict[str, str]] = None
     for k, _ in STEPS:
         if steps[k]["state"] == "skip" and not steps[k]["text"]:
             steps[k]["text"] = "Did not run" if k == "tool" else "Not reached"
+    answered = None
+    if escalation:                    # a person may have answered it with a repeated call
+        esc_cid = cid_parse(escalation)
+        index_of = {e.cid: e.index for e in entries}
+        for e in entries[target.index + 1:]:
+            r = log.record(e)
+            if r.get("kind") == "approval" and (r.get("parents") or [None])[0] == esc_cid:
+                body = r.get("body") or {}
+                again = r["parents"][1] if len(r["parents"]) > 1 else None
+                answered = body.get("decision")
+                put("approval", "pass" if answered == "approve" else "fail",
+                    f"{'Approved' if answered == 'approve' else 'Rejected'} by "
+                    f"{nm(body.get('approver') or r.get('agent'))}; the agent repeated the "
+                    f"call with it as record {index_of.get(again, '?')}", e.index)
     cps = log.checkpoints()
     last = max([target.index] + [e.index for e, _ in linked])
     sealed = next((c for c in cps if c.size > last), None)
@@ -331,6 +347,7 @@ def trace(log: ReceiptLog, ref: str, names: Optional[Dict[str, str]] = None
              if not (k == "approval" and steps[k]["state"] == "skip")
              and not (k == "books" and steps[k]["state"] == "skip" and tool != books.TOOL)]
     outcome = ("waiting" if escalation and steps["approval"]["state"] == "wait" else
+               "answered" if escalation else
                "done" if steps["tool"]["state"] == "pass" and
                steps["books"]["state"] != "fail" else "refused")
     return {"call": target.index, "cid": cid_str(call_cid), "tool": tool,
@@ -352,6 +369,7 @@ def lines_trace(view: Dict[str, Any]) -> List[str]:
     for s in view["steps"]:
         out.append(f"  {marks[s['state']]}  {s['label']:<20} {s['text']}")
     out.append({"done": "Result: it ran.", "waiting": "Result: waiting for a person's approval.",
+                "answered": "Result: sent to a person, who answered with a repeated call.",
                 "refused": "Result: refused."}[view["outcome"]])
     return out
 

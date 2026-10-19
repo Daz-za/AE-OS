@@ -1,12 +1,13 @@
 // The local page for `aeos ui`. Talks to the server in ui/__init__.py.
 import { KINDS, mountCheck, recordDetails, when } from "./check.js";
+import { workspaceViews } from "./workspace.js";
 
 const code = new URLSearchParams(location.hash.slice(1)).get("code") || sessionStorage.getItem("aeos-code") || "";
 try { sessionStorage.setItem("aeos-code", code); } catch { /* private window */ }
 history.replaceState(null, "", "/");
 
 const $ = (id) => document.getElementById(id);
-let state = null, start = 0, checkMounted = false;
+let state = null, start = 0, checkMounted = false, wsv = null;
 
 async function api(path, body) {
   const res = await fetch(path, {
@@ -43,6 +44,8 @@ function show(view) {
   if (view === "agents") loadAgents();
   if (view === "decisions") loadDecisions();
   if (view === "books") loadBooks();
+  if (view === "build") wsv.loadBuild();
+  if (view === "try") wsv.loadTry();
   if (view === "check" && !checkMounted && state && state.status) {
     mountCheck($("check"), { publicKey: state.status.public_key });
     checkMounted = true;
@@ -64,10 +67,12 @@ function render(s) {
   state = s;
   $("tabs").hidden = !s.folder;
   $("tab-audit").hidden = !s.evidence;
+  for (const n of document.querySelectorAll(".ws-only")) n.hidden = !s.workspace;
+  $("seal").hidden = !s.workspace;
   $("cwd").textContent = s.cwd;
   if (!s.folder) return show("start");
   const st = s.status;
-  $("log-id").textContent = `Log ${st.log_id}`;
+  $("log-id").textContent = s.workspace ? `${s.organization}: the log` : `Log ${st.log_id}`;
   $("log-folder").textContent = s.folder;
   const unsealed = st.records - st.last_checkpoint_size;
   const rows = [
@@ -125,9 +130,17 @@ function fresh(s) {
   $("audit-result").replaceChildren();
   $("audit-result").className = "chk-result";
   $("decisions-all").checked = false;
+  $("decision-trace").hidden = true;
   start = 0;
   render(s);
-  show("overview");
+  show(s.workspace ? "build" : "overview");
+}
+
+async function showChecks(ref, box, button) {
+  await act(button, async () => {
+    wsv.renderTrace(box, await api(`/api/trace?ref=${ref}`));
+    box.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  });
 }
 
 async function loadRecords() {
@@ -169,6 +182,12 @@ async function loadRecords() {
         cid.className = "path";
         cid.textContent = `Fingerprint, a code computed from the record's exact content: ${item.cid}`;
         td.append(recordDetails(rec), cid, btn, hint);
+        if (rec.kind === "tool.call" || rec.kind === "policy.decision") {
+          const box = el("div", { className: "trace" });
+          const checks = el("button", { textContent: "Show each check this call passed" });
+          checks.addEventListener("click", () => showChecks(item.index, box, checks));
+          td.append(checks, box);
+        }
         d.append(td);
         tr.after(d);
       };
@@ -233,7 +252,12 @@ async function loadDecisions() {
           el("span", { className: "muted", textContent: `Record ${d.index} · ${when(d.time)}` })),
         el("p", { className: "id", textContent: who }),
         d.reasons.length ? el("ul", {}, ...d.reasons.map((x) => el("li", { textContent: x }))) : null,
-        ...approvals);
+        ...approvals,
+        d.call != null ? (() => {
+          const b = el("button", { className: "quiet", textContent: "Show each check" });
+          b.addEventListener("click", () => showChecks(d.call, $("decision-trace"), b));
+          return b;
+        })() : null);
     }));
   });
 }
@@ -248,6 +272,7 @@ function table(head, rows) {
 
 async function loadBooks() {
   await act(null, async () => {
+    if (state && state.workspace) await wsv.drawPeriods();
     const r = await api("/api/books");
     const body = $("books-body");
     if (!r.ledgers.length && !r.refused.length) return body.replaceChildren(el("p", { className: "muted", textContent: "This log holds no books of account. The full walk-through has an example." }));
@@ -284,7 +309,16 @@ function formData(form) {
 }
 
 document.addEventListener("DOMContentLoaded", async () => {
-  for (const t of document.querySelectorAll(".tab")) t.addEventListener("click", () => show(t.dataset.view));
+  wsv = workspaceViews({ api, act, el, show, refresh: async () => render(await api("/api/state")) });
+  $("new-ws-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    act(e.submitter, async () => fresh(await api("/api/new-workspace", formData(e.target))));
+  });
+  $("seal").addEventListener("click", (e) => act(e.target, async () => {
+    await api("/api/ws/seal", {});
+    render(await api("/api/state"));
+  }));
+  for (const t of document.querySelectorAll(".tab, .jump")) t.addEventListener("click", () => show(t.dataset.view));
   $("run-demo").addEventListener("click", (e) => act(e.target, async () => fresh(await api("/api/demo", {}))));
   $("run-full").addEventListener("click", (e) => act(e.target, async () => {
     e.target.textContent = "Running the walk-through…";
