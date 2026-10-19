@@ -6,7 +6,7 @@ The `aeos` command records what an AI agent does in a tamper-evident log: each t
 
 ## 1. Install
 
-You need Python 3.10 or later, which most Linux and macOS systems already have. On Windows, install Python from [python.org](https://www.python.org/downloads/) and tick "Add Python to PATH" during installation.
+You need Python 3.10 or later, which most Linux and macOS systems already have. Windows needs it installed first, as shown below.
 
 The simplest way to install a command-line tool is `pipx`, which keeps it separate from the rest of your system. The install fetches the code from GitHub, so it also needs `git`.
 
@@ -26,13 +26,24 @@ pipx ensurepath
 pipx install "git+https://github.com/Daz-za/ae-os#subdirectory=python"
 ```
 
-**Windows** (in PowerShell, after installing [Git for Windows](https://git-scm.com/download/win))
+**Windows** (in PowerShell)
+
+First install Python and Git, then close PowerShell and open a new window:
+
+```
+winget install Python.Python.3.12
+winget install Git.Git
+```
+
+If `winget` is not available, install [Python](https://www.python.org/downloads/) (tick "Add python.exe to PATH") and [Git for Windows](https://git-scm.com/download/win) from their websites. Then:
 
 ```
 py -m pip install --user pipx
 py -m pipx ensurepath
 pipx install "git+https://github.com/Daz-za/ae-os#subdirectory=python"
 ```
+
+If PowerShell says `py` is not recognized, Python is not installed yet, or PowerShell was opened before it was installed.
 
 On every system, close and reopen the terminal after `pipx ensurepath` so it can find the new command. Then check that it worked:
 
