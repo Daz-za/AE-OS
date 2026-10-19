@@ -100,7 +100,7 @@ class App:
         self.close()
         try:
             self.platform, self.started = workspace.connect(folder)
-        except workspace.WorkspaceError as e:
+        except Exception as e:             # a tool that fails to start, a bad file
             raise UserError(f"The workspace cannot run yet: {e}. Fix workspace.json, or "
                             f"run: aeos check {folder}") from None
         self.folder = (folder / "log").resolve()
@@ -180,9 +180,16 @@ class App:
         problems = workspace.check(doc, p.folder)
         if problems:
             return {"saved": False, "problems": problems}
+        before = (p.folder / workspace.FILE).read_text()
         workspace.save(p.folder, doc)
         if self.started:
-            self._open_workspace(p.folder)
+            try:
+                self._open_workspace(p.folder)
+            except UserError as e:          # keep what ran before, and say why
+                (p.folder / workspace.FILE).write_text(before)
+                self._open_workspace(p.folder)
+                return {"saved": False, "problems": [
+                    f"It could not start with these changes, so they were not saved. {e}"]}
             return {"saved": True, "applied": True, **self.ws({})}
         return {"saved": True, "applied": False, **self.ws({})}
 
@@ -420,7 +427,7 @@ def make_handler(app: App, code: str, port_ref: List[int]):
                     self._json(200, route(app, req))
             except (UserError, workspace.WorkspaceError, books.Refused) as e:
                 self._json(400, {"error": str(e)})
-            except (OSError, ValueError, KeyError) as e:
+            except Exception as e:              # always answer, so the page can say why
                 self._json(500, {"error": f"Something went wrong: {e}"})
 
         def do_GET(self) -> None:

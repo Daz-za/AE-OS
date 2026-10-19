@@ -131,7 +131,7 @@ export function workspaceViews({ api, act, el, show, refresh }) {
         button("Remove this system", () => { doc.systems.splice(i, 1); markDirty(); rebuild(); }, "quiet"))),
       el("div", { className: "actions" },
         button("Add a Python file", () => { doc.systems.push({ id: `tools-${doc.systems.length + 1}`, type: "python", file: "my_tools.py" }); markDirty(); rebuild(); }),
-        button("Add an MCP server", () => { doc.systems.push({ id: `mcp-${doc.systems.length + 1}`, type: "mcp-stdio", command: ["python3", "server.py"], prefix: "", tools: [] }); markDirty(); rebuild(); }),
+        button("Add an MCP server", () => { doc.systems.push({ id: `mcp-${doc.systems.length + 1}`, type: "mcp-stdio", command: ["python", "server.py"], prefix: "", tools: [] }); markDirty(); rebuild(); }),
         button("Add an example ERP", () => { doc.systems.push({ id: `erp-${doc.systems.length + 1}`, type: "example-erp", invoices: [] }); markDirty(); rebuild(); }))));
 
     const rules = doc.rules || (doc.rules = { type: "none" });
@@ -209,6 +209,7 @@ export function workspaceViews({ api, act, el, show, refresh }) {
 
   async function loadBuild() {
     await act(null, async () => {
+      showProblems([]);
       ws = await api("/api/ws");
       doc = structuredClone(ws.doc);
       dirty = false;
