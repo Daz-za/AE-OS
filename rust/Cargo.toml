@@ -1,0 +1,22 @@
+[package]
+name = "aeos-receipts"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+description = "Independent verifier for AE-OS Receipts: signed, verifiable receipts for AI agent actions"
+license = "Apache-2.0"
+authors = ["Darren Lentz"]
+homepage = "https://ae-os.org"
+repository = "https://github.com/Daz-za/ae-os"
+readme = "README.md"
+publish = false
+
+[[bin]]
+name = "aeos-verify"
+path = "src/main.rs"
+
+[dependencies]
+base64 = "0.23"
+ed25519-dalek = { version = "3", default-features = false, features = ["fast"] }
+serde_json = "1"
+sha2 = "0.11"

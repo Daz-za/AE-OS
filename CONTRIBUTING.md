@@ -12,12 +12,14 @@ Thank you for your interest. AE-OS is at an early stage, and comments on the spe
 ## Making a change
 
 1. Fork the repository and create a branch from `main`.
-2. Make the change, with tests for any new behavior.
+2. Make the change, with tests for any new behavior. If you change the format or the verifier's messages, regenerate the shared test vectors with `python testvectors/generate.py`.
 3. Run the checks:
    ```
    pip install -e "python[test]"
    pytest -q python/tests
    python examples/invoice_demo.py
+   cd rust                        # when the format, the vectors or the Rust code changed
+   cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
    ```
 4. Commit with a sign-off (see below) and open a pull request against `main`.
 

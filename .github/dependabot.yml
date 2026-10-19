@@ -8,6 +8,13 @@ updates:
     groups:
       python-dependencies:
         patterns: ["*"]
+  - package-ecosystem: cargo
+    directory: /rust
+    schedule:
+      interval: weekly
+    groups:
+      rust-dependencies:
+        patterns: ["*"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
