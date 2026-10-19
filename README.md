@@ -27,7 +27,7 @@ The image above is a frame from the film on [ae-os.org](https://ae-os.org), whic
 | Path | What it is |
 |---|---|
 | [`spec/receipts-v0.md`](spec/receipts-v0.md) | AE-OS Receipts format: records, Merkle log, signed checkpoints, receipts and consistency proofs |
-| [`python/`](python/) | `aeos-receipts`, the Python library and command line, including an MCP proxy that records an agent's tool calls |
+| [`python/`](python/) | `aeos-receipts`, the Python library and command line, including an MCP proxy and an HTTP log sink that record agents' tool calls from MCP servers, gateways, OpenTelemetry traces and Claude Code hooks |
 | [`rust/`](rust/) | `aeos-verify`, a separate verifier in Rust, sharing no code with the Python library, that auditors can use to check receipts, consistency proofs and whole logs |
 | [`testvectors/`](testvectors/) | Shared test vectors that keep the Python and Rust implementations in agreement |
 | [`examples/`](examples/) | A worked example: an agent pays an invoice, and an auditor checks the evidence |

@@ -275,6 +275,11 @@ class ReceiptLog:
     def __len__(self) -> int:
         return len(self._entries)
 
+    @property
+    def can_sign(self) -> bool:
+        """True when the signing key is loaded, so checkpoints can be issued."""
+        return self._key is not None
+
     def append(self, record: Dict[str, Any], content: Optional[Dict[str, Any]] = None
                ) -> Entry:
         """Append a record and return its index and CID.

@@ -10,18 +10,23 @@
     aeos-receipts verify LOG
     aeos-receipts show LOG [REF]
     aeos-receipts mcp-proxy LOG --agent ID [--on-behalf-of ID] [--allow-tool T]... -- CMD...
+    aeos-receipts sink LOG --agent ID [--listen HOST:PORT] [--token-file FILE]
+    aeos-receipts ingest LOG FILE --agent ID [--format events|otlp]
+    aeos-receipts hook LOG --agent ID [--allow-tool T]...      (Claude Agent SDK / Claude Code)
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import List, Optional
 
-from . import __version__, mcp_proxy
+from . import __version__, hooks, mcp_proxy, sink
 from .canon import cid_parse, cid_str
 from .log import ReceiptLog, make_record, to_view, verify_consistency_doc, verify_receipt
+from .recorder import Recorder
 
 
 def _public_key(value: str) -> bytes:
@@ -116,6 +121,33 @@ def main(argv: Optional[List[str]] = None) -> int:
                    help="also keep full arguments and results under content/")
     p.add_argument("--checkpoint-every", type=int, default=100)
 
+    def recorder_options(p: argparse.ArgumentParser, checkpoint_every: int) -> None:
+        p.add_argument("log")
+        p.add_argument("--key")
+        p.add_argument("--agent", required=True,
+                       help="identity recorded when an event names none, e.g. a SPIFFE ID")
+        p.add_argument("--on-behalf-of", help="the person or organization the agent acts for")
+        p.add_argument("--allow-tool", action="append", help="permit only these tools")
+        p.add_argument("--store-content", action="store_true",
+                       help="also keep full arguments and results under content/")
+        p.add_argument("--checkpoint-every", type=int, default=checkpoint_every)
+
+    p = sub.add_parser("sink", help="receive tool-call events from gateways over HTTP")
+    recorder_options(p, 100)
+    p.add_argument("--listen", default="127.0.0.1:4318", help="host:port (default %(default)s)")
+    p.add_argument("--token-file", help="file holding the bearer token callers must send "
+                   "(default: the AEOS_SINK_TOKEN environment variable)")
+
+    p = sub.add_parser("ingest", help="record tool-call events from a file of JSON lines")
+    recorder_options(p, 100)
+    p.add_argument("file", help="JSON lines file, or - for standard input")
+    p.add_argument("--format", choices=["events", "otlp"], default="events")
+
+    p = sub.add_parser("hook", help="record one Claude Agent SDK or Claude Code hook event")
+    recorder_options(p, 0)
+    p.add_argument("--fail-open", action="store_true",
+                   help="let a tool run even if its call could not be recorded")
+
     argv = list(sys.argv[1:] if argv is None else argv)
     server_cmd: List[str] = []
     if "--" in argv:                       # everything after -- is the MCP server command
@@ -143,6 +175,39 @@ def main(argv: Optional[List[str]] = None) -> int:
                        f"{doc['old']['size']}")
 
     key = Path(a.key) if getattr(a, "key", None) else None
+
+    def recorder() -> Recorder:
+        return Recorder(ReceiptLog.open(Path(a.log), key_path=key), agent=a.agent,
+                        on_behalf_of=a.on_behalf_of, allow_tools=a.allow_tool,
+                        store_content=a.store_content, checkpoint_every=a.checkpoint_every)
+
+    if a.cmd == "hook":
+        code, out, err = hooks.run(recorder, sys.stdin.read(), fail_open=a.fail_open)
+        sys.stdout.write(out)
+        sys.stderr.write(err)
+        return code
+    if a.cmd == "ingest":
+        f = sys.stdin if a.file == "-" else open(a.file, encoding="utf-8")
+        rec = recorder()
+        with f:
+            count, problems = sink.ingest(rec, f, a.format)
+        if count and rec.log.can_sign:
+            rec.log.checkpoint()
+        for p in problems:
+            print(f"skipped {p}", file=sys.stderr)
+        print(f"recorded {count} events" + (f", skipped {len(problems)}" if problems else ""))
+        return 1 if problems else 0
+    if a.cmd == "sink":
+        host, _, port = a.listen.rpartition(":")
+        token = Path(a.token_file).read_text().strip() if a.token_file else \
+            os.environ.get("AEOS_SINK_TOKEN")
+        try:
+            sink.serve(recorder(), host or "127.0.0.1", int(port), token or None)
+        except ValueError as e:
+            print(f"aeos-receipts sink: {e}", file=sys.stderr)
+            return 2
+        return 0
+
     read_only = a.cmd in ("verify", "show", "consistency")
     log = ReceiptLog.open(Path(a.log), key_path=key, read_only=read_only)
 

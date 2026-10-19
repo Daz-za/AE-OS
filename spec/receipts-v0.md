@@ -35,9 +35,9 @@ Record kinds:
 
 | Kind | Written when | Typical body |
 |---|---|---|
-| `session.start` | An agent session begins | `allow_list` |
-| `tool.call` | An agent asks to use a tool | `args_sha256`, `rpc_id` |
-| `tool.result` | The tool answers | `outcome` (`ok`, `error`, `rpc-error`), `result_sha256` |
+| `session.start` | An agent session begins | `allow_list`, `session_id` |
+| `tool.call` | An agent asks to use a tool | `args_sha256`, `rpc_id` or `call_id`, `session_id` |
+| `tool.result` | The tool answers | `outcome` (`ok`, `error`, `rpc-error`), `result_sha256`, `call_id` |
 | `policy.decision` | A policy allows, denies or escalates an action | `decision`, `reasons` |
 | `approval` | A person approves or rejects an escalated action | `decision`, `approver` |
 | `note` | Anything else worth recording | free form |
@@ -50,6 +50,17 @@ Numbers in a record are integers. Amounts are stored in minor currency units (ce
 Known limitation: a digest of a short, guessable value (such as `{"approve": true}`) can be confirmed by guessing. Version 1 will add salted commitments for operators who need to hide low-entropy arguments.
 
 **CID.** The record's identifier is a CIDv1 with codec `dag-cbor` (0x71) and a SHA-256 multihash: the bytes `01 71 12 20` followed by SHA-256 of the record's canonical encoding. Its text form is multibase base32 lower case (prefix `b`).
+
+**Records reported by other components.** When a gateway, an agent framework or a trace exporter reports tool calls to the log, the records carry the identifiers that component used:
+
+| Body field | Meaning |
+|---|---|
+| `session_id` | The reporting component's identifier for the agent session |
+| `call_id` | Its identifier for the tool call, which links a result to its call |
+| `source` | An object of text values that locate the original report, such as an OpenTelemetry trace and span ID or the reporting service's name |
+| `call_seen` | `false` on a `tool.result` whose call was never reported; the result then links to its session, when one was reported |
+
+A digest field is left out when the reporting component did not share the arguments or result. Such a record proves that the component reported the call; it does not let anyone confirm what the arguments were.
 
 **Parents.** A record may only name parents that already appear earlier in the same log. Records therefore form a causal graph inside the log: a `tool.result` points to its `tool.call`, which points to the `session.start`.
 
