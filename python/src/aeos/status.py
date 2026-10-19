@@ -30,7 +30,9 @@ MEANING = {
               "had an allow decision; where it ran a policy, each decision gives the recorded "
               "answer when the same module runs again on the recorded input, each approval "
               "is signed by its approver and answers an escalation of the same call, and "
-              "every call that ran had the policy's allow; "
+              "every call that ran had the policy's allow; where the log holds books, each "
+              "entry balances, is dated in a period that was open, is numbered without gaps, "
+              "and each period change is signed; "
               "and the required number of trusted witnesses cosigned the latest checkpoint.",
               "Do not rely on this evidence until each problem listed is explained. Keep a "
               "copy of the folder as it is now."),
