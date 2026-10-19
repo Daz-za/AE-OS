@@ -35,7 +35,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
-from . import delegation, identity, policy as policy_mod
+from . import books, delegation, identity, policy as policy_mod
 from .canon import canonical_json, cid_str, json_digest
 from .log import ReceiptLog, now_ms
 from .recorder import Recorder
@@ -145,12 +145,15 @@ class Gateway:
                 if reserved is not None:
                     self.budget.release(reserved, cap["body"]["amount"])
                 return stop, session
-        try:
-            out = self.tools[name](args)
+        tool = self.tools[name]
+        try:                                        # the books also need the call's record
+            out = tool(args, entry) if getattr(tool, "takes_call", False) else tool(args)
         except Exception as e:                      # the tool's failure is the agent's answer
             if reserved is not None:                  # a call that did not run spends nothing
                 self.budget.release(reserved, cap["body"]["amount"])
             rec.result(call_id, session_id=session, error={"message": str(e)}, on_behalf_of=obo)
+            if isinstance(e, books.Refused):
+                return _refused(rid, str(e)), session
             return _ok(rid, {"isError": True, "content": [{"type": "text", "text": str(e)}]}), \
                 session
         rec.result(call_id, session_id=session, result=out, on_behalf_of=obo)

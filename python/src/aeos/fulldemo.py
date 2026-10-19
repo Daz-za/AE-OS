@@ -11,6 +11,8 @@ are built so far, for real, on one computer:
   against it, the tool, the amount and the time, and records every call and decision;
 - payment rules written in Rego and compiled to WebAssembly, run in a sandbox, with
   escalation to a person whose signed approval the gateway checks and records;
+- books of account: journal entries that must balance and be dated in an open period,
+  periods that only a controller's signature opens or closes, and corrections by reversal;
 - witnesses that cosign checkpoints and refuse a log that shows them a different history;
 - an end-to-end audit of the evidence (`aeos audit`).
 
@@ -28,7 +30,7 @@ from typing import Callable, Dict
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from . import audit, delegation, identity, keys, policy, witness
+from . import audit, books, delegation, identity, keys, policy, witness
 from .gateway import AgentClient, Gateway, handshake_error
 from .canon import decode_dag_cbor, json_digest
 from .log import ReceiptLog, now_ms
@@ -40,6 +42,10 @@ GATEWAY = f"spiffe://{DOMAIN}/gateway/erp-mcp"
 HELPER_AGENT = f"{AP_AGENT}/helper"
 CONTROLLER = f"spiffe://{DOMAIN}/human/controller-7f3c"
 CFO = f"spiffe://{DOMAIN}/human/cfo-2b81"
+BOOKS_SERVICE = f"spiffe://{DOMAIN}/service/books"
+ENTITY, LEDGER = "ACME-US", "GL"
+ACCOUNTS = {"1000": "Bank", "2000": "Accounts payable", "5200": "Freight",
+            "6100": "Professional fees"}
 POLICY_DATA = {"escalate_above_minor": 500_000, "sanctioned_vendors": ["V-0666"],
                "approvers": [CFO]}
 
@@ -89,10 +95,11 @@ def run(folder: Path, out: Callable[[str], None] = print) -> int:
         nonlocal step
         step += 1
         out(f"\n{step}. {title}")
-        out(textwrap.fill(text, 88, initial_indent="   ", subsequent_indent="   "))
+        out(textwrap.fill(text, 88, initial_indent="   ", subsequent_indent="   ",
+                          break_on_hyphens=False))
 
     out("AE-OS architecture demo: Acme, a fictional company, lets an AI agent pay supplier "
-        "invoices.\nEach step below runs for real on this computer, and an auditor checks "
+        "invoices and book them.\nEach step below runs for real on this computer, and an auditor checks "
         "the evidence at the end.")
     private, svid_dir, trust = folder / "private", folder / "svids", folder / "trust"
     private.mkdir(parents=True)
@@ -140,8 +147,8 @@ def run(folder: Path, out: Callable[[str], None] = print) -> int:
     now = dt.datetime.now(dt.timezone.utc)
     envelope = delegation.IntentEnvelope(
         principal=CONTROLLER, audience=AP_AGENT,
-        purpose="Pay approved supplier invoices for October",
-        actions=["erp.invoice.get", "erp.invoice.pay"], per_action_max_minor=1_000_000,
+        purpose=f"Pay approved supplier invoices for {now:%B} and book them",
+        actions=["erp.invoice.get", "erp.invoice.pay", books.TOOL], per_action_max_minor=1_000_000,
         budget_minor=2_000_000, currency="USD",
         not_after=int((now + dt.timedelta(hours=8)).timestamp() * 1000)).sign(controller_key)
     intents_dir = folder / "intents"
@@ -150,10 +157,11 @@ def run(folder: Path, out: Callable[[str], None] = print) -> int:
         json.dumps(envelope.to_json(), indent=2) + "\n")
     token = authority.mint(envelope, keys.public_bytes(controller_key))
     say("The controller signs what the agent may do",
-        "Acme's financial controller signs an intent for the accounts payable agent: read "
-        "and pay supplier invoices, up to USD 10,000.00 a payment and USD 20,000.00 in "
-        "total, for the next 8 hours. The stated purpose, 'Pay approved supplier invoices "
-        "for October', is recorded with the intent; the gateway does not check it. Acme's "
+        "Acme's financial controller signs an intent for the accounts payable agent. For "
+        "the next 8 hours the agent may read supplier invoices, pay them (up to USD "
+        "10,000.00 a payment and USD 20,000.00 in total) and book them in the accounts. "
+        "The stated purpose, "
+        f"'{envelope.purpose}', is recorded with the intent; the gateway does not check it. Acme's "
         "authorization service checks the signature and gives the agent a capability "
         f"token (a Biscuit) bound to that intent ({envelope.cid[:16]}…) and to the agent's "
         "SPIFFE ID. The gateway requires this token on every tool call the agent makes.")
@@ -178,9 +186,31 @@ def run(folder: Path, out: Callable[[str], None] = print) -> int:
     log = ReceiptLog.create(folder / "log", log_id="urn:example:acme:accounts-payable",
                             key_path=private / "log-signing.key")
     (folder / "public-key.txt").write_text(log.public_key.hex() + "\n")
-    gateway = Gateway(log, _erp(), trust_domain=DOMAIN, svid_files=gw_files,
+    ledger = books.Books(log, agent=BOOKS_SERVICE, entity=ENTITY, ledger=LEDGER,
+                         currency="USD", accounts=ACCOUNTS,
+                         controllers={CONTROLLER: keys.public_bytes(controller_key)})
+    today = now.date()
+    last_month_end = today.replace(day=1) - dt.timedelta(days=1)
+    closed, opened = f"{last_month_end:%Y-%m}", f"{today:%Y-%m}"
+    for period, state in ((closed, "closed"), (opened, "open")):
+        ledger.transition(books.PeriodTransition(
+            entity=ENTITY, ledger=LEDGER, period=period, state=state, by=CONTROLLER,
+            time=now_ms()).sign(controller_key))
+    say("Acme's books are set up",
+        f"A books service keeps the general ledger of {ENTITY}, Acme's US legal entity, "
+        "with a small chart of accounts: "
+        + ", ".join(f"{k} {v}" for k, v in ACCOUNTS.items())
+        + f". The controller signs two period changes, closing {books.period_name(closed)} "
+        f"and opening {books.period_name(opened)}. The books service accepts a period change "
+        "only when a controller has signed it, and records the signature with it. To keep "
+        f"the example short, the books start empty in {books.period_name(opened)}. In this "
+        f"preview the books service runs inside the gateway; {BOOKS_SERVICE} names it in "
+        "the records.")
+
+    tools = {**_erp(), books.TOOL: ledger.tool()}
+    gateway = Gateway(log, tools, trust_domain=DOMAIN, svid_files=gw_files,
                       bundle_file=bundle,
-                      permissions={AP_AGENT: ["erp.invoice.get", "erp.invoice.pay"],
+                      permissions={AP_AGENT: ["erp.invoice.get", "erp.invoice.pay", books.TOOL],
                                    HELPER_AGENT: ["erp.invoice.get", "erp.invoice.pay"],
                                    PAYROLL_AGENT: ["erp.payroll.get"]},
                       authority_key=authority.public_key, intents={envelope.cid: envelope},
@@ -244,6 +274,58 @@ def run(folder: Path, out: Callable[[str], None] = print) -> int:
         say("A payment to a sanctioned supplier is refused",
             "The agent tries to pay invoice INV-20466 for USD 950.00 to supplier V-0666. The "
             f"rules refuse it: {refusal(blocked)}.")
+
+        def post(date, text, lines=None, reverses=None):
+            args = {"date": f"{date:%Y-%m-%d}", "text": text}
+            if lines:
+                args["lines"] = [{"account": a, side: amt} for a, side, amt in lines]
+            if reverses:
+                args["reverses"] = reverses
+            return agent.call(books.TOOL, args)
+
+        paid_total = inv["amount_minor"] + big_args["amount_minor"]
+        total = delegation.money(paid_total, "USD")
+
+        def document(reply):
+            return reply["result"]["structuredContent"]["document"]
+
+        doc1 = document(post(today, "Invoices INV-20431 and INV-20457",
+                             [("6100", "debit_minor", paid_total),
+                              ("2000", "credit_minor", paid_total)]))
+        doc2 = document(post(today, f"Payments {payment} and {payment2}",
+                             [("2000", "debit_minor", paid_total),
+                              ("1000", "credit_minor", paid_total)]))
+        say("The agent books the invoices and the payments",
+            "The agent asks the books service, through the gateway, to record the two "
+            f"invoices it paid, dated {today:%d %B %Y}: debit 6100 Professional fees "
+            f"{total} and credit 2000 Accounts payable {total}. The entry balances and "
+            f"{today:%B} is open, so the books record it as document {doc1}. The payments "
+            f"follow as document {doc2}: debit 2000 Accounts payable {total} and "
+            f"credit 1000 Bank {total} ({payment} for USD 4,200.00 and {payment2} for "
+            "USD 7,800.00). Each entry is linked to the agent's tool call.")
+
+        freight = [("5200", "debit_minor", 125_000), ("2000", "credit_minor", 125_000)]
+        late = post(last_month_end, "Freight invoice INV-20470", freight)
+        typo = post(today, "Freight invoice INV-20470",
+                    [("5200", "debit_minor", 125_000), ("2000", "credit_minor", 120_500)])
+        doc3 = document(post(today, "Freight invoice INV-20470", freight))
+        say("The books refuse a closed month and an entry that does not balance",
+            f"A USD 1,250.00 freight invoice for {last_month_end:%B} arrives after "
+            f"{last_month_end:%B} was closed. The agent tries to date the entry "
+            f"{last_month_end:%d %B %Y}, and the books refuse: {refusal(late)}. It then "
+            f"dates the entry in {today:%B} but enters the credit as USD 1,205.00, and the "
+            f"books refuse again: {refusal(typo)}. Both refusals are recorded, and neither "
+            "uses a document number. The agent sends the entry again with matching amounts, "
+            f"and the books record it as document {doc3}.")
+
+        undo = document(post(today, "INV-20470 duplicates a freight charge already paid",
+                             reverses=doc3))
+        say("A duplicate invoice is reversed",
+            "The supplier writes that INV-20470 duplicates a freight charge already paid, so "
+            f"the agent asks the books to reverse document {doc3}. The books record document "
+            f"{undo}, dated {today:%d %B %Y}: debit 2000 Accounts payable and credit 5200 "
+            f"Freight, USD 1,250.00, citing {doc3}. The original entry stays in the books "
+            "unchanged, so the history shows both the entry and its reversal.")
 
         narrow = delegation.attenuate(token, subject=HELPER_AGENT,
                                       actions=["erp.invoice.get"], max_minor=0)
@@ -369,7 +451,7 @@ def run(folder: Path, out: Callable[[str], None] = print) -> int:
          "public_key_file": "trust/authority-public-key.txt"},
         {"role": "Person's signing key", "algorithm": "Ed25519", "holder": CONTROLLER,
          "key_id": keys.key_id(keys.public_bytes(controller_key)),
-         "signs": "intent envelopes and approvals (in production: a passkey or smart card, "
+         "signs": "intent envelopes, approvals and period changes (in production: a passkey or smart card, "
                   "with step-up authentication)", "public_key_file": "trust/principals.json"},
         {"role": "Person's signing key", "algorithm": "Ed25519", "holder": CFO,
          "key_id": keys.key_id(keys.public_bytes(cfo_key)),
@@ -384,7 +466,9 @@ def run(folder: Path, out: Callable[[str], None] = print) -> int:
                 "bundle": "trust/bundle.pem", "svids": "svids", "log": "log",
                 "witnesses": "witnesses.json", "authority": "trust/authority-public-key.txt",
                 "principals": "trust/principals.json", "intents": "intents", "tokens": "tokens",
-                "policies": "policies"}
+                "policies": "policies",
+                "books": {"service": BOOKS_SERVICE, "controllers": [CONTROLLER],
+                          "accounts": ACCOUNTS}}
     tokens_dir = folder / "tokens"
     tokens_dir.mkdir()
     for sha, raw in gateway.tokens.items():
@@ -398,8 +482,6 @@ def run(folder: Path, out: Callable[[str], None] = print) -> int:
         "and certificate involved: who holds it, what it signs, and what issued it. " + " ".join(f + "." for f in findings)
         + (" Result: VALID" if not problems else " Result: INVALID: " + "; ".join(problems)))
 
-    out("\nStill to come in this walk-through: a ledger that refuses postings to a closed "
-        "period.")
     out(f"\nThe evidence is in {folder}; the private keys are in {private}. Try:")
     out(f"  aeos audit {folder}")
     out(f"  aeos show {folder / 'log'}")
