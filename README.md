@@ -27,6 +27,7 @@ The image above is a frame from the film on [ae-os.org](https://ae-os.org), whic
 | Path | What it is |
 |---|---|
 | [`spec/receipts-v0.md`](spec/receipts-v0.md) | AE-OS Receipts format: records, Merkle log, signed checkpoints, receipts and consistency proofs |
+| [`spec/identity-and-witnesses-draft.md`](spec/identity-and-witnesses-draft.md) | Draft: SPIFFE identities, the mutual-TLS gateway, witness cosignatures and evidence folders |
 | [`python/`](python/) | `aeos-receipts`, the Python library and command line, including an MCP proxy and an HTTP log sink that record agents' tool calls from MCP servers, gateways, OpenTelemetry traces and Claude Code hooks |
 | [`rust/`](rust/) | `aeos-verify`, a separate verifier in Rust, sharing no code with the Python library, that auditors can use to check receipts, consistency proofs and whole logs |
 | [`testvectors/`](testvectors/) | Shared test vectors that keep the Python, Rust and browser implementations in agreement |
@@ -40,6 +41,7 @@ pipx install "git+https://github.com/Daz-za/ae-os#subdirectory=python"
 aeos-receipts ui        # work in your web browser: run the example, create or open a log
 aeos-receipts demo      # the same example, explained step by step in the terminal
 aeos-receipts setup     # answer a few questions to create your own log
+aeos-receipts demo --full   # SPIFFE identities, mutual TLS, an MCP gateway and witnesses
 ```
 
 New to the command line? [docs/getting-started.md](docs/getting-started.md) walks through installing on Linux, macOS and Windows.

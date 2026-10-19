@@ -358,6 +358,15 @@ class ReceiptLog:
                 "inclusion_proof": [h.hex() for h in proof],
                 "checkpoint": checkpoint.to_json()}
 
+    def consistency_proof(self, old_size: int, new_size: int) -> List[bytes]:
+        """Hashes proving the tree of new_size extends the tree of old_size (RFC 9162)."""
+        self._load_new()
+        if not 0 <= old_size <= new_size <= len(self._leaves):
+            raise ValueError("checkpoint sizes are out of range for this log")
+        if old_size in (0, new_size):
+            return []
+        return merkle.consistency_proof(old_size, self._leaves[:new_size])
+
     def consistency(self, old: Checkpoint, new: Checkpoint) -> Dict[str, Any]:
         if not old.size <= new.size <= len(self._leaves):
             raise ValueError("checkpoint sizes are out of range for this log")

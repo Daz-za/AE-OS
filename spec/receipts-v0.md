@@ -144,6 +144,6 @@ content/<cid>.json  optional full arguments and results
 ## 8. Planned for later versions
 
 - Salted commitments for arguments and results.
-- Independent witnesses that co-sign checkpoints, and C2SP signed-note checkpoint format.
-- Agent identity bound to a SPIFFE SVID presented at session start, and delegation from a person's digital identity wallet.
+- Independent witnesses that co-sign checkpoints, and C2SP signed-note checkpoint format. A preview of witness cosigning is described in [identity-and-witnesses-draft.md](identity-and-witnesses-draft.md).
+- Agent identity bound to a SPIFFE SVID presented at session start (preview in the same draft), and delegation from a person's digital identity wallet.
 - Hardware or cloud KMS keys for checkpoint signing.

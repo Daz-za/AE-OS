@@ -31,7 +31,7 @@ class Recorder:
         self.log = log
         self.agent = agent
         self.obo = on_behalf_of
-        self.allow = set(allow_tools) if allow_tools else None
+        self.allow = set(allow_tools) if allow_tools is not None else None
         self.store_content = store_content
         self.checkpoint_every = checkpoint_every
         self._lock = threading.RLock()
