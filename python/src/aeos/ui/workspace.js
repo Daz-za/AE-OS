@@ -432,7 +432,7 @@ export function workspaceViews({ api, act, el, show, refresh }) {
       el("p", { className: "muted" }, "Fingerprint ", mono(shortHex(a.cid, 22)))))),
     el("p", { className: "muted" }, "Each bundle is saved in agents/ under its fingerprint. Change anything about an agent and it gets a new fingerprint.")],
     identities: (v) => [table(["SPIFFE ID", "Expires in", "Fingerprint"], v.svids.map((c) => [
-      mono(c.spiffe), el("span", { className: "countdown", dataset: { until: c.not_after } }), mono(shortHex(c.fingerprint))])),
+      mono(c.spiffe), (() => { const n = el("span", { className: "countdown" }); n.dataset.until = c.not_after; return n; })(), mono(shortHex(c.fingerprint))])),
     el("p", { className: "muted", textContent: `Each certificate lasts ${v.ttl_minutes} minutes. While the gateway runs, the platform issues new ones every ${v.renew_minutes} minutes.` })],
     log: (v) => [kv([["Log", mono(v.log_id)], ["Records", String(v.records)], ["Signed checkpoints", String(v.checkpoints)],
       v.root ? ["Latest Merkle root", mono(shortHex(v.root, 32))] : null, ["Log's public key", mono(shortHex(v.public_key, 32))]]),
