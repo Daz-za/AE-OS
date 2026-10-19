@@ -33,10 +33,8 @@ pub fn root(leaves: &[Hash]) -> Hash {
     }
     let mut level = leaves.to_vec();
     while level.len() > 1 {
-        let mut next: Vec<Hash> = level
-            .chunks_exact(2)
-            .map(|p| node_hash(&p[0], &p[1]))
-            .collect();
+        let (pairs, _) = level.as_chunks::<2>();
+        let mut next: Vec<Hash> = pairs.iter().map(|[l, r]| node_hash(l, r)).collect();
         if level.len() % 2 == 1 {
             next.push(level[level.len() - 1]);
         }
