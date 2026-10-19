@@ -30,14 +30,20 @@ The image above is a frame from the film on [ae-os.org](https://ae-os.org), whic
 | [`python/`](python/) | `aeos-receipts`, the Python library and command line, including an MCP proxy and an HTTP log sink that record agents' tool calls from MCP servers, gateways, OpenTelemetry traces and Claude Code hooks |
 | [`rust/`](rust/) | `aeos-verify`, a separate verifier in Rust, sharing no code with the Python library, that auditors can use to check receipts, consistency proofs and whole logs |
 | [`testvectors/`](testvectors/) | Shared test vectors that keep the Python and Rust implementations in agreement |
+| [`docs/`](docs/) | A getting-started guide for people new to the command line |
 | [`examples/`](examples/) | A worked example: an agent pays an invoice, and an auditor checks the evidence |
 
 ## Quick start
 
 ```
-pip install -e python
-python examples/invoice_demo.py
+pipx install "git+https://github.com/Daz-za/ae-os#subdirectory=python"
+aeos-receipts demo      # an AI agent pays an invoice; an auditor checks the evidence
+aeos-receipts setup     # answer a few questions to create your own log
 ```
+
+New to the command line? [docs/getting-started.md](docs/getting-started.md) walks through installing on Linux, macOS and Windows.
+
+To work on the code, clone the repository and run `pip install -e python`.
 
 See [python/README.md](python/README.md) for the command line and the MCP proxy, and [rust/README.md](rust/README.md) to check evidence with the Rust verifier.
 

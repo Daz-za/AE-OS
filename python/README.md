@@ -9,8 +9,11 @@ The format is specified in [spec/receipts-v0.md](../spec/receipts-v0.md).
 ## Install
 
 ```
-pip install -e python          # from a clone of this repository
+pipx install "git+https://github.com/Daz-za/ae-os#subdirectory=python"
+pip install -e python          # or, from a clone of this repository
 ```
+
+Then try `aeos-receipts demo`, and create a log of your own with `aeos-receipts setup`. The [getting-started guide](../docs/getting-started.md) covers each step for people new to the command line.
 
 Requires Python 3.9 or later and the `cryptography` package.
 
