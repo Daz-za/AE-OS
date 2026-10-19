@@ -283,4 +283,6 @@ def chapters() -> List[Dict[str, Any]]:
         if "decision" in ch:
             agents.add(ch["decision"]["agent"])
         ch["needs"] = sorted(agents)
+        ents = {s.get("entity") or (s.get("args") or {}).get("entity") for s in ch["steps"]}
+        ch["needs_entities"] = sorted(e for e in ents if e)
     return out

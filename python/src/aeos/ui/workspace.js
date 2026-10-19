@@ -515,6 +515,11 @@ export function workspaceViews({ api, act, el, show, refresh }) {
       parts.push(body);
       return el("article", { className: "card chapter" }, ...parts);
     });
+    if (ws.chapters.every((ch) => ch.missing.length)) {
+      return box.replaceChildren(el("div", { className: "notice" },
+        el("p", { textContent: `The close in the film uses Kestrel Foods' agents and books, which ${ws.running.organization.name} does not have. Create the Kestrel Foods workspace to play it, or send ${ws.running.organization.name}'s own calls under Try a call.` }),
+        el("div", { className: "actions tight" }, button("Go to Try a call", () => show("try"), "primary"))));
+    }
     box.replaceChildren(...(wait ? [wait] : []), ...cards);
     if (wait) box.querySelectorAll(".chapter button").forEach((b) => { b.disabled = true; });
   }

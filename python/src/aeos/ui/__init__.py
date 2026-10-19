@@ -176,9 +176,13 @@ class App:
         gw = p.gateway
         serving = gw is not None or workspace.running(p.folder) is not None
         agents = {a["id"] for a in p.doc["agents"]}
+        books = workspace.entities(p.doc)
         chapters = examples.chapters()
         for ch in chapters:
-            ch["missing"] = [a for a in ch["needs"] if a not in agents]
+            ch["missing"] = [a for a in ch["needs"] if a not in agents] + [
+                f"books for {e}" for e in ch["needs_entities"] if e not in books]
+            if ch["id"] == "instruction" and not p.doc.get("instructions"):
+                ch["missing"].append("a signed instruction")
         return {"doc": doc, "running": p.doc, "folder": str(p.folder),
                 "file": str(p.folder / workspace.FILE),
                 "problems": workspace.check(doc, p.folder),

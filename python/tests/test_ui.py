@@ -155,6 +155,7 @@ def test_workspace_build_try_and_trace(page, tmp_path):
     page("/api/ws/step", {"step": "gateway"})
     ws = json.loads(page("/api/ws")[1])
     assert ws["problems"] == [] and "erp.invoice.pay" in ws["tools"]
+    assert all(ch["missing"] for ch in ws["chapters"])      # the film's close is Kestrel's
 
     doc = ws["doc"]
     doc["agents"][0]["authorized_by"] = "nobody"
