@@ -6,7 +6,7 @@ AE-OS Receipts keeps a tamper-evident record of what an AI agent does: each tool
 
 ## 1. Install
 
-You need Python 3.9 or later, which most Linux and macOS systems already have. On Windows, install Python from [python.org](https://www.python.org/downloads/) and tick "Add Python to PATH" during installation.
+You need Python 3.10 or later, which most Linux and macOS systems already have. On Windows, install Python from [python.org](https://www.python.org/downloads/) and tick "Add Python to PATH" during installation.
 
 The simplest way to install a command-line tool is `pipx`, which keeps it separate from the rest of your system. The install fetches the code from GitHub, so it also needs `git`.
 
