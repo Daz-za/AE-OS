@@ -66,6 +66,31 @@ table.records { border-collapse: collapse; width: 100%; font-size: 14px; }
 .tag-deny, .tag-error { color: var(--red); font-weight: 600; }
 .tag-escalate { color: #b26a00; font-weight: 600; }
 .pager { display: flex; gap: 12px; align-items: center; margin-top: 12px; }
+h3 { font-size: 16px; margin: 20px 0 8px; }
+.muted { color: var(--muted); }
+.stack { display: grid; gap: 10px; margin-top: 16px; }
+.item { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 18px; }
+.item-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.item ul { margin: 8px 0 0; padding-left: 20px; }
+.item p { margin: 8px 0 0; }
+.id { word-break: break-all; }
+.badge { display: inline-block; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em;
+  padding: 2px 8px; border-radius: 6px; border: 1px solid var(--line); color: var(--muted); }
+.badge.tag-deny { color: var(--red); border-color: currentColor; }
+.badge.tag-escalate { color: #b26a00; border-color: currentColor; }
+.badge.tag-allow, .badge.period-open { color: var(--green); border-color: currentColor; }
+.badge.role-person { color: var(--blue); border-color: currentColor; }
+.approval { color: var(--green); font-weight: 600; }
+.periods { display: flex; flex-wrap: wrap; gap: 8px; }
+label.inline { display: flex; align-items: center; gap: 8px; margin-top: 14px; color: var(--ink); }
+label.inline input { width: auto; }
+table.ledger { border-collapse: collapse; width: 100%; font-size: 14px; }
+.ledger th, .ledger td { text-align: left; padding: 7px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.ledger th { color: var(--muted); font-weight: 600; }
+.ledger .num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.ledger tr.entry td { font-weight: 600; border-top: 2px solid var(--line); background: var(--bg); }
+.ledger td:first-child { width: 100%; }
+.ledger tr.total td { font-weight: 700; border-top: 2px solid var(--ink); }
 @media (max-width: 640px) {
   table.records thead { display: none; }
   .records tr.row { display: grid; grid-template-columns: 1fr; padding: 10px 0; border-bottom: 1px solid var(--line); }

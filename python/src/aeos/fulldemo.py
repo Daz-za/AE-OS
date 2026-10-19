@@ -483,6 +483,9 @@ def run(folder: Path, out: Callable[[str], None] = print) -> int:
         + (" Result: VALID" if not problems else " Result: INVALID: " + "; ".join(problems)))
 
     out(f"\nThe evidence is in {folder}; the private keys are in {private}. Try:")
-    out(f"  aeos audit {folder}")
-    out(f"  aeos show {folder / 'log'}")
+    out(f"  aeos audit {folder}        check all of the evidence")
+    out(f"  aeos decisions {folder}    what was refused or sent to a person, and why")
+    out(f"  aeos books {folder}        the journal and the trial balance")
+    out(f"  aeos agents {folder}       who acted, and what each did")
+    out(f"  aeos ui {folder}           the same views in your web browser")
     return 0 if not problems else 1

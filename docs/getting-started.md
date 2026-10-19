@@ -48,7 +48,7 @@ To update later, run `pipx upgrade aeos`. If you installed it under its earlier 
 aeos ui
 ```
 
-This opens a page in your web browser where you can run the example, create a log, look through its records and check receipts, without typing further commands. The page runs on your computer only. Close it by pressing Ctrl+C in the terminal.
+This opens a page in your web browser where you can run the examples, create a log, look through its records and check receipts, without typing further commands. After the full walk-through, the Agents, Decisions, Books and Audit tabs show who acted, what was refused and why, the books of account and the auditor's check. The page runs on your computer only. Close it by pressing Ctrl+C in the terminal.
 
 The rest of this guide does the same things with commands.
 
