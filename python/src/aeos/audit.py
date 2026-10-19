@@ -11,8 +11,9 @@ An evidence folder holds a receipt log plus what is needed to check who acted:
                     agents presented, when the gateway required them
     policies/       the compiled policy modules (<sha256>.wasm) and their data
                     (data-<sha256>.json), when the gateway ran a policy
-    books           true when the log holds books of account (journal entries and
-                    signed period changes); people's keys are in the principals file
+    books           when the log holds books of account: the books service's SPIFFE ID,
+                    the controllers who may open and close periods, and the chart of
+                    accounts; people's keys are in the principals file
 
 The audit recomputes the whole log, then checks that each session was opened with an SVID whose
 fingerprint the gateway recorded, and that this SVID was valid for the recorded identity
@@ -24,7 +25,7 @@ policy, it runs the same compiled module on the recorded input again, checks eac
 person's approval, and checks that every call that ran had the policy's allow. Where the log holds books of
 account, it rebuilds them from the journal entries and checks that each entry balances, is
 dated in an open period and is numbered without gaps, and that each period change is
-signed. In a real audit the auditor takes
+signed by a controller. In a real audit the auditor takes
 the trust bundle, the log's public key, the witnesses' keys, the authorization service's
 key and each person's key from sources they trust,
 not from the folder under review; `audit` accepts them as options for that reason.
@@ -117,7 +118,9 @@ def run(folder: Path, *, bundle: Optional[Path] = None, public_key: Optional[str
     if manifest.get("books"):
         pdoc = json.loads((Path(principals) if principals else folder / manifest["principals"])
                           .read_text())
-        _check_books(log, {k: bytes.fromhex(v) for k, v in pdoc.items()}, findings, problems)
+        setup = manifest["books"] if isinstance(manifest["books"], dict) else {}
+        _check_books(log, {k: bytes.fromhex(v) for k, v in pdoc.items()}, setup, findings,
+                     problems)
 
     wfile = Path(witnesses) if witnesses else folder / manifest["witnesses"]
     wdoc = json.loads(wfile.read_text())
@@ -285,28 +288,41 @@ def _check_policies(log: ReceiptLog, folder: Path, principal_keys: Dict[str, byt
 
 
 
-def _check_books(log: ReceiptLog, principal_keys: Dict[str, bytes], findings: List[str],
-                 problems: List[str]) -> None:
+def _check_books(log: ReceiptLog, principal_keys: Dict[str, bytes], setup: Dict[str, Any],
+                 findings: List[str], problems: List[str]) -> None:
     """Rebuild the books from the log and check their rules and numbering."""
     records = [(e.index, cid_str(e.cid), log.record(e)) for e in log.entries()]
-    s, found = books.replay(records, principal_keys)
+    s, found = books.replay(records, principal_keys, controllers=setup.get("controllers"),
+                            accounts=setup.get("accounts"), service=setup.get("service"))
     problems += found
-    docs = s["documents"]
-    span = f"documents {docs[0]} to {docs[-1]}" if len(docs) > 1 else \
-        (f"document {docs[0]}" if docs else "no documents")
     currencies = {r["body"].get("currency") for _, _, r in records if r["kind"] == "journal.entry"}
     cur = currencies.pop() if len(currencies) == 1 else ""
-    findings.append(
-        f"The books hold {s['entries']} journal entries ({span}, numbered without gaps), "
-        + ("1 of them a reversal that exactly undoes an earlier entry" if s["reversals"] == 1
-           else f"{s['reversals']} of them reversals that exactly undo earlier entries")
-        + "; each entry "
-        "balances, is linked to the tool call that asked for it, and is dated in a period "
-        f"that was open when it was recorded. Each of the {s['transitions']} period changes "
-        f"is signed by {', '.join(s['signers']) or 'nobody'}. Rebuilt from the entries, the "
-        f"trial balance has debits of {delegation.money(s['debits'], cur or '')} and credits "
-        f"of {delegation.money(s['credits'], cur or '')}"
-        + ("" if not found else " (except as listed below)"))
+    docs, n = s["documents"], s["entries"]
+    if not n:
+        text = "The books hold no journal entries"
+    else:
+        text = (f"The books hold {n} journal entr{'y' if n == 1 else 'ies'}"
+                + (f", {docs[0]} to {docs[-1]}, numbered without gaps" if n > 1 else
+                   f", {docs[0]}")
+                + ". Each one balances, is linked to the tool call that asked for it, uses "
+                "accounts in the chart of accounts, and is dated in a period that was open "
+                "when it was recorded")
+        if s["reversals"]:
+            text += (". One is a reversal that exactly undoes an earlier entry"
+                     if s["reversals"] == 1 else
+                     f". {s['reversals']} are reversals that exactly undo earlier entries")
+    if s["refused"]:
+        text += (f". The books refused {s['refused']} "
+                 + ("entry, and the refusal is recorded" if s["refused"] == 1 else
+                    "entries, and the refusals are recorded"))
+    if s["signers"]:
+        text += (". The period changes are signed by the controller"
+                 + ("s " if len(s["signers"]) > 1 else " ") + ", ".join(s["signers"]))
+    text += (f". The trial balance rebuilt from the entries shows "
+             f"{delegation.money(s['debits'], cur)} of debits and "
+             f"{delegation.money(s['credits'], cur)} of credits"
+             + ("" if not found else " (except as listed below)"))
+    findings.append(text)
 
 
 def _check_approval(rec: Dict[str, Any], by_cid: Dict[str, Dict[str, Any]],

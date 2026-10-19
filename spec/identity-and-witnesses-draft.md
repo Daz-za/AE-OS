@@ -78,7 +78,7 @@ A **period transition** opens or closes one posting period. A controller signs t
 | Field | Meaning |
 |---|---|
 | `entity` | the legal entity, such as `ACME-US` |
-| `ledger` | the ledger, such as `0L` |
+| `ledger` | the ledger, such as `GL` for the general ledger |
 | `period` | `YYYY-MM` |
 | `state` | `open` or `closed` |
 | `by` | the controller's SPIFFE ID |
@@ -86,13 +86,24 @@ A **period transition** opens or closes one posting period. A controller signs t
 
 with Ed25519 over `"aeos/period-transition/v0\n" || DAG-CBOR(transition)`. The books service accepts it only from a controller it knows, and records it as a `period.transition` record (agent = the controller, body = the fields above plus `signature`).
 
-Agents post through the gateway with the tool `ledger.post`, whose arguments are `{"date": "YYYY-MM-DD", "text", "lines": [{"account", "debit_minor" | "credit_minor"}]}`, or `{"date", "text", "reverses": "<document>"}` to reverse an earlier entry. The books service checks that:
+Agents post through the gateway with the tool `ledger.post`. Its arguments are:
 
-1. the entry has at least two lines, each on an account in the chart of accounts and each with either a debit or a credit as a positive whole number of minor units, and its debits equal its credits;
+| Argument | Meaning |
+|---|---|
+| `date` | the entry's date, `YYYY-MM-DD`; its period is `YYYY-MM` |
+| `text` | a description |
+| `lines` | for a new entry: a list of `{"account", "debit_minor"}` or `{"account", "credit_minor"}`, amounts as positive whole numbers of minor units (cents for USD) |
+| `reverses` | for a reversal, in place of `lines`: the document number of the entry to reverse |
+
+For example: `{"date": "2026-10-19", "text": "Freight invoice INV-20470", "lines": [{"account": "5200", "debit_minor": 125000}, {"account": "2000", "credit_minor": 125000}]}`.
+
+The books service checks that:
+
+1. the entry has at least two lines, each on an account in the chart of accounts and each with either a debit or a credit, and its debits equal its credits;
 2. the period of its date is open;
-3. a reversal names an entry in the books that has not been reversed already.
+3. a reversal names an entry in the books that has not been reversed already, and sends no `lines`: its lines are the original's, with debits and credits swapped.
 
-An entry that fails is recorded as a `policy.decision` with decision `deny`, policy `aeos-books/v0` and plain `reasons`, linked to the call, and uses no document number. An entry that passes gets the next document number in its series, `<entity>/<year>/<number>` with six digits, and is recorded as a `journal.entry` record (agent = the books service) whose parents are the `tool.call` and, for a reversal, the reversed entry. Its body is `entity`, `ledger`, `document`, `period`, `date`, `currency`, `text`, `lines` and, for a reversal, `reverses` (the reversed document's number). A reversal swaps the debits and credits of the original and is dated in an open period; the original stays unchanged. Balances are worked out from the entries and never stored.
+An entry that fails is recorded as a `policy.decision` with decision `deny`, policy `aeos-books/v0` and plain `reasons`, linked to the call, and uses no document number. An entry that passes gets the next document number in its series, `<entity>/<year>/<number>` with six digits, and is recorded as a `journal.entry` record (agent = the books service) whose parents are the `tool.call` and, for a reversal, the reversed entry. Its body is `entity`, `ledger`, `document`, `period`, `date`, `currency`, `text`, `lines` and, for a reversal, `reverses` (the reversed document's number). A reversal swaps the debits and credits of the original and is dated in an open period; the original stays unchanged. Balances are computed from the entries each time they are needed. In this preview the books service runs as a tool inside the gateway process; its SPIFFE ID names it in records, and it is not issued a certificate. Postings move no money, so a capability token's amount limit and budget do not apply to them.
 
 ## 5. Gateway
 
@@ -147,7 +158,10 @@ A checkpoint is final for an auditor when at least k of the n witnesses the audi
 {"format": "aeos-evidence/v0", "trust_domain": "acme.example", "bundle": "trust/bundle.pem",
  "svids": "svids", "log": "log", "witnesses": "witnesses.json",
  "authority": "trust/authority-public-key.txt", "principals": "trust/principals.json",
- "intents": "intents", "tokens": "tokens", "policies": "policies", "books": true}
+ "intents": "intents", "tokens": "tokens", "policies": "policies",
+ "books": {"service": "spiffe://acme.example/service/books",
+           "controllers": ["spiffe://acme.example/human/controller-7f3c"],
+           "accounts": {"1000": "Bank", "2000": "Accounts payable"}}}
 ```
 
 `svids/` holds the certificate chains (no keys) the agents presented. `key-hierarchy.json`, when present, lists each key and certificate (role, algorithm, holder, what it signs, issuer, validity and fingerprint); it is informational and the audit does not rely on it. `witnesses.json` holds `{"required": k, "keys": {name: hex public key}}`. The last four entries are present when the gateway required tokens: the authorization service's public key (hex), `principals.json` as `{SPIFFE ID: hex Ed25519 public key}`, `intents/<CID>.json` as `{"cid", "envelope", "signature"}`, and `tokens/<sha256 hex>.biscuit` holding each token presented. The audit:
@@ -157,7 +171,7 @@ A checkpoint is final for an auditor when at least k of the n witnesses the audi
 - replays each `aeos-capability/v0` decision from the token, the record's `agent`, `subject`, `ts` and `amount`, the envelope and the principal's key, with the budget spent by earlier allowed calls that ran, and checks it gives the recorded decision and, for an allowed call, that the record's `obo` is the envelope's principal;
 - checks that, in sessions with `authorization`, every call with a successful `tool.result` has an allow decision;
 - runs each `aeos-policy/v0` decision's module (`policies/<policy_sha256>.wasm`) with its data (`policies/data-<data_sha256>.json`, where `data_sha256` is SHA-256 of the data's canonical JSON) and entrypoint on the recorded `input_json`, and checks it gives the recorded decision; checks each `approval` record's signature and that it answers an escalation of the same call; and checks that, in sessions with `policy_sha256`, every call with a successful `tool.result` has the policy's allow;
-- when `books` is true, rebuilds the books from the log in order: checks each `period.transition` signature against the key of the person in `by` (from `principals.json`), and checks that each `journal.entry` is linked to a `ledger.post` call, balances, is dated in a period open at that point in the log, is numbered next in its series, and, for a reversal, exactly undoes an earlier entry that was not reversed before;
+- when `books` is present, rebuilds the books from the log in order: checks that each `period.transition` is signed, with the key in `principals.json`, by one of the listed controllers, and that each `journal.entry` was written by the books service, is linked to a `ledger.post` call, uses accounts in the chart, balances, is dated in a period open at that point in the log, is numbered next in its series, and, for a reversal, exactly undoes an earlier entry of the same ledger that was not reversed before;
 - checks that the latest checkpoint has at least k valid cosignatures.
 
 An auditor should pass the trust bundle, the log's public key, the witness keys, the authorization service's key and the people's keys from sources they trust (`--bundle`, `--public-key`, `--witnesses`, `--authority-key`, `--principals`).
@@ -169,7 +183,10 @@ An auditor should pass the trust bundle, the log's public key, the witness keys,
 - Checking the facts a policy decided on: the audit replays each decision on the recorded invoice facts and does not check them against the ERP.
 - Revocation of tokens before they expire (Biscuit revocation IDs are not yet checked).
 - Agent manifests (APOs) that pin each tool's definition digest.
-- Books beyond the preview: several ledgers and legal entities, the currency triple and FX, restricted and special periods, calculated amounts that cite a calculation (invariant I8), and an audit that checks a refused entry was refused for the right reason (the log keeps only digests of the call's arguments).
+- Books for several ledgers and legal entities, and for several currencies with exchange rates (the paper's transaction, local and group currencies).
+- Restricted and special periods.
+- Amounts calculated by a cited calculation (invariant I8).
+- Checking an entry's lines against the call that asked for it, and checking that a refused entry was refused for the right reason: the log keeps only a digest of each call's arguments.
 - Host built-in functions for policies (time, cryptography, network lookups), and policy data that changes while the gateway runs.
 - Audience-bound JWT-SVIDs on MCP calls.
 - Recording the signer's SVID chain CID in every record (the preview records the leaf's fingerprint in `session.start` only).

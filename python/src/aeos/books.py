@@ -5,8 +5,8 @@ the accounts, and they keep their own rules: a Merkle proof shows an entry is un
 but says nothing about whether debits equal credits or whether the period was open.
 
 Each journal entry is one `journal.entry` record in the log, written by the books
-service and linked to the tool call that asked for it. Balances are worked out from those
-records, never stored. Before an entry is recorded the books check that:
+service and linked to the tool call that asked for it. Balances are computed from those
+records each time they are needed. Before an entry is recorded the books check that:
 
 - it has at least two lines, on accounts in the chart of accounts, and its debits equal
   its credits (the paper's invariant I7);
@@ -17,7 +17,9 @@ records, never stored. Before an entry is recorded the books check that:
 A refused entry is recorded as a `policy.decision` deny and uses no document number, so
 each series of document numbers (entity and year) has no gaps.
 
-This preview keeps one ledger for one legal entity, in one currency, inside the gateway.
+This preview keeps one ledger for one legal entity, in one currency. The books service runs
+as a tool inside the gateway process; its SPIFFE ID names it in records, and it is not
+issued a certificate.
 """
 from __future__ import annotations
 
@@ -50,6 +52,14 @@ class Refused(Exception):
 def period_of(date: str) -> str:
     """The posting period of a date: "2026-10-19" is in period "2026-10"."""
     return dt.date.fromisoformat(date).strftime("%Y-%m")
+
+
+def valid_period(period: Any) -> bool:
+    try:
+        return isinstance(period, str) and \
+            dt.datetime.strptime(period, "%Y-%m").strftime("%Y-%m") == period
+    except ValueError:
+        return False
 
 
 def period_name(period: str) -> str:
@@ -104,7 +114,9 @@ def check_lines(lines: Any, accounts: Optional[Dict[str, str]], currency: str) -
         account = line.get("account") if isinstance(line, dict) else None
         dr = line.get("debit_minor", 0) if isinstance(line, dict) else None
         cr = line.get("credit_minor", 0) if isinstance(line, dict) else None
-        if not isinstance(account, str) or (accounts is not None and account not in accounts):
+        if not isinstance(account, str) or not account:
+            problems.append("a line has no account")
+        elif accounts is not None and account not in accounts:
             problems.append(f"account {account} is not in the chart of accounts")
         if not ((_whole(dr) and cr == 0) or (_whole(cr) and dr == 0)):
             problems.append("each line needs either a debit or a credit, in whole cents")
@@ -120,12 +132,11 @@ def check_period(date: Any, periods: Dict[str, str]) -> List[str]:
     """Why an entry cannot be dated `date` (I9); empty when it can."""
     try:
         period = period_of(date)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, AttributeError):
         return ["the entry needs a date written as YYYY-MM-DD"]
     state = periods.get(period)
     if state == "closed":
-        return [f"{period_name(period)} is closed; entries go in an open period, and a "
-                "correction is a reversal there"]
+        return [f"{period_name(period)} is closed; date the entry in an open period"]
     if state != "open":
         return [f"{period_name(period)} has not been opened"]
     return []
@@ -148,8 +159,11 @@ class Books:
 
     def transition(self, t: PeriodTransition) -> Entry:
         """Record a controller's signed period change and apply it."""
-        if t.entity != self.entity or t.ledger != self.ledger or t.state not in STATES:
-            raise Refused(["the period change is for another ledger or is not open or closed"])
+        if t.entity != self.entity or t.ledger != self.ledger:
+            raise Refused(["the period change names another entity or ledger"])
+        if t.state not in STATES or not valid_period(t.period):
+            raise Refused(["a period change needs a period written as YYYY-MM and a state "
+                           "of open or closed"])
         if t.by not in self.controllers or not t.verify(self.controllers[t.by]):
             raise Refused(["the period change is not signed by a controller"])
         with self._lock:
@@ -176,8 +190,11 @@ class Books:
             date, reverses = args.get("date"), args.get("reverses")
             original = None
             if reverses is not None:
-                original = self.entries.get(reverses)
-                if original is None:
+                original = self.entries.get(reverses) if isinstance(reverses, str) else None
+                if "lines" in args:
+                    problems = ["a reversal takes its lines from the original entry; send "
+                                "either lines or reverses"]
+                elif original is None:
                     problems = [f"document {reverses} is not in these books"]
                 elif reverses in self.reversed:
                     problems = [f"document {reverses} was already reversed by "
@@ -232,22 +249,29 @@ def trial_balance(bodies: Any) -> Dict[str, int]:
     return out
 
 
-def replay(records: List[Tuple[int, str, Dict[str, Any]]], principal_keys: Dict[str, bytes]
-           ) -> Tuple[Dict[str, Any], List[str]]:
+def replay(records: List[Tuple[int, str, Dict[str, Any]]], principal_keys: Dict[str, bytes],
+           *, controllers: Optional[List[str]] = None, accounts: Optional[Dict[str, str]] = None,
+           service: Optional[str] = None) -> Tuple[Dict[str, Any], List[str]]:
     """Check the books in a log from its records, in log order.
 
-    `records` are (index, CID, record) triples for the whole log.
-    Returns a summary and the problems found.
+    `records` are (index, CID, record) triples for the whole log. With `controllers`,
+    `accounts` and `service` (from the evidence folder), period changes must be signed by
+    a controller, lines must use accounts in the chart, and entries must be written by the
+    books service. Returns a summary and the problems found.
     """
     periods: Dict[Tuple[str, str], Dict[str, str]] = {}
     seen: Dict[str, Dict[str, Any]] = {}
     numbers: Dict[Tuple[str, str], int] = {}
     reversed_: Dict[str, str] = {}
     problems: List[str] = []
-    transitions, signers, bodies = 0, set(), []
+    transitions, refused, signers, bodies = 0, 0, set(), []
     calls = {cid: rec for _, cid, rec in records if rec["kind"] == "tool.call"}
     for index, cid, rec in records:
         body = rec["body"]
+        where = f"record {index}"
+        if rec["kind"] == "policy.decision" and body.get("policy") == POLICY:
+            refused += 1
+            continue
         if rec["kind"] == "period.transition":
             transitions += 1
             try:
@@ -255,34 +279,47 @@ def replay(records: List[Tuple[int, str, Dict[str, Any]]], principal_keys: Dict[
                                                              "state", "by", "time")},
                                      signature=body["signature"])
             except (KeyError, TypeError):
-                problems.append(f"record {index}: the period change is incomplete")
+                problems.append(f"{where}: the period change is incomplete")
                 continue
             if rec["agent"] != t.by or not t.verify(principal_keys.get(t.by, b"")):
-                problems.append(f"record {index}: the period change is not signed by {t.by}")
+                problems.append(f"{where}: the period change is not signed by {t.by}")
+                continue
+            if controllers is not None and t.by not in controllers:
+                problems.append(f"{where}: the period change is signed by {t.by}, who is not "
+                                "a controller")
+                continue
+            if t.state not in STATES or not valid_period(t.period):
+                problems.append(f"{where}: the period change has no valid period or state")
                 continue
             signers.add(t.by)
             periods.setdefault((t.entity, t.ledger), {})[t.period] = t.state
             continue
         if rec["kind"] != "journal.entry":
             continue
-        where = f"record {index}"
         doc = body.get("document", "")
+        if service is not None and rec["agent"] != service:
+            problems.append(f"{where}: document {doc} was not written by the books service")
         call = calls.get(cid_str(rec["parents"][0])) if rec["parents"] else None
         if call is None or call["subject"] != TOOL:
             problems.append(f"{where}: document {doc} is not linked to a {TOOL} call")
-        problems += [f"{where}: document {doc}: {p}" for p in
-                     check_lines(body.get("lines"), None, body.get("currency", ""))]
-        problems += [f"{where}: document {doc}: {p}" for p in
-                     check_period(body.get("date"), periods.get((body.get("entity"),
-                                                                 body.get("ledger")), {}))]
-        if body.get("period") != period_of(body.get("date", "1970-01-01")):
-            problems.append(f"{where}: document {doc}'s period does not match its date")
+        bad_lines = check_lines(body.get("lines"), accounts, body.get("currency", ""))
+        problems += [f"{where}: document {doc}: {p}" for p in bad_lines]
+        bad_date = check_period(body.get("date"), periods.get((body.get("entity"),
+                                                              body.get("ledger")), {}))
+        problems += [f"{where}: document {doc}: {p}" for p in bad_date]
+        try:
+            if body.get("period") != period_of(body.get("date")):
+                problems.append(f"{where}: document {doc}'s period does not match its date")
+        except (TypeError, ValueError, AttributeError):
+            pass                                        # reported by check_period
         entity, year = body.get("entity", ""), str(body.get("date", ""))[:4]
         expected = numbers.get((entity, year), 0) + 1
         if doc != f"{entity}/{year}/{expected:06d}":
             problems.append(f"{where}: document {doc} breaks the numbering; expected "
                             f"{entity}/{year}/{expected:06d}")
         numbers[(entity, year)] = expected
+        if bad_lines:
+            continue
         if "reverses" in body:
             orig = seen.get(body["reverses"])
             if orig is None or len(rec["parents"]) < 2 or \
@@ -291,7 +328,9 @@ def replay(records: List[Tuple[int, str, Dict[str, Any]]], principal_keys: Dict[
                                 "earlier in these books")
             elif body["reverses"] in reversed_:
                 problems.append(f"{where}: document {body['reverses']} is reversed twice")
-            elif trial_balance([orig["body"], body]) != \
+            elif (orig["body"].get("entity"), orig["body"].get("ledger")) != \
+                    (body.get("entity"), body.get("ledger")) or \
+                    trial_balance([orig["body"], body]) != \
                     {k: 0 for k in trial_balance([orig["body"]])}:
                 problems.append(f"{where}: document {doc} does not exactly reverse "
                                 f"{body['reverses']}")
@@ -300,8 +339,8 @@ def replay(records: List[Tuple[int, str, Dict[str, Any]]], principal_keys: Dict[
         seen[doc] = {"cid": cid, "body": body}
         bodies.append(body)
     balances = trial_balance(bodies)
-    summary = {"entries": len(bodies), "reversals": len(reversed_), "transitions": transitions,
-               "signers": sorted(signers), "balances": balances,
+    summary = {"entries": len(bodies), "reversals": len(reversed_), "refused": refused,
+               "transitions": transitions, "signers": sorted(signers), "balances": balances,
                "debits": sum(v for v in balances.values() if v > 0),
                "credits": -sum(v for v in balances.values() if v < 0),
                "documents": sorted(seen)}

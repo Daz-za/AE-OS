@@ -31,8 +31,9 @@ MEANING = {
               "answer when the same module runs again on the recorded input, each approval "
               "is signed by its approver and answers an escalation of the same call, and "
               "every call that ran had the policy's allow; where the log holds books, each "
-              "entry balances, is dated in a period that was open, is numbered without gaps, "
-              "and each period change is signed; "
+              "journal entry balances, is linked to its tool call, is dated in a period that "
+              "was open and is numbered in sequence, and each period change carries a "
+              "controller's valid signature; "
               "and the required number of trusted witnesses cosigned the latest checkpoint.",
               "Do not rely on this evidence until each problem listed is explained. Keep a "
               "copy of the folder as it is now."),

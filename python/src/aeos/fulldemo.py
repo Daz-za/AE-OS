@@ -43,7 +43,7 @@ HELPER_AGENT = f"{AP_AGENT}/helper"
 CONTROLLER = f"spiffe://{DOMAIN}/human/controller-7f3c"
 CFO = f"spiffe://{DOMAIN}/human/cfo-2b81"
 BOOKS_SERVICE = f"spiffe://{DOMAIN}/service/books"
-ENTITY, LEDGER = "ACME-US", "0L"
+ENTITY, LEDGER = "ACME-US", "GL"
 ACCOUNTS = {"1000": "Bank", "2000": "Accounts payable", "5200": "Freight",
             "6100": "Professional fees"}
 POLICY_DATA = {"escalate_above_minor": 500_000, "sanctioned_vendors": ["V-0666"],
@@ -157,9 +157,10 @@ def run(folder: Path, out: Callable[[str], None] = print) -> int:
         json.dumps(envelope.to_json(), indent=2) + "\n")
     token = authority.mint(envelope, keys.public_bytes(controller_key))
     say("The controller signs what the agent may do",
-        "Acme's financial controller signs an intent for the accounts payable agent: read "
-        "and pay supplier invoices and book them in the accounts, up to USD 10,000.00 a payment and USD 20,000.00 in "
-        "total, for the next 8 hours. The stated purpose, "
+        "Acme's financial controller signs an intent for the accounts payable agent. For "
+        "the next 8 hours the agent may read supplier invoices, pay them (up to USD "
+        "10,000.00 a payment and USD 20,000.00 in total) and book them in the accounts. "
+        "The stated purpose, "
         f"'{envelope.purpose}', is recorded with the intent; the gateway does not check it. Acme's "
         "authorization service checks the signature and gives the agent a capability "
         f"token (a Biscuit) bound to that intent ({envelope.cid[:16]}…) and to the agent's "
@@ -196,12 +197,15 @@ def run(folder: Path, out: Callable[[str], None] = print) -> int:
             entity=ENTITY, ledger=LEDGER, period=period, state=state, by=CONTROLLER,
             time=now_ms()).sign(controller_key))
     say("Acme's books are set up",
-        f"A books service ({BOOKS_SERVICE}) keeps the general ledger of Acme's US company, "
-        f"{ENTITY}, with a small chart of accounts: "
+        f"A books service keeps the general ledger of {ENTITY}, Acme's US legal entity, "
+        "with a small chart of accounts: "
         + ", ".join(f"{k} {v}" for k, v in ACCOUNTS.items())
-        + f". The controller signs two period changes: {books.period_name(closed)} is closed "
-        f"and {books.period_name(opened)} is open. A period opens or closes only by a "
-        "change a controller signs, and each change is recorded with its signature.")
+        + f". The controller signs two period changes, closing {books.period_name(closed)} "
+        f"and opening {books.period_name(opened)}. The books service accepts a period change "
+        "only when a controller has signed it, and records the signature with it. To keep "
+        f"the example short, the books start empty in {books.period_name(opened)}. In this "
+        f"preview the books service runs inside the gateway; {BOOKS_SERVICE} names it in "
+        "the records.")
 
     tools = {**_erp(), books.TOOL: ledger.tool()}
     gateway = Gateway(log, tools, trust_domain=DOMAIN, svid_files=gw_files,
@@ -280,37 +284,48 @@ def run(folder: Path, out: Callable[[str], None] = print) -> int:
             return agent.call(books.TOOL, args)
 
         paid_total = inv["amount_minor"] + big_args["amount_minor"]
-        booked = post(today, f"Payments {payment} and {payment2}",
-                      [("2000", "debit_minor", paid_total), ("1000", "credit_minor", paid_total)])
-        doc1 = booked["result"]["structuredContent"]["document"]
-        say("The agent books the payments",
-            f"The agent asks the books service, through the gateway, to record the two "
-            f"payments: debit 2000 Accounts payable and credit 1000 Bank, "
-            f"{delegation.money(paid_total, 'USD')} each, dated {today:%d %B %Y}. The entry "
-            f"balances and its period is open, so it is recorded as document {doc1}, linked "
-            "to the agent's tool call.")
+        total = delegation.money(paid_total, "USD")
+
+        def document(reply):
+            return reply["result"]["structuredContent"]["document"]
+
+        doc1 = document(post(today, "Invoices INV-20431 and INV-20457",
+                             [("6100", "debit_minor", paid_total),
+                              ("2000", "credit_minor", paid_total)]))
+        doc2 = document(post(today, f"Payments {payment} and {payment2}",
+                             [("2000", "debit_minor", paid_total),
+                              ("1000", "credit_minor", paid_total)]))
+        say("The agent books the invoices and the payments",
+            "The agent asks the books service, through the gateway, to record the two "
+            f"invoices it paid, dated {today:%d %B %Y}: debit 6100 Professional fees "
+            f"{total} and credit 2000 Accounts payable {total}. The entry balances and "
+            f"{today:%B} is open, so the books record it as document {doc1}. The payments "
+            f"follow as document {doc2}: debit 2000 Accounts payable {total} and "
+            f"credit 1000 Bank {total} ({payment} for USD 4,200.00 and {payment2} for "
+            "USD 7,800.00). Each entry is linked to the agent's tool call.")
 
         freight = [("5200", "debit_minor", 125_000), ("2000", "credit_minor", 125_000)]
         late = post(last_month_end, "Freight invoice INV-20470", freight)
         typo = post(today, "Freight invoice INV-20470",
                     [("5200", "debit_minor", 125_000), ("2000", "credit_minor", 120_500)])
-        doc2 = post(today, "Freight invoice INV-20470", freight)["result"]["structuredContent"][
-            "document"]
-        say("The books refuse a posting to a closed month",
-            "A freight invoice for USD 1,250.00 arrives late. The agent tries to book it on "
+        doc3 = document(post(today, "Freight invoice INV-20470", freight))
+        say("The books refuse a closed month and an entry that does not balance",
+            f"A USD 1,250.00 freight invoice for {last_month_end:%B} arrives after "
+            f"{last_month_end:%B} was closed. The agent tries to date the entry "
             f"{last_month_end:%d %B %Y}, and the books refuse: {refusal(late)}. It then "
-            "books it in the open month but types the credit as USD 1,205.00, and the books "
-            f"refuse again: {refusal(typo)}. Both refusals are recorded and neither uses a "
-            f"document number. The corrected entry is recorded as document {doc2}.")
+            f"dates the entry in {today:%B} but enters the credit as USD 1,205.00, and the "
+            f"books refuse again: {refusal(typo)}. Both refusals are recorded, and neither "
+            "uses a document number. The agent sends the entry again with matching amounts, "
+            f"and the books record it as document {doc3}.")
 
-        undo = post(today, "INV-20470 was a duplicate of a freight charge already paid",
-                    reverses=doc2)["result"]["structuredContent"]["document"]
-        say("A mistake is corrected by reversal",
-            "The supplier writes that INV-20470 duplicates a freight charge already paid. "
-            f"The agent asks the books to reverse document {doc2}. The books record document "
-            f"{undo}, dated in the open month, which cites {doc2} and swaps its debits and "
-            f"credits. Document {doc2} stays in the books unchanged, so the history shows "
-            "both the mistake and its correction.")
+        undo = document(post(today, "INV-20470 duplicates a freight charge already paid",
+                             reverses=doc3))
+        say("A duplicate invoice is reversed",
+            "The supplier writes that INV-20470 duplicates a freight charge already paid, so "
+            f"the agent asks the books to reverse document {doc3}. The books record document "
+            f"{undo}, dated {today:%d %B %Y}: debit 2000 Accounts payable and credit 5200 "
+            f"Freight, USD 1,250.00, citing {doc3}. The original entry stays in the books "
+            "unchanged, so the history shows both the entry and its reversal.")
 
         narrow = delegation.attenuate(token, subject=HELPER_AGENT,
                                       actions=["erp.invoice.get"], max_minor=0)
@@ -451,7 +466,9 @@ def run(folder: Path, out: Callable[[str], None] = print) -> int:
                 "bundle": "trust/bundle.pem", "svids": "svids", "log": "log",
                 "witnesses": "witnesses.json", "authority": "trust/authority-public-key.txt",
                 "principals": "trust/principals.json", "intents": "intents", "tokens": "tokens",
-                "policies": "policies", "books": True}
+                "policies": "policies",
+                "books": {"service": BOOKS_SERVICE, "controllers": [CONTROLLER],
+                          "accounts": ACCOUNTS}}
     tokens_dir = folder / "tokens"
     tokens_dir.mkdir()
     for sha, raw in gateway.tokens.items():
