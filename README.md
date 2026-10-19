@@ -27,7 +27,8 @@ The image above is a frame from the film on [ae-os.org](https://ae-os.org), whic
 | Path | What it is |
 |---|---|
 | [`spec/receipts-v0.md`](spec/receipts-v0.md) | AE-OS Receipts format: records, Merkle log, signed checkpoints, receipts and consistency proofs |
-| [`spec/identity-and-witnesses-draft.md`](spec/identity-and-witnesses-draft.md) | Draft: SPIFFE identities, delegated authority, the mutual-TLS gateway, witness cosignatures and evidence folders |
+| [`spec/identity-and-witnesses-draft.md`](spec/identity-and-witnesses-draft.md) | Draft: SPIFFE identities, delegated authority, policy and approvals, the mutual-TLS gateway, witness cosignatures and evidence folders |
+| [`policy/`](policy/) | The example payment rules in Rego, and the script that compiles them to WebAssembly |
 | [`python/`](python/) | `aeos`, the Python library and command line (first called `aeos-receipts`). It records agents' tool calls from MCP servers, gateways, OpenTelemetry traces and Claude Code hooks, and includes a preview of identities, delegated authority, an MCP gateway and witnesses |
 | [`rust/`](rust/) | `aeos-verify`, a separate verifier in Rust, sharing no code with the Python library, that auditors can use to check receipts, consistency proofs and whole logs |
 | [`testvectors/`](testvectors/) | Shared test vectors that keep the Python, Rust and browser implementations in agreement |
@@ -41,7 +42,7 @@ pipx install "git+https://github.com/Daz-za/ae-os#subdirectory=python"
 aeos ui        # work in your web browser: run the example, create or open a log
 aeos demo      # the same example, explained step by step in the terminal
 aeos setup     # answer a few questions to create your own log
-aeos demo --full   # SPIFFE identities, delegated authority, an MCP gateway and witnesses
+aeos demo --full   # identities, delegated authority, policy, an MCP gateway and witnesses
 ```
 
 New to the command line? [docs/getting-started.md](docs/getting-started.md) walks through installing on Linux, macOS and Windows.

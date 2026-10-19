@@ -165,11 +165,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                    help="where to leave the example files (default aeos-demo, or "
                         "aeos-full-demo with --full)")
     p.add_argument("--full", action="store_true",
-                   help="also run SPIFFE identities, delegated authority, mutual TLS, the MCP "
-                   "gateway and witnesses")
+                   help="also run SPIFFE identities, delegated authority, policy, mutual "
+                   "TLS, the MCP gateway and witnesses")
 
     p = sub.add_parser("audit", help="check an evidence folder: log, agent identities, "
-                       "delegated authority and witness cosignatures")
+                       "delegated authority, policy decisions and witness cosignatures")
     p.add_argument("folder")
     p.add_argument("--bundle", help="trust bundle (root certificates) you trust")
     p.add_argument("--public-key", help="the log's public key (hex) you trust")

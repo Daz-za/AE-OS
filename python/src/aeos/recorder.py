@@ -17,7 +17,7 @@ from __future__ import annotations
 import threading
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from .canon import json_digest
+from .canon import cid_parse, json_digest
 from .log import Entry, ReceiptLog, make_record
 
 _MISSING: Any = object()
@@ -144,6 +144,14 @@ class Recorder:
             return self._append("policy.decision", agent=agent, obo=on_behalf_of, subject=tool,
                                 body={"decision": decision, "policy": policy, **(body or {})},
                                 parents=[call.cid], ts=ts)
+
+    def approval(self, call: Entry, approval: Any, ts: Optional[int] = None) -> Entry:
+        """Record a person's signed approval, linked to the escalation and the call."""
+        with self._lock:
+            body = {**approval.fields(), "signature": approval.signature}
+            return self._append("approval", agent=approval.approver, obo=None,
+                                subject=approval.tool, body=body,
+                                parents=[cid_parse(approval.escalation), call.cid], ts=ts)
 
     def _refusal(self, tool: str) -> Optional[str]:
         if self.allow is not None and tool not in self.allow:

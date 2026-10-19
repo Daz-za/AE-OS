@@ -1,6 +1,6 @@
-# AE-OS identity, delegation, gateway and witnesses (draft)
+# AE-OS identity, delegation, policy, gateway and witnesses (draft)
 
-Status: draft, implemented in the Python package as a preview (`identity.py`, `delegation.py`, `gateway.py`, `witness.py`, `audit.py`). The receipt log format in [receipts-v0.md](receipts-v0.md) is unchanged; everything here sits beside it. Formats may change before they are frozen with test vectors.
+Status: draft, implemented in the Python package as a preview (`identity.py`, `delegation.py`, `policy.py`, `gateway.py`, `witness.py`, `audit.py`). The receipt log format in [receipts-v0.md](receipts-v0.md) is unchanged; everything here sits beside it. Formats may change before they are frozen with test vectors.
 
 ## 1. Workload identity
 
@@ -50,7 +50,26 @@ The token covers the audience and its sub-agents, whose SPIFFE ID paths extend t
 
 To authorize a call, the gateway supplies the facts `subject` (the SPIFFE ID from the mTLS connection), `tool`, `amount` (the call's `amount_minor` argument, 0 when absent) and `time` (rounded up to the whole second, since Biscuit times are seconds), with the policy `allow if intent($i)`. It then checks that it holds the envelope the token names and that the envelope's signature verifies against the principal's key. It meters `budget_minor` itself, reserving each allowed call's amount and releasing it if the call fails.
 
-## 3. Gateway
+## 3. Policy and approvals
+
+A policy is written in Rego and compiled with `opa build -t wasm -e <entrypoint>` (OPA WebAssembly ABI 1.2 or later). The gateway refuses a module that lists any host built-in function. The gateway runs it with wasmtime in a new instance for each decision. The module may import only its memory (4 MiB, growing to at most 16 MiB), `opa_abort` and `opa_builtin0`–`opa_builtin4`, and the built-in hooks refuse every call. Each decision may use at most 50,000,000 units of wasmtime fuel, roughly one per instruction. The entrypoint returns `{"decision": "allow" | "deny" | "escalate", "reasons": [...]}`.
+
+The input is `{"tool", "agent", "principal", "arguments"}`, plus facts the gateway looks up for the call (the example policy uses `invoice`) and, when the agent repeats an escalated call, `approval` as `{"approver", "decision"}`. The policy's data (thresholds, lists) is loaded with the module when the gateway is created, and every decision records its SHA-256. The example policy is `policy/payments.rego`; `policy/build.sh` rebuilds `python/src/aeos/policies/payments.wasm`, and CI checks that the committed module matches a build with a pinned OPA version.
+
+The gateway does not run a call the policy escalates. It answers with the escalation's CID, and the agent repeats the call with a person's signed approval. The person signs an **approval**, the DAG-CBOR map
+
+| Field | Meaning |
+|---|---|
+| `escalation` | CID of the `policy.decision` record that escalated the call |
+| `approver` | the person's SPIFFE ID |
+| `decision` | `approve` or `reject` |
+| `tool` | the tool of the escalated call |
+| `args_sha256` | the escalated call's `args_sha256` |
+| `time` | milliseconds since the Unix epoch |
+
+with Ed25519 over `"aeos/approval/v0\n" || DAG-CBOR(approval)`. The agent repeats the call with the approval as base64url JSON in the `AEOS-Approval` header. The gateway checks that the approval answers an open escalation for the same agent, tool and arguments and that its signature verifies against the approver's key, records it as an `approval` record (agent = the approver, parents = the escalation and the new call, body = the fields above plus `signature`), and runs the policy with `approval` in the input. The escalation closes when the policy allows the repeated call. A signed rejection is recorded and the call is refused; the escalation stays open, so an approver can still decide.
+
+## 4. Gateway
 
 Agents reach tools through a gateway over mutual TLS, both sides presenting SVIDs from the trust domain. Requests are MCP JSON-RPC messages (`initialize`, `tools/list`, `tools/call`) sent as HTTP POSTs to `/mcp`, as in MCP's Streamable HTTP transport; the session is carried in the `Mcp-Session-Id` header and belongs to the identity that opened it.
 
@@ -60,7 +79,8 @@ The gateway:
 2. takes the agent's SPIFFE ID from its verified certificate, never from the request;
 3. allows each identity only the tools configured for it, and records a refusal as a `policy.decision` with decision `deny`;
 4. when it holds an authority key, requires a capability token in the `AEOS-Capability` header (base64url) on every `tools/call`, authorizes it as in section 2, and records the outcome as a `policy.decision` linked to the call, under the agent's SPIFFE ID; an allowed call, its decision and its result also name the envelope's principal as `obo`;
-5. records `session.start`, `tool.call`, `tool.result` and `session.end` under the agent's SPIFFE ID.
+5. when it holds a policy, runs it on every call that passed the checks above, as in section 3, and records the decision as a `policy.decision` with policy `aeos-policy/v0`;
+6. records `session.start`, `tool.call`, `tool.result` and `session.end` under the agent's SPIFFE ID.
 
 The `session.start` body adds:
 
@@ -70,10 +90,13 @@ The `session.start` body adds:
 | `authenticated_by` | `x509-svid-mtls` |
 | `trust_domain` | the trust domain whose bundle the gateway used |
 | `authorization` | `aeos-capability/v0` when every call in the session needs a token |
+| `policy_sha256` | SHA-256 of the policy module, when the gateway runs a policy |
 
 A capability decision's body is `decision` (`allow` or `deny`), `policy` (`aeos-capability/v0`), `amount`, `reasons` (empty when allowed), `token_sha256` (SHA-256 of the token's bytes) when the token decoded and the amount was valid, and `intent` (the envelope CID the token names) when the token's signature verified.
 
-## 4. Witness cosignatures
+A policy decision's body is `decision` (`allow`, `deny` or `escalate`), `policy` (`aeos-policy/v0`), `reasons`, and, when the policy ran, `policy_sha256`, `data_sha256`, `entrypoint` and `input_json` (the canonical JSON of the exact input). A refusal before the policy ran, such as an approval that does not verify, has only `reasons` and is always `deny`.
+
+## 5. Witness cosignatures
 
 A witness keeps, for each log, the size and root of the last checkpoint it cosigned. It cosigns a newer checkpoint only if the log's signature verifies and an RFC 9162 consistency proof shows the newer tree extends the one it cosigned. Otherwise it refuses, which exposes a log that shows different histories to different parties.
 
@@ -91,7 +114,7 @@ where `<checkpoint message>` is the exact byte string the log signed (receipts-v
 
 A checkpoint is final for an auditor when at least k of the n witnesses the auditor trusts have valid cosignatures on it.
 
-## 5. Evidence folder
+## 6. Evidence folder
 
 `aeos audit` checks a folder described by `evidence.json`:
 
@@ -99,7 +122,7 @@ A checkpoint is final for an auditor when at least k of the n witnesses the audi
 {"format": "aeos-evidence/v0", "trust_domain": "acme.example", "bundle": "trust/bundle.pem",
  "svids": "svids", "log": "log", "witnesses": "witnesses.json",
  "authority": "trust/authority-public-key.txt", "principals": "trust/principals.json",
- "intents": "intents", "tokens": "tokens"}
+ "intents": "intents", "tokens": "tokens", "policies": "policies"}
 ```
 
 `svids/` holds the certificate chains (no keys) the agents presented. `key-hierarchy.json`, when present, lists each key and certificate (role, algorithm, holder, what it signs, issuer, validity and fingerprint); it is informational and the audit does not rely on it. `witnesses.json` holds `{"required": k, "keys": {name: hex public key}}`. The last four entries are present when the gateway required tokens: the authorization service's public key (hex), `principals.json` as `{SPIFFE ID: hex Ed25519 public key}`, `intents/<CID>.json` as `{"cid", "envelope", "signature"}`, and `tokens/<sha256 hex>.biscuit` holding each token presented. The audit:
@@ -108,16 +131,19 @@ A checkpoint is final for an auditor when at least k of the n witnesses the audi
 - for each `session.start` with `svid_sha256`, checks the matching chain against the trust bundle at the record's time, and checks that its SPIFFE ID is the record's `agent`;
 - replays each `aeos-capability/v0` decision from the token, the record's `agent`, `subject`, `ts` and `amount`, the envelope and the principal's key, with the budget spent by earlier allowed calls that ran, and checks it gives the recorded decision and, for an allowed call, that the record's `obo` is the envelope's principal;
 - checks that, in sessions with `authorization`, every call with a successful `tool.result` has an allow decision;
+- runs each `aeos-policy/v0` decision's module (`policies/<policy_sha256>.wasm`) with its data (`policies/data-<data_sha256>.json`, where `data_sha256` is SHA-256 of the data's canonical JSON) and entrypoint on the recorded `input_json`, and checks it gives the recorded decision; checks each `approval` record's signature and that it answers an escalation of the same call; and checks that, in sessions with `policy_sha256`, every call with a successful `tool.result` has the policy's allow;
 - checks that the latest checkpoint has at least k valid cosignatures.
 
 An auditor should pass the trust bundle, the log's public key, the witness keys, the authorization service's key and the people's keys from sources they trust (`--bundle`, `--public-key`, `--witnesses`, `--authority-key`, `--principals`).
 
-## 6. Not yet covered
+## 7. Not yet covered
 
 - A shared, durable budget: the preview keeps it in one gateway's memory, so a restart resets it and gateways do not share it.
+- Durable escalations: open escalations are kept in one gateway's memory, so a restart discards them. Approvals carry a time but no expiry.
+- Checking the facts a policy decided on: the audit replays each decision on the recorded invoice facts and does not check them against the ERP.
 - Revocation of tokens before they expire (Biscuit revocation IDs are not yet checked).
 - Agent manifests (APOs) that pin each tool's definition digest.
-- Policy as code: Rego compiled to WebAssembly, with decisions that can be replayed.
+- Host built-in functions for policies (time, cryptography, network lookups), and policy data that changes while the gateway runs.
 - Audience-bound JWT-SVIDs on MCP calls.
 - Recording the signer's SVID chain CID in every record (the preview records the leaf's fingerprint in `session.start` only).
 - Each record signed with the actor's SVID key, as the research paper describes.

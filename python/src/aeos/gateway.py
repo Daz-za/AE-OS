@@ -16,6 +16,12 @@ With an authority key, the gateway also requires a capability token (in the
 the SPIFFE ID from the connection, the tool, the call's amount and the time. It records
 each decision as a `policy.decision` linked to the call, with the intent the token is
 bound to, and meters each intent's total budget (see delegation.py).
+
+With a policy, the gateway then runs a Rego policy compiled to WebAssembly on each call
+(see policy.py) and records its decision with the exact input it saw. The gateway does
+not run a call the policy escalates. It answers with the escalation's CID, and the agent
+repeats the call with a person's signed approval in the `AEOS-Approval` header; the
+gateway records the approval before asking the policy again.
 """
 from __future__ import annotations
 
@@ -29,7 +35,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
-from . import delegation, identity
+from . import delegation, identity, policy as policy_mod
+from .canon import canonical_json, cid_str, json_digest
 from .log import ReceiptLog, now_ms
 from .recorder import Recorder
 
@@ -45,6 +52,9 @@ class Gateway:
     authority_key   when set, every tool call needs a capability token signed by this key
     intents         the signed intent envelopes tokens may be bound to, by CID
     principal_keys  each person's public key, by SPIFFE ID, to check envelope signatures
+                    and approvals
+    policy          a compiled policy to run on every call that passes the other checks
+    policy_facts    tool name, arguments -> facts the policy needs, such as the invoice
     """
 
     def __init__(self, log: ReceiptLog, tools: Dict[str, Tool], *,
@@ -53,7 +63,10 @@ class Gateway:
                  on_behalf_of: Optional[Dict[str, str]] = None,
                  authority_key: Optional[bytes] = None,
                  intents: Optional[Dict[str, delegation.IntentEnvelope]] = None,
-                 principal_keys: Optional[Dict[str, bytes]] = None) -> None:
+                 principal_keys: Optional[Dict[str, bytes]] = None,
+                 policy: Optional[policy_mod.Policy] = None,
+                 policy_facts: Optional[Callable[[str, Dict[str, Any]], Dict[str, Any]]] = None
+                 ) -> None:
         self.log, self.tools, self.trust_domain = log, tools, trust_domain
         self.permissions = {k: set(v) for k, v in permissions.items()}
         self.obo = on_behalf_of or {}
@@ -65,6 +78,8 @@ class Gateway:
         self.principal_keys = dict(principal_keys or {})
         self.budget = delegation.Budget()
         self.tokens: Dict[str, bytes] = {}                 # SHA-256 hex -> token presented
+        self.policy, self.policy_facts = policy, policy_facts
+        self.escalations: Dict[str, Tuple[str, str, bytes]] = {}  # CID -> agent, tool, args
         self._lock = threading.Lock()
         self.server: Optional[ThreadingHTTPServer] = None
 
@@ -77,8 +92,8 @@ class Gateway:
             return self._recorders[spiffe_id]
 
     def handle(self, peer: str, svid_sha256: str, session: Optional[str],
-               msg: Dict[str, Any], token: Optional[str] = None
-               ) -> Tuple[Dict[str, Any], Optional[str]]:
+               msg: Dict[str, Any], token: Optional[str] = None,
+               approval: Optional[str] = None) -> Tuple[Dict[str, Any], Optional[str]]:
         """Answer one JSON-RPC request from an authenticated peer."""
         method, rid = msg.get("method"), msg.get("id")
         if method == "initialize":
@@ -88,6 +103,8 @@ class Gateway:
                      "authenticated_by": "x509-svid-mtls", "trust_domain": self.trust_domain}
             if self.authority_key is not None:
                 extra["authorization"] = delegation.POLICY
+            if self.policy is not None:
+                extra["policy_sha256"] = self.policy.sha256
             self.recorder(peer).session(session, subject="mcp", extra=extra)
             return _ok(rid, {"protocolVersion": PROTOCOL_VERSION, "capabilities": {"tools": {}},
                              "serverInfo": {"name": "aeos-gateway", "version": "0.1"}}), session
@@ -122,6 +139,12 @@ class Gateway:
                 self.budget.release(reserved, cap["body"]["amount"])
             return _refused(rid, "; ".join(reasons)), session
         obo = cap["principal"] if cap else None
+        if self.policy is not None:
+            stop = self._apply_policy(rec, entry, rid, peer, name, args, approval, obo, at)
+            if stop is not None:
+                if reserved is not None:
+                    self.budget.release(reserved, cap["body"]["amount"])
+                return stop, session
         try:
             out = self.tools[name](args)
         except Exception as e:                      # the tool's failure is the agent's answer
@@ -133,6 +156,71 @@ class Gateway:
         rec.result(call_id, session_id=session, result=out, on_behalf_of=obo)
         return _ok(rid, {"content": [{"type": "text", "text": json.dumps(out)}],
                          "structuredContent": out}), session
+
+    def _apply_policy(self, rec: Recorder, call: Any, rid: Any, peer: str, tool: str,
+                      args: Dict[str, Any], approval: Optional[str], obo: Optional[str],
+                      at: int) -> Optional[Dict[str, Any]]:
+        """Record the policy's decision; the reply when the call must not run yet."""
+        assert self.policy is not None
+        doc: Dict[str, Any] = {"tool": tool, "agent": peer, "principal": obo,
+                               "arguments": args}
+        if self.policy_facts:
+            doc.update(self.policy_facts(tool, args))
+        if approval:
+            answer, problem = self._approval(rec, call, approval, peer, tool, args, at)
+            if problem:
+                rec.decision(call, tool, decision="deny", policy=policy_mod.POLICY,
+                             body={"reasons": [problem]}, on_behalf_of=obo, ts=at)
+                return _refused(rid, problem)
+            escalation = answer.pop("escalation")
+            doc["approval"] = answer
+        try:
+            d = self.policy.evaluate(doc)
+        except policy_mod.PolicyError as e:
+            d = {"decision": "deny", "reasons": [str(e)]}
+        if approval and d["decision"] == "allow":
+            with self._lock:                          # the escalation is settled
+                self.escalations.pop(escalation, None)
+        entry = rec.decision(call, tool, decision=d["decision"], policy=policy_mod.POLICY,
+                             body={"reasons": d["reasons"],
+                                   "policy_sha256": self.policy.sha256,
+                                   "data_sha256": self.policy.data_sha256,
+                                   "entrypoint": self.policy.entrypoint,
+                                   "input_json": canonical_json(doc)},
+                             on_behalf_of=obo, ts=at)
+        if d["decision"] == "allow":
+            return None
+        if d["decision"] == "deny":
+            return _refused(rid, "; ".join(d["reasons"]))
+        escalation = cid_str(entry.cid)
+        with self._lock:
+            self.escalations[escalation] = (peer, tool, json_digest(args))
+        return _ok(rid, {"isError": True, "structuredContent": {
+            "escalation": escalation, "reasons": d["reasons"]},
+            "content": [{"type": "text", "text": "Escalated: " + "; ".join(d["reasons"])
+                         + f". Repeat the call with an approval of escalation {escalation}, "
+                         "signed by an approver."}]})
+
+    def _approval(self, rec: Recorder, call: Any, text: str, peer: str, tool: str,
+                  args: Dict[str, Any], at: int) -> Tuple[Dict[str, Any], Optional[str]]:
+        """Check a signed approval and record it; (what the policy sees, problem)."""
+        try:
+            a = delegation.Approval.from_json(json.loads(base64.urlsafe_b64decode(
+                text + "=" * (-len(text) % 4))))
+        except (ValueError, KeyError, TypeError):
+            return {}, "the approval could not be read"
+        with self._lock:
+            asked = self.escalations.get(a.escalation)
+            if asked is None:
+                return {}, "the approval does not answer an open escalation at this gateway"
+            if asked != (peer, tool, json_digest(args)) or a.tool != tool or \
+                    a.args_sha256 != asked[2]:
+                return {}, "the approval is for a different call"
+            if not a.verify(self.principal_keys.get(a.approver, b"")):
+                return {}, "the approval's signature does not verify"
+        rec.approval(call, a, ts=at)
+        return {"approver": a.approver, "decision": a.decision, "escalation": a.escalation}, \
+            None
 
     def _authorize(self, peer: str, tool: str, args: Dict[str, Any], token: Optional[str],
                    at: int) -> Dict[str, Any]:
@@ -199,7 +287,8 @@ class Gateway:
                     self._send(404, _err(None, -32600, "invalid request"), None)
                     return
                 reply, session = gw.handle(peer, fp, self.headers.get("Mcp-Session-Id"), msg,
-                                           self.headers.get("AEOS-Capability"))
+                                           self.headers.get("AEOS-Capability"),
+                                           self.headers.get("AEOS-Approval"))
                 self._send(200, reply, session)
 
             def do_DELETE(self) -> None:
@@ -262,7 +351,7 @@ class AgentClient:
         self._next = 0
 
     def _post(self, method: str, params: Optional[Dict[str, Any]] = None,
-              http_method: str = "POST") -> Dict[str, Any]:
+              http_method: str = "POST", approval: Optional[bytes] = None) -> Dict[str, Any]:
         conn = http.client.HTTPSConnection(self.host, self.port, context=self.context,
                                            timeout=10)
         try:
@@ -277,6 +366,8 @@ class AgentClient:
                 headers["Mcp-Session-Id"] = self.session
             if self.token:
                 headers["AEOS-Capability"] = base64.urlsafe_b64encode(self.token).decode()
+            if approval:
+                headers["AEOS-Approval"] = base64.urlsafe_b64encode(approval).decode()
             conn.request(http_method, "/mcp", body=body, headers=headers)
             res = conn.getresponse()
             data = res.read()
@@ -290,8 +381,11 @@ class AgentClient:
         return self._post("initialize", {"protocolVersion": PROTOCOL_VERSION,
                                          "capabilities": {}, "clientInfo": {"name": "agent"}})
 
-    def call(self, tool: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        return self._post("tools/call", {"name": tool, "arguments": arguments})
+    def call(self, tool: str, arguments: Dict[str, Any],
+             approval: Optional["delegation.Approval"] = None) -> Dict[str, Any]:
+        """Call a tool; `approval` is a person's signed answer to an escalation."""
+        return self._post("tools/call", {"name": tool, "arguments": arguments},
+                          approval=json.dumps(approval.to_json()).encode() if approval else None)
 
     def close(self) -> None:
         if self.session:

@@ -9,6 +9,8 @@ are built so far, for real, on one computer:
   a Biscuit capability token, and the agent can narrow that token for a helper;
 - an MCP gateway that takes the agent's identity from its certificate, checks the token
   against it, the tool, the amount and the time, and records every call and decision;
+- payment rules written in Rego and compiled to WebAssembly, run in a sandbox, with
+  escalation to a person whose signed approval the gateway checks and records;
 - witnesses that cosign checkpoints and refuse a log that shows them a different history;
 - an end-to-end audit of the evidence (`aeos audit`).
 
@@ -26,10 +28,10 @@ from typing import Callable, Dict
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from . import audit, delegation, identity, keys, witness
+from . import audit, delegation, identity, keys, policy, witness
 from .gateway import AgentClient, Gateway, handshake_error
-from .canon import decode_dag_cbor
-from .log import ReceiptLog
+from .canon import decode_dag_cbor, json_digest
+from .log import ReceiptLog, now_ms
 
 DOMAIN = "acme.example"
 AP_AGENT = f"spiffe://{DOMAIN}/agent/accounts-payable"
@@ -37,11 +39,24 @@ PAYROLL_AGENT = f"spiffe://{DOMAIN}/agent/payroll"
 GATEWAY = f"spiffe://{DOMAIN}/gateway/erp-mcp"
 HELPER_AGENT = f"{AP_AGENT}/helper"
 CONTROLLER = f"spiffe://{DOMAIN}/human/controller-7f3c"
+CFO = f"spiffe://{DOMAIN}/human/cfo-2b81"
+POLICY_DATA = {"escalate_above_minor": 500_000, "sanctioned_vendors": ["V-0666"],
+               "approvers": [CFO]}
+
+POLICY_WASM = Path(__file__).with_name("policies") / "payments.wasm"
 
 INVOICES = {"INV-20431": {"vendor": "V-1182", "amount_minor": 420_000, "currency": "USD",
                           "status": "approved for payment"},
             "INV-20457": {"vendor": "V-0907", "amount_minor": 780_000, "currency": "USD",
+                          "status": "approved for payment"},
+            "INV-20466": {"vendor": "V-0666", "amount_minor": 95_000, "currency": "USD",
                           "status": "approved for payment"}}
+
+
+def _facts(tool: str, args: Dict) -> Dict:
+    """What the payment policy needs to know beyond the call: the invoice it names."""
+    inv = INVOICES.get(args.get("invoice", ""))
+    return {"invoice": inv} if inv else {}
 
 
 def _erp() -> Dict[str, Callable]:
@@ -114,18 +129,20 @@ def run(folder: Path, out: Callable[[str], None] = print) -> int:
         "Identity rests on the certificate alone.")
 
     controller_key = keys.generate_key(private / "controller.key")
+    cfo_key = keys.generate_key(private / "cfo.key")
     authority = delegation.Authority()
     (private / "authority.key").write_bytes(authority.private_bytes())
     (private / "authority.key").chmod(0o600)
     (trust / "authority-public-key.txt").write_text(authority.public_key.hex() + "\n")
     (trust / "principals.json").write_text(json.dumps(
-        {CONTROLLER: keys.public_bytes(controller_key).hex()}, indent=2) + "\n")
+        {CONTROLLER: keys.public_bytes(controller_key).hex(),
+         CFO: keys.public_bytes(cfo_key).hex()}, indent=2) + "\n")
     now = dt.datetime.now(dt.timezone.utc)
     envelope = delegation.IntentEnvelope(
         principal=CONTROLLER, audience=AP_AGENT,
         purpose="Pay approved supplier invoices for October",
-        actions=["erp.invoice.get", "erp.invoice.pay"], per_action_max_minor=500_000,
-        budget_minor=1_000_000, currency="USD",
+        actions=["erp.invoice.get", "erp.invoice.pay"], per_action_max_minor=1_000_000,
+        budget_minor=2_000_000, currency="USD",
         not_after=int((now + dt.timedelta(hours=8)).timestamp() * 1000)).sign(controller_key)
     intents_dir = folder / "intents"
     intents_dir.mkdir()
@@ -134,12 +151,29 @@ def run(folder: Path, out: Callable[[str], None] = print) -> int:
     token = authority.mint(envelope, keys.public_bytes(controller_key))
     say("The controller signs what the agent may do",
         "Acme's financial controller signs an intent for the accounts payable agent: read "
-        "and pay supplier invoices, up to USD 5,000.00 a payment and USD 10,000.00 in "
+        "and pay supplier invoices, up to USD 10,000.00 a payment and USD 20,000.00 in "
         "total, for the next 8 hours. The stated purpose, 'Pay approved supplier invoices "
         "for October', is recorded with the intent; the gateway does not check it. Acme's "
         "authorization service checks the signature and gives the agent a capability "
         f"token (a Biscuit) bound to that intent ({envelope.cid[:16]}…) and to the agent's "
         "SPIFFE ID. The gateway requires this token on every tool call the agent makes.")
+
+    rules = policy.Policy.load(POLICY_WASM, POLICY_DATA, "aeos/payments/decision")
+    policies_dir = folder / "policies"
+    policies_dir.mkdir()
+    (policies_dir / f"{rules.sha256.hex()}.wasm").write_bytes(rules.wasm)
+    (policies_dir / f"data-{rules.data_sha256.hex()}.json").write_text(
+        json.dumps(POLICY_DATA, indent=2) + "\n")
+    say("Acme's payment rules are loaded into the gateway",
+        "The rules are written in Rego, the policy language of Open Policy Agent "
+        "(policy/payments.rego), and compiled to WebAssembly (module "
+        f"{rules.sha256.hex()[:16]}…). A payment must match an invoice approved for payment, for the "
+        "invoice's amount, and must "
+        "not go to a supplier on the sanctions list. A payment above USD 5,000.00 needs "
+        "the approval of someone on the approvers list, other than the person who "
+        "authorized the agent. The gateway runs the module in a sandbox that can read only "
+        "the call, the invoice it names and the rules' data, with limits on memory and on the work done per "
+        "decision.")
 
     log = ReceiptLog.create(folder / "log", log_id="urn:example:acme:accounts-payable",
                             key_path=private / "log-signing.key")
@@ -150,7 +184,9 @@ def run(folder: Path, out: Callable[[str], None] = print) -> int:
                                    HELPER_AGENT: ["erp.invoice.get", "erp.invoice.pay"],
                                    PAYROLL_AGENT: ["erp.payroll.get"]},
                       authority_key=authority.public_key, intents={envelope.cid: envelope},
-                      principal_keys={CONTROLLER: keys.public_bytes(controller_key)})
+                      principal_keys={CONTROLLER: keys.public_bytes(controller_key),
+                                      CFO: keys.public_bytes(cfo_key)},
+                      policy=rules, policy_facts=_facts)
     port = gateway.start()
 
     def client(files, tok=None):
@@ -171,18 +207,43 @@ def run(folder: Path, out: Callable[[str], None] = print) -> int:
         say("The agent pays an invoice through the gateway",
             "The agent connects to the ERP gateway over mutual TLS: each side proves its "
             "identity with its certificate, and each checks the other's against Acme's root. "
-            "The gateway takes the agent's identity from the certificate and checks the "
-            "token against it, the tool, the amount and the time. The agent reads invoice "
+            "The gateway takes the agent's identity from the certificate, checks the token "
+            "against it, the tool, the amount and the time, and then asks the payment "
+            "rules. The agent reads invoice "
             f"INV-20431 and pays USD 4,200.00 (payment {payment}). Each call and each "
             f"decision is recorded under {AP_AGENT}, on behalf of the controller, and the "
             "session's first record holds the fingerprint of the certificate the agent "
             "presented.")
 
-        big = agent.call("erp.invoice.pay", {"invoice": "INV-20457", "amount_minor": 780_000})
-        say("A payment above the limit is refused",
-            "The agent tries to pay invoice INV-20457 for USD 7,800.00. The gateway refuses: "
-            f"{refusal(big)}. The refusal is recorded with the intent it was checked against. "
-            "Routing such a payment to a person for approval comes with the policy engine.")
+        big_args = {"invoice": "INV-20457", "amount_minor": 780_000}
+        big = agent.call("erp.invoice.pay", big_args)["result"]
+        escalation = big["structuredContent"]["escalation"]
+
+        def answer(person, key, verdict="approve"):
+            return delegation.Approval(
+                escalation=escalation, approver=person, decision=verdict,
+                tool="erp.invoice.pay", args_sha256=json_digest(big_args),
+                time=now_ms()).sign(key)
+
+        own = agent.call("erp.invoice.pay", big_args, approval=answer(CONTROLLER,
+                                                                      controller_key))
+        done = agent.call("erp.invoice.pay", big_args, approval=answer(CFO, cfo_key))
+        payment2 = done["result"]["structuredContent"]["payment"]
+        say("A large payment needs a person's approval",
+            "The agent tries to pay invoice INV-20457 for USD 7,800.00. The token allows it, "
+            "but the rules escalate it and the gateway does not run it: "
+            f"{big['structuredContent']['reasons'][0]}. The controller, who authorized the "
+            "agent, signs an approval, and the gateway refuses the call: "
+            f"{refusal(own)}. The CFO then signs an approval of that exact call "
+            "(the invoice and amount), the agent repeats the call with it, and the payment "
+            f"goes through (payment {payment2}). The escalation, each approval and each "
+            "decision are recorded, with the exact input the rules saw.")
+
+        blocked = agent.call("erp.invoice.pay", {"invoice": "INV-20466",
+                                                 "amount_minor": 95_000})
+        say("A payment to a sanctioned supplier is refused",
+            "The agent tries to pay invoice INV-20466 for USD 950.00 to supplier V-0666. The "
+            f"rules refuse it: {refusal(blocked)}.")
 
         narrow = delegation.attenuate(token, subject=HELPER_AGENT,
                                       actions=["erp.invoice.get"], max_minor=0)
@@ -308,8 +369,11 @@ def run(folder: Path, out: Callable[[str], None] = print) -> int:
          "public_key_file": "trust/authority-public-key.txt"},
         {"role": "Person's signing key", "algorithm": "Ed25519", "holder": CONTROLLER,
          "key_id": keys.key_id(keys.public_bytes(controller_key)),
-         "signs": "intent envelopes (in production: a passkey or smart card, with step-up "
-                  "authentication)", "public_key_file": "trust/principals.json"},
+         "signs": "intent envelopes and approvals (in production: a passkey or smart card, "
+                  "with step-up authentication)", "public_key_file": "trust/principals.json"},
+        {"role": "Person's signing key", "algorithm": "Ed25519", "holder": CFO,
+         "key_id": keys.key_id(keys.public_bytes(cfo_key)),
+         "signs": "approvals of escalated payments", "public_key_file": "trust/principals.json"},
         *[{"role": "Witness key", "algorithm": "Ed25519", "holder": n,
            "key_id": keys.key_id(keys.public_bytes(k)), "signs": "cosignatures of checkpoints",
            "public_key_file": "witnesses.json"} for n, k in w_keys.items()],
@@ -319,7 +383,8 @@ def run(folder: Path, out: Callable[[str], None] = print) -> int:
     manifest = {"format": "aeos-evidence/v0", "trust_domain": DOMAIN,
                 "bundle": "trust/bundle.pem", "svids": "svids", "log": "log",
                 "witnesses": "witnesses.json", "authority": "trust/authority-public-key.txt",
-                "principals": "trust/principals.json", "intents": "intents", "tokens": "tokens"}
+                "principals": "trust/principals.json", "intents": "intents", "tokens": "tokens",
+                "policies": "policies"}
     tokens_dir = folder / "tokens"
     tokens_dir.mkdir()
     for sha, raw in gateway.tokens.items():
@@ -333,8 +398,8 @@ def run(folder: Path, out: Callable[[str], None] = print) -> int:
         "and certificate involved: who holds it, what it signs, and what issued it. " + " ".join(f + "." for f in findings)
         + (" Result: VALID" if not problems else " Result: INVALID: " + "; ".join(problems)))
 
-    out("\nStill to come in this walk-through: policy as code in a WebAssembly sandbox, "
-        "with escalation to a person,\nand a ledger that refuses postings to a closed period.")
+    out("\nStill to come in this walk-through: a ledger that refuses postings to a closed "
+        "period.")
     out(f"\nThe evidence is in {folder}; the private keys are in {private}. Try:")
     out(f"  aeos audit {folder}")
     out(f"  aeos show {folder / 'log'}")

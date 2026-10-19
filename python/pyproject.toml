@@ -10,7 +10,7 @@ readme = "README.md"
 license = "Apache-2.0"
 authors = [{ name = "Darren Lentz" }]
 requires-python = ">=3.10"
-dependencies = ["cryptography>=42", "biscuit-python>=0.4"]
+dependencies = ["cryptography>=42", "biscuit-python>=0.4", "wasmtime>=20"]
 classifiers = [
   "Programming Language :: Python :: 3",
   "Topic :: Security :: Cryptography",
@@ -33,6 +33,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "aeos.ui" = ["*.html", "*.css", "*.js"]
+"aeos" = ["policies/*.wasm"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -42,6 +42,7 @@ from .log import b64, unb64
 POLICY = "aeos-capability/v0"
 ENVELOPE_CONTEXT = b"aeos/intent-envelope/v0\n"
 AMOUNT_ARGUMENT = "amount_minor"
+AUTHORIZE_MS = 200               # time allowed to check one token
 
 
 class DelegationError(Exception):
@@ -97,6 +98,51 @@ class IntentEnvelope:
     @classmethod
     def from_json(cls, d: Dict[str, Any]) -> "IntentEnvelope":
         return cls(**d["envelope"], signature=unb64(d["signature"]))
+
+
+APPROVAL_CONTEXT = b"aeos/approval/v0\n"
+
+
+@dataclass
+class Approval:
+    """A person's signed answer to an escalated call, bound to that exact call.
+
+    `escalation` is the CID of the policy decision that escalated the call; `tool` and
+    `args_sha256` repeat what was asked, so the approval cannot be used for anything else.
+    """
+
+    escalation: str
+    approver: str             # the person's SPIFFE ID
+    decision: str             # "approve" or "reject"
+    tool: str
+    args_sha256: bytes
+    time: int                 # ms since the epoch
+    signature: bytes = field(default=b"", repr=False)
+
+    def fields(self) -> Dict[str, Any]:
+        return {"escalation": self.escalation, "approver": self.approver,
+                "decision": self.decision, "tool": self.tool,
+                "args_sha256": self.args_sha256, "time": self.time}
+
+    def message(self) -> bytes:
+        return APPROVAL_CONTEXT + dag_cbor(self.fields())
+
+    def sign(self, key: Ed25519PrivateKey) -> "Approval":
+        self.signature = key.sign(self.message())
+        return self
+
+    def verify(self, public_key: bytes) -> bool:
+        return keys.verify(public_key, self.signature, self.message())
+
+    def to_json(self) -> Dict[str, Any]:
+        return {**self.fields(), "args_sha256": self.args_sha256.hex(),
+                "signature": b64(self.signature)}
+
+    @classmethod
+    def from_json(cls, d: Dict[str, Any]) -> "Approval":
+        return cls(escalation=d["escalation"], approver=d["approver"], decision=d["decision"],
+                   tool=d["tool"], args_sha256=bytes.fromhex(d["args_sha256"]),
+                   time=int(d["time"]), signature=unb64(d["signature"]))
 
 
 class Authority:
@@ -174,6 +220,8 @@ def _plain(err: AuthorizationError) -> List[str]:
                  if len(added) == 2 else "; ".join(added) + " (checks a holder added)"]
     elif added:
         added = [added[0] + " (a check a holder added)"]
+    if not (issued or added) and "execution limits" in text:
+        return ["the token could not be checked within the time allowed"]
     return issued + added or [text]
 
 
@@ -201,12 +249,16 @@ def authorize(token_bytes: bytes, authority_key: bytes, *, subject: str, tool: s
     except Exception:
         return Decision(False, ["the token is not signed by the trusted authority or is "
                                 "damaged"], None, None, facts)
-    az = AuthorizerBuilder(
+    builder = AuthorizerBuilder(
         "subject({subject}); tool({tool}); amount({amount}); time({time});"
         "allow if intent($i);",
         # Biscuit times are whole seconds; rounding up never lets a token outlive its expiry.
         {"subject": subject, "tool": tool, "amount": amount,
-         "time": _dt(-(-at // 1000) * 1000)}).build(token)
+         "time": _dt(-(-at // 1000) * 1000)})
+    limits = builder.limits()            # Biscuit's default of 1 ms fails on a busy machine
+    limits.max_time = dt.timedelta(milliseconds=AUTHORIZE_MS)
+    builder.set_limits(limits)
+    az = builder.build(token)
     intent = [f.terms[0] for f in az.query(Rule("q($i) <- intent($i)"))]
     principal = [f.terms[0] for f in az.query(Rule("q($p) <- principal($p)"))]
     try:
