@@ -483,6 +483,17 @@ export function workspaceViews({ api, act, el, show, refresh }) {
     await act(null, async () => {
       await load();
       diagram("close", "close-diagram", { compact: true }).setSteps(ws.steps);
+      const pin = $("close-pin");
+      if (!pin.dataset.wired) {
+        pin.dataset.wired = "1";
+        try { pin.checked = localStorage.getItem("aeos-pin") !== "0"; } catch { /* private window */ }
+        const apply = () => {
+          $("close-diagram").classList.toggle("sticky", pin.checked);
+          try { localStorage.setItem("aeos-pin", pin.checked ? "1" : "0"); } catch { /* private window */ }
+        };
+        pin.addEventListener("change", apply);
+        apply();
+      }
       startFeed();
       drawChapters();
     });
