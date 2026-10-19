@@ -3,9 +3,9 @@ import json
 import sys
 from pathlib import Path
 
-from aeos_receipts import ReceiptLog, verify_receipt
-from aeos_receipts.canon import json_digest
-from aeos_receipts.mcp_proxy import run
+from aeos import ReceiptLog, verify_receipt
+from aeos.canon import json_digest
+from aeos.mcp_proxy import run
 
 SERVER = [sys.executable, str(Path(__file__).with_name("fake_mcp_server.py"))]
 AGENT = "spiffe://acme.example/agent/ap-clerk/1"
@@ -87,7 +87,7 @@ def test_store_content_keeps_arguments(tmp_path):
 
 
 def test_cli_splits_server_command_at_double_dash(tmp_path, monkeypatch):
-    from aeos_receipts import cli
+    from aeos import cli
     seen = {}
     monkeypatch.setattr(cli.mcp_proxy, "run",
                         lambda log, cmd, **kw: seen.update(cmd=cmd, **kw) or 0)

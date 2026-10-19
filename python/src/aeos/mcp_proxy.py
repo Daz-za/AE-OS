@@ -2,7 +2,7 @@
 
 The proxy runs between an MCP client (the agent) and an MCP server over stdio:
 
-    agent  <-stdio->  aeos-receipts mcp-proxy  <-stdio->  MCP server
+    agent  <-stdio->  aeos mcp-proxy  <-stdio->  MCP server
 
 For each `tools/call` it appends a `tool.call` record (tool name, SHA-256 of the
 arguments, the agent and the person it acts for) and, when the server answers, a
@@ -139,7 +139,7 @@ def run(log: ReceiptLog, command: List[str], *, agent: str, on_behalf_of: Option
                 try:
                     rec.from_server(m)
                 except Exception as e:  # recording must never break the session
-                    print(f"aeos-receipts: could not record server message: {e}",
+                    print(f"aeos: could not record server message: {e}",
                           file=sys.stderr)
             send_client(line)
 

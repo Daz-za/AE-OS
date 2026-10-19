@@ -1,6 +1,6 @@
 """A guided walk-through: an AI agent pays an invoice and an auditor checks the evidence.
 
-Run it with `aeos-receipts demo`. It leaves a small example log on disk so you can try
+Run it with `aeos demo`. It leaves a small example log on disk so you can try
 the other commands on it afterwards.
 """
 from __future__ import annotations
@@ -22,7 +22,7 @@ def run(folder: Path, out: Callable[[str], None] = print) -> int:
     folder = Path(folder)
     if folder.exists() and any(folder.iterdir()):
         out(f"{folder} already has files in it. Choose an empty or new folder, for example:\n"
-            f"  aeos-receipts demo {folder}-2")
+            f"  aeos demo {folder}-2")
         return 2
     step = 0
 
@@ -32,7 +32,7 @@ def run(folder: Path, out: Callable[[str], None] = print) -> int:
         out(f"\n{step}. {title}")
         out(textwrap.fill(text, 88, initial_indent="   ", subsequent_indent="   "))
 
-    out("AE-OS Receipts demo: an AI agent pays a supplier invoice at Acme, a fictional "
+    out("AE-OS demo: an AI agent pays a supplier invoice at Acme, a fictional "
         "company,\nand an auditor checks the evidence.")
 
     log = ReceiptLog.create(folder / "log", log_id="urn:example:acme:accounts-payable",
@@ -113,10 +113,10 @@ def run(folder: Path, out: Callable[[str], None] = print) -> int:
         "after it was signed, so its content no longer matches its fingerprint.")
 
     out("\nThe example files are in " + str(folder) + ". Try:")
-    out(f"  aeos-receipts status {folder / 'log'}")
-    out(f"  aeos-receipts show {folder / 'log'}")
-    out(f"  aeos-receipts verify-receipt {folder / 'payment-receipt.json'} "
+    out(f"  aeos status {folder / 'log'}")
+    out(f"  aeos show {folder / 'log'}")
+    out(f"  aeos verify-receipt {folder / 'payment-receipt.json'} "
         f"--public-key {folder / 'public-key.txt'}")
-    out(f"  aeos-receipts verify {folder / 'tampered-copy'}")
-    out("To start a log of your own, run: aeos-receipts setup")
+    out(f"  aeos verify {folder / 'tampered-copy'}")
+    out("To start a log of your own, run: aeos setup")
     return 0

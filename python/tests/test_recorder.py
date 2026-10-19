@@ -1,5 +1,5 @@
-from aeos_receipts import ReceiptLog, Recorder
-from aeos_receipts.canon import json_digest
+from aeos import ReceiptLog, Recorder
+from aeos.canon import json_digest
 
 AGENT = "spiffe://acme.example/agent/ap-clerk/1"
 

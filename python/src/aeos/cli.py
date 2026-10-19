@@ -1,18 +1,18 @@
-"""Command line for AE-OS Receipts.
+"""Command line for AE-OS.
 
-    aeos-receipts init LOG [--log-id ID] [--key PATH]
-    aeos-receipts append LOG --agent ID --kind KIND [--subject S] [--body JSON] [--parent CID]...
-    aeos-receipts checkpoint LOG
-    aeos-receipts receipt LOG REF [-o FILE]
-    aeos-receipts verify-receipt FILE --public-key HEX
-    aeos-receipts consistency LOG --old N [--new M] [-o FILE]
-    aeos-receipts verify-consistency FILE --public-key HEX
-    aeos-receipts verify LOG
-    aeos-receipts show LOG [REF]
-    aeos-receipts mcp-proxy LOG --agent ID [--on-behalf-of ID] [--allow-tool T]... -- CMD...
-    aeos-receipts sink LOG --agent ID [--listen HOST:PORT] [--token-file FILE]
-    aeos-receipts ingest LOG FILE --agent ID [--format events|otlp]
-    aeos-receipts hook LOG --agent ID [--allow-tool T]...      (Claude Agent SDK / Claude Code)
+    aeos init LOG [--log-id ID] [--key PATH]
+    aeos append LOG --agent ID --kind KIND [--subject S] [--body JSON] [--parent CID]...
+    aeos checkpoint LOG
+    aeos receipt LOG REF [-o FILE]
+    aeos verify-receipt FILE --public-key HEX
+    aeos consistency LOG --old N [--new M] [-o FILE]
+    aeos verify-consistency FILE --public-key HEX
+    aeos verify LOG
+    aeos show LOG [REF]
+    aeos mcp-proxy LOG --agent ID [--on-behalf-of ID] [--allow-tool T]... -- CMD...
+    aeos sink LOG --agent ID [--listen HOST:PORT] [--token-file FILE]
+    aeos ingest LOG FILE --agent ID [--format events|otlp]
+    aeos hook LOG --agent ID [--allow-tool T]...      (Claude Agent SDK / Claude Code)
 """
 from __future__ import annotations
 
@@ -65,10 +65,12 @@ def _report(problems: List[str], ok_message: str, kind: str = "") -> int:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    ap = argparse.ArgumentParser(prog="aeos-receipts",
-                                 description="Signed, verifiable receipts for AI agent actions.",
-                                 epilog="New here? Run 'aeos-receipts ui' to work in your web browser, or "
-                                        "'aeos-receipts demo' to see an example here.")
+    ap = argparse.ArgumentParser(prog="aeos",
+                                 description="Signed, verifiable receipts for AI agent actions, with a "
+                                 "preview of identities, delegated authority, an MCP "
+                                 "gateway and witnesses.",
+                                 epilog="New here? Run 'aeos ui' to work in your web browser, or "
+                                        "'aeos demo' to see an example here.")
     ap.add_argument("--version", action="version", version=__version__)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -274,7 +276,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         try:
             sink.serve(recorder(), host or "127.0.0.1", int(port), token or None)
         except ValueError as e:
-            print(f"aeos-receipts sink: {e}", file=sys.stderr)
+            print(f"aeos sink: {e}", file=sys.stderr)
             return 2
         return 0
 
@@ -296,7 +298,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             e = log.entry(a.ref)
         except (IndexError, KeyError, ValueError):
             print(f"No record {a.ref} in this log ({len(log)} records). "
-                  f"See the record numbers with: aeos-receipts show {a.log}", file=sys.stderr)
+                  f"See the record numbers with: aeos show {a.log}", file=sys.stderr)
             return 1
         _write(log.receipt(e), a.out)
         return 0

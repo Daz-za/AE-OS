@@ -1,7 +1,7 @@
 """Record the tool calls of agents built on the Claude Agent SDK or run in Claude Code.
 
 Claude Code runs hook commands and the Agent SDK runs hook callbacks; both pass the event
-as JSON. `aeos-receipts hook` (or `handle` from a callback) records these events:
+as JSON. `aeos hook` (or `handle` from a callback) records these events:
 
     SessionStart         session.start
     PreToolUse           tool.call, and a refusal when the tool is outside the allow-list
@@ -64,11 +64,11 @@ def run(recorder: Callable[[], Recorder], raw: str, fail_open: bool = False
             raise ValueError("hook input must be a JSON object")
     except ValueError as e:
         # The event is unknown, so block it: exit status 2 refuses a PreToolUse call.
-        return (1 if fail_open else 2), "", f"aeos-receipts hook: unreadable input: {e}\n"
+        return (1 if fail_open else 2), "", f"aeos hook: unreadable input: {e}\n"
     try:
         out = handle(recorder(), event)
     except Exception as e:  # report, and keep tools from running unrecorded
-        msg = f"aeos-receipts hook: could not record {event.get('hook_event_name')}: {e}\n"
+        msg = f"aeos hook: could not record {event.get('hook_event_name')}: {e}\n"
         if event.get("hook_event_name") == "PreToolUse" and not fail_open:
             return 0, json.dumps(_deny("AE-OS could not record this tool call")) + "\n", msg
         return 1, "", msg

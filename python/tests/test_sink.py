@@ -7,8 +7,8 @@ from http.server import ThreadingHTTPServer
 
 import pytest
 
-from aeos_receipts import ReceiptLog, Recorder
-from aeos_receipts.sink import ingest, make_handler, serve
+from aeos import ReceiptLog, Recorder
+from aeos.sink import ingest, make_handler, serve
 
 from test_events import otlp, span
 

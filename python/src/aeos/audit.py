@@ -1,4 +1,4 @@
-"""`aeos-receipts audit`: check an evidence folder from end to end, as an auditor would.
+"""`aeos audit`: check an evidence folder from end to end, as an auditor would.
 
 An evidence folder holds a receipt log plus what is needed to check who acted:
 

@@ -1,11 +1,17 @@
-"""AE-OS Receipts: signed, independently verifiable receipts for AI agent actions."""
+"""The earlier name of the `aeos` package, kept so existing imports keep working.
 
-__version__ = "0.1.0"
+`import aeos_receipts` and `from aeos_receipts.log import ReceiptLog` give the same
+objects as `import aeos` and `from aeos.log import ReceiptLog`. New code should import
+`aeos`.
+"""
+import importlib
+import pkgutil
+import sys
 
-from .canon import Link, canonical_json, cid_str, dag_cbor, json_digest  # noqa: E402
-from .log import (Checkpoint, ReceiptLog, make_record, verify_consistency_doc,  # noqa: E402
-                  verify_receipt)
-from .recorder import Recorder  # noqa: E402
+import aeos
+from aeos import *  # noqa: F401,F403
 
-__all__ = ["Checkpoint", "Link", "ReceiptLog", "Recorder", "canonical_json", "cid_str",
-           "dag_cbor", "json_digest", "make_record", "verify_consistency_doc", "verify_receipt"]
+for _info in pkgutil.walk_packages(aeos.__path__, "aeos."):
+    if _info.name.endswith("__main__"):
+        continue
+    sys.modules["aeos_receipts" + _info.name[len("aeos"):]] = importlib.import_module(_info.name)

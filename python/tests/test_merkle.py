@@ -3,7 +3,7 @@ import hashlib
 
 import pytest
 
-from aeos_receipts import merkle
+from aeos import merkle
 
 # Leaf inputs and roots from the Certificate Transparency reference test suite.
 LEAVES = [bytes.fromhex(h) for h in [

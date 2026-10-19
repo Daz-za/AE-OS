@@ -1,7 +1,7 @@
-"""Guided setup: `aeos-receipts setup` asks a few questions and creates a ready-to-use log.
+"""Guided setup: `aeos setup` asks a few questions and creates a ready-to-use log.
 
 Every question has a sensible default, so pressing Enter throughout works. The same
-answers can be given as options (see `aeos-receipts setup --help`) for scripted installs.
+answers can be given as options (see `aeos setup --help`) for scripted installs.
 """
 from __future__ import annotations
 
@@ -31,7 +31,12 @@ def _slug(text: str) -> str:
 
 def default_key_dir() -> Path:
     base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
-    return Path(base) / "aeos-receipts" / "keys"
+    return Path(base) / "aeos" / "keys"
+
+
+def earlier_key_dir() -> Path:
+    """Where keys were kept when the package was called aeos-receipts."""
+    return default_key_dir().parent.parent / "aeos-receipts" / "keys"
 
 
 class Wizard:
@@ -78,7 +83,7 @@ def run(wizard: Wizard, *, log: Optional[str] = None, name: Optional[str] = None
     folder = Path(wizard.ask("Folder for the log", f"./{name}-log", log)).expanduser()
     if (folder / "log.json").exists():
         out(f"\n{folder} already holds a receipt log. Choose another folder, or see its "
-            f"state with:\n  aeos-receipts status {folder}")
+            f"state with:\n  aeos status {folder}")
         return 2
     key_path = Path(wizard.ask(
         "Where to keep the signing key (outside the log folder, where agents cannot read "
@@ -102,19 +107,19 @@ def run(wizard: Wizard, *, log: Optional[str] = None, name: Optional[str] = None
     if mode == "proxy":
         steps += ["Point the agent at this command in place of its MCP server command "
                   "(replace the part after -- with the server's own command):",
-                  f"  aeos-receipts mcp-proxy {base} -- python my_mcp_server.py",
+                  f"  aeos mcp-proxy {base} -- python my_mcp_server.py",
                   "Add --allow-tool NAME for each tool the agent may use."]
     elif mode == "gateway":
         token_file = key_path.with_suffix(".sink-token")
         token_file.write_text(secrets.token_hex(24) + "\n")
         os.chmod(token_file, 0o600)
         steps += ["Start the log sink:",
-                  f"  aeos-receipts sink {base} --token-file {q(str(token_file))}",
+                  f"  aeos sink {base} --token-file {q(str(token_file))}",
                   "Then send the gateway's OpenTelemetry traces (protocol http/json) to "
                   "http://127.0.0.1:4318/v1/traces, with the header "
                   f"'Authorization: Bearer <the token in {token_file}>'."]
     elif mode == "claude":
-        cmd = f"aeos-receipts hook {base}"
+        cmd = f"aeos hook {base}"
         hooks = {ev: [{"hooks": [{"type": "command", "command": cmd}]}]
                  for ev in ("SessionStart", "PreToolUse", "PostToolUse", "PostToolUseFailure",
                             "SessionEnd")}
@@ -126,8 +131,8 @@ def run(wizard: Wizard, *, log: Optional[str] = None, name: Optional[str] = None
     else:
         steps += ["When you know how the agent reaches its tools, see "
                   "https://github.com/Daz-za/ae-os/tree/main/python#readme, or run "
-                  "aeos-receipts setup again for a new log."]
-    steps += ["", "Check on the log at any time:", f"  aeos-receipts status {q(str(folder))}",
+                  "aeos setup again for a new log."]
+    steps += ["", "Check on the log at any time:", f"  aeos status {q(str(folder))}",
               "", "Give your auditors the public key in "
               f"{folder / 'public-key.txt'} through a channel they trust, such as email "
               "from a known address or your website. Back up the signing key; without it "
