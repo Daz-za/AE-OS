@@ -1,13 +1,13 @@
 //! Check this implementation against the shared test vectors in testvectors/receipts-v0.json,
 //! which come from the Python reference implementation.
 
-use aeos_receipts::canon::{
+use aeos_verify::canon::{
     canonical_json, cid_of_bytes, cid_parse, cid_str, dag_cbor, decode_dag_cbor, hex, json_digest,
     to_view, unhex,
 };
-use aeos_receipts::merkle::{self, Hash};
-use aeos_receipts::verify::key_id;
-use aeos_receipts::{verify_consistency_doc, verify_log, verify_receipt, LogFiles};
+use aeos_verify::merkle::{self, Hash};
+use aeos_verify::verify::key_id;
+use aeos_verify::{verify_consistency_doc, verify_log, verify_receipt, LogFiles};
 use serde_json::Value as Json;
 use std::sync::OnceLock;
 

@@ -53,10 +53,9 @@ def find_key(folder: Path) -> Optional[Path]:
     except (OSError, ValueError):
         return None
     if log_id.startswith("urn:aeos:"):
-        for d in (setup.default_key_dir(), setup.earlier_key_dir()):
-            guess = d / f"{log_id[len('urn:aeos:'):]}.key"
-            if guess.exists():
-                return guess
+        guess = setup.default_key_dir() / f"{log_id[len('urn:aeos:'):]}.key"
+        if guess.exists():
+            return guess
     return None
 
 

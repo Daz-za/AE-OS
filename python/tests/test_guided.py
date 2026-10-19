@@ -61,10 +61,3 @@ def test_empty_log_status_and_missing_record(tmp_path, capsys):
     assert "No records yet" in text and "covered by a signed checkpoint" not in text
     assert main(["receipt", str(tmp_path / "log"), "0", "--key", key]) == 1
     assert "No record 0" in capsys.readouterr().err
-
-
-def test_earlier_name_still_imports():
-    import aeos
-    import aeos_receipts
-    from aeos_receipts.log import ReceiptLog
-    assert ReceiptLog is aeos.log.ReceiptLog and aeos_receipts.ReceiptLog is aeos.ReceiptLog

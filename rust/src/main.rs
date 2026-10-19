@@ -1,7 +1,7 @@
 //! aeos-verify: check AE-OS Receipts evidence offline.
 
-use aeos_receipts::canon::{hex, json_digest, unhex};
-use aeos_receipts::{verify_consistency_doc, verify_log, verify_receipt, LogFiles};
+use aeos_verify::canon::{hex, json_digest, unhex};
+use aeos_verify::{verify_consistency_doc, verify_log, verify_receipt, LogFiles};
 use serde_json::Value as Json;
 use std::path::Path;
 use std::process::ExitCode;
