@@ -20,6 +20,6 @@ python testvectors/generate.py            # rewrite receipts-v0.json
 python testvectors/generate.py --check    # confirm the file is up to date
 ```
 
-The Python tests run the check, so a change to the format or to the verifier's messages must come with regenerated vectors. The Rust tests in [`rust/tests/vectors.rs`](../rust/tests/vectors.rs) then show whether the Rust verifier still agrees.
+The Python tests run the check, so a change to the format or to the verifier's messages must come with regenerated vectors. The Rust tests in [`rust/tests/vectors.rs`](../rust/tests/vectors.rs) then show whether the Rust verifier still agrees, and [`verify.test.mjs`](../python/src/aeos_receipts/ui/verify.test.mjs) does the same for the browser verifier.
 
 The log is signed with a public test key derived from a fixed phrase in `generate.py`. Never use it for a real log.

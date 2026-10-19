@@ -8,6 +8,24 @@ from typing import Any, Dict, List
 from .log import ReceiptLog
 
 
+# What a check's result means for the reader: (when valid, when invalid).
+MEANING = {
+    "receipt": ("This record is in the log exactly as shown, and the log's owner signed "
+                "a checkpoint that includes it.",
+                "Do not rely on this receipt. Ask the log's owner for a fresh receipt, and "
+                "check that you used their public key from a source you trust."),
+    "consistency": ("The newer checkpoint contains every record of the older one, "
+                    "unchanged. Nothing was removed or rewritten in between.",
+                    "The log's history differs from what you were shown before. Keep both "
+                    "checkpoints as evidence and raise it with the log's owner."),
+    "log": ("Every record matches its fingerprint, every link points to an earlier record, "
+            "and every signed checkpoint matches the records it covers.",
+            "Records were changed, removed or reordered after they were written. Keep a "
+            "copy of the folder as it is now, and compare it with a backup or with "
+            "receipts issued earlier."),
+}
+
+
 def _when(ms: int) -> str:
     return dt.datetime.fromtimestamp(ms / 1000, dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 

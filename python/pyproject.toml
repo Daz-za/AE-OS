@@ -30,5 +30,8 @@ Source = "https://github.com/Daz-za/ae-os"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"aeos_receipts.ui" = ["*.html", "*.css", "*.js"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

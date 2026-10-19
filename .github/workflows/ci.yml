@@ -34,3 +34,12 @@ jobs:
         working-directory: rust
       - run: cargo test --locked
         working-directory: rust
+
+  browser-verifier:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: node --test python/src/aeos_receipts/ui/verify.test.mjs

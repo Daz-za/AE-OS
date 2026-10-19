@@ -1,0 +1,26 @@
+/* Styles for the "Check a receipt" panel (check.js). Colours come from the host page's
+   custom properties when it defines them. */
+.chk-drop { display: grid; gap: 4px; padding: 20px; border: 2px dashed var(--line, #c8cdd3);
+  border-radius: 10px; cursor: pointer; background: var(--panel, #fff); }
+.chk-drop:hover, .chk-drop.chk-over { border-color: var(--blue, #0052cc); }
+.chk-drop:focus-within { outline: 2px solid var(--blue, #0052cc); outline-offset: 2px; }
+.chk-hint, .chk-name, .chk-note { color: var(--muted, #5c6670); font-size: 14px; }
+.chk-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; }
+.chk-file { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.chk-keyfile .chk-file { position: static; width: auto; height: auto; opacity: 1; }
+.chk-keyrow { display: grid; gap: 6px; margin-top: 16px; }
+.chk-label { font-weight: 600; }
+.chk-keyfile { font-size: 14px; color: var(--muted, #5c6670); }
+.chk-key { width: 100%; box-sizing: border-box; padding: 10px; font: 14px ui-monospace, SFMono-Regular, Menlo, monospace;
+  border: 1px solid var(--line, #c8cdd3); border-radius: 8px; background: var(--panel, #fff); color: inherit; resize: vertical; }
+.chk-result:empty { display: none; }
+.chk-result { margin-top: 16px; padding: 16px 18px; border-radius: 10px; border-left: 6px solid var(--line, #c8cdd3);
+  background: var(--panel, #fff); }
+.chk-result.chk-ok { border-left-color: var(--green, #00a85a); }
+.chk-result.chk-bad { border-left-color: var(--red, #c62828); }
+.chk-title { font-weight: 700; margin: 0 0 8px; }
+.chk-result h4 { margin: 16px 0 8px; }
+.chk-dl { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0; }
+.chk-dl dt { color: var(--muted, #5c6670); }
+.chk-dl dd { margin: 0; word-break: break-all; }
+@media (max-width: 560px) { .chk-dl { grid-template-columns: 1fr; } .chk-dl dd { margin-bottom: 6px; } }
