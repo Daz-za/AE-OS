@@ -1,8 +1,9 @@
 """A point-and-click view of a workspace, a receipt log or an evidence folder: `aeos ui`.
 
-With a workspace (see workspace.py) the page is also a builder and a playground: it
-edits workspace.json, runs the platform, sends tool calls as an agent and shows each
-check the call passed or failed.
+With a workspace (see workspace.py) the page shows the architecture as it runs: it sets
+the company up step by step, plays the film's quarter-end close as real calls, sends tool
+calls as an agent and shows each check the call passed or failed, and edits
+workspace.json.
 
 The page is served only to this computer (127.0.0.1). Each launch makes a fresh access
 code that is part of the address the browser opens. Other websites open in the same
@@ -21,7 +22,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
-from .. import audit, books, demo, fulldemo, report, setup, status, workspace
+from .. import audit, books, demo, examples, fulldemo, report, setup, status, workspace
 from ..canon import cid_str
 from ..log import ReceiptLog, to_view
 
@@ -29,6 +30,7 @@ HERE = Path(__file__).parent
 STATIC = {"/": ("index.html", "text/html"), "/app.js": ("app.js", "text/javascript"),
           "/check.js": ("check.js", "text/javascript"),
           "/workspace.js": ("workspace.js", "text/javascript"),
+          "/diagram.js": ("diagram.js", "text/javascript"),
           "/verify.js": ("verify.js", "text/javascript"),
           "/style.css": ("style.css", "text/css"), "/check.css": ("check.css", "text/css")}
 MAX_BODY = 1024 * 1024
@@ -84,7 +86,7 @@ class App:
                                "workspace": self.platform is not None}
         if self.platform is not None:
             out["organization"] = self.platform.doc["organization"]["name"]
-        if self.folder is not None:
+        if self.folder is not None and (self.folder / "log.json").exists():
             s = status.summary(self._log())
             out["status"] = s
             out["lines"] = status.describe(s, str(self.folder))
@@ -96,11 +98,21 @@ class App:
             self.platform.stop()
         self.platform, self.started = None, False
 
-    def _open_workspace(self, folder: Path) -> Dict[str, Any]:
+    def _open_workspace(self, folder: Path, serve: bool = False) -> Dict[str, Any]:
+        """Open a workspace: attach to `aeos up` when it runs, start it when it is set up
+        (or when `serve` asks, running any changed steps), or keep it ready for setting
+        up step by step."""
         self.close()
         try:
-            self.platform, self.started = workspace.connect(folder)
+            p = workspace.Platform(folder)
+            if workspace.running(folder):
+                self.platform, self.started = p.open(), False
+            else:
+                self.platform, self.started = p, True
+                if serve or workspace.is_set_up(folder):
+                    p.start()
         except Exception as e:             # a tool that fails to start, a bad file
+            self.platform, self.started = None, False
             raise UserError(f"The workspace cannot run yet: {e}. Fix workspace.json, or "
                             f"run: aeos check {folder}") from None
         self.folder = (folder / "log").resolve()
@@ -137,9 +149,10 @@ class App:
         return folder
 
     def new_workspace(self, req: Dict[str, Any]) -> Dict[str, Any]:
-        folder = self._new_folder(req, "my-aeos")
+        name = str(req.get("example") or "kestrel")
+        folder = self._new_folder(req, "kestrel-foods" if name == "kestrel" else "acme")
         try:
-            workspace.create(folder)
+            workspace.create(folder, workspace.example(name))
         except workspace.WorkspaceError as e:
             raise UserError(str(e)) from None
         return self._open_workspace(folder)
@@ -150,7 +163,7 @@ class App:
         return self.platform
 
     def ws(self, _: Dict[str, Any]) -> Dict[str, Any]:
-        """The workspace as the builder and playground need it."""
+        """The workspace as the page needs it."""
         p = self._platform()
         doc = workspace.load(p.folder)
         erp = [s for s in doc.get("systems") or [] if s.get("type") == "example-erp"]
@@ -161,17 +174,49 @@ class App:
             invoices += [{**i, "amount_minor": workspace.minor(i["amount"]),
                           "status": "paid" if i["invoice"] in paid else i.get("status")}
                          for i in s.get("invoices") or []]
-        ledger = p.ledger
+        gw = p.gateway
+        serving = gw is not None or workspace.running(p.folder) is not None
+        agents = {a["id"] for a in p.doc["agents"]}
+        chapters = examples.chapters()
+        for ch in chapters:
+            ch["missing"] = [a for a in ch["needs"] if a not in agents]
         return {"doc": doc, "running": p.doc, "folder": str(p.folder),
                 "file": str(p.folder / workspace.FILE),
                 "problems": workspace.check(doc, p.folder),
                 "tools": workspace.tool_names(p.doc, p.folder),
-                "served_here": self.started, "port": p.port or
+                "steps": p.status(), "serving": serving,
+                "served_here": self.started and gw is not None, "port": p.port or
                 (workspace.running(p.folder) or {}).get("port"),
                 "connect": str(p.private / "connect"), "invoices": invoices,
-                "periods": dict(sorted(ledger.periods.items())) if ledger else {},
+                "periods": {e: dict(sorted(led.periods.items()))
+                            for e, led in p.ledgers.items()},
+                "entities": workspace.entity_names(p.doc),
                 "domain": p.domain, "names": p.names(),
-                "changed": doc != p.doc}
+                "escalations": [{"escalation": k, "agent": p.agent_id(v[0]), "tool": v[1]}
+                                for k, v in (gw.escalations.items() if gw else [])],
+                "records": len(p.log) if hasattr(p, "log") else 0,
+                "chapters": chapters, "changed": doc != p.doc}
+
+    def ws_step(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        """Run one setup step (POST), or describe it (GET)."""
+        p = self._platform()
+        step = str(req.get("step") or "")
+        if step not in workspace.STEP_IDS:
+            raise UserError(f"There is no setup step called {step}.")
+        if req.get("_method") == "GET":
+            return p.describe(step)
+        if workspace.running(p.folder) and p.gateway is None:
+            raise UserError("aeos up is running this workspace in another window. Stop it "
+                            "to set the workspace up again here.")
+        try:
+            view = p.run(step)
+        except (workspace.WorkspaceError, books.Refused) as e:
+            raise UserError(str(e)) from None
+        except Exception as e:
+            p.stop(seal=False)
+            raise UserError(f"This step could not run: {e}") from None
+        self.started = True
+        return view
 
     def ws_save(self, req: Dict[str, Any]) -> Dict[str, Any]:
         """Save workspace.json; when this page runs the platform, restart it to apply."""
@@ -181,20 +226,40 @@ class App:
         if problems:
             return {"saved": False, "problems": problems}
         before = (p.folder / workspace.FILE).read_text()
+        serving = p.port is not None
         workspace.save(p.folder, doc)
         if self.started:
             try:
-                self._open_workspace(p.folder)
+                self._open_workspace(p.folder, serve=serving)
             except UserError as e:          # keep what ran before, and say why
                 (p.folder / workspace.FILE).write_text(before)
-                self._open_workspace(p.folder)
+                self._open_workspace(p.folder, serve=serving)
                 return {"saved": False, "problems": [
                     f"It could not start with these changes, so they were not saved. {e}"]}
             return {"saved": True, "applied": True, **self.ws({})}
         return {"saved": True, "applied": False, **self.ws({})}
 
+    def feed(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        """Records added since `after`, in brief, for the live view."""
+        log = self._log()
+        entries = log.entries()
+        after = max(0, int(req.get("after", len(entries))))
+        names = self._names()
+        out = []
+        for e in entries[after:after + 200]:
+            r = log.record(e)
+            b = r.get("body") or {}
+            out.append({"index": e.index, "kind": r.get("kind"),
+                        "who": names.get(r.get("agent") or "", r.get("agent")),
+                        "subject": r.get("subject"), "result": b.get("decision") or
+                        b.get("outcome") or b.get("document") or b.get("state")})
+        return {"total": len(entries), "records": out}
+
     def ws_call(self, req: Dict[str, Any]) -> Dict[str, Any]:
         p = self._platform()
+        if p.port is None and not workspace.running(p.folder):
+            raise UserError("The gateway is not running yet. Finish the steps under Set up, "
+                            "or select Set up everything.")
         args = req.get("args") or {}
         if not isinstance(args, dict):
             raise UserError("The arguments must be a JSON object, such as {\"invoice\": \"INV-1001\"}.")
@@ -215,7 +280,8 @@ class App:
         p = self._platform()
         try:
             p.change_period(str(req.get("period")), "open" if req.get("state") == "open"
-                            else "closed", str(req.get("person")))
+                            else "closed", str(req.get("person")),
+                            entity=str(req["entity"]) if req.get("entity") else None)
         except (workspace.WorkspaceError, books.Refused) as e:
             raise UserError(str(e)) from None
         return self.ws({})
@@ -356,6 +422,8 @@ ROUTES: Dict[Tuple[str, str], Callable[[App, Dict[str, Any]], Dict[str, Any]]] =
     ("GET", "/api/ws"): App.ws, ("POST", "/api/ws/save"): App.ws_save,
     ("POST", "/api/ws/call"): App.ws_call, ("POST", "/api/ws/approve"): App.ws_approve,
     ("POST", "/api/ws/period"): App.ws_period, ("POST", "/api/ws/seal"): App.ws_seal,
+    ("POST", "/api/ws/step"): App.ws_step, ("GET", "/api/ws/step"): App.ws_step,
+    ("GET", "/api/feed"): App.feed,
 }
 
 
@@ -422,6 +490,7 @@ def make_handler(app: App, code: str, port_ref: List[int]):
                     return
                 if isinstance(body, dict):
                     req.update(body)
+            req["_method"] = method
             try:
                 with app.lock:
                     self._json(200, route(app, req))

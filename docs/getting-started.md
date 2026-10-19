@@ -59,7 +59,7 @@ To update later, run `pipx upgrade aeos`. If you installed it under its earlier 
 aeos ui
 ```
 
-This opens a page in your web browser. Choose **Create the workspace** to start from Acme, an example company. The **Build** tab describes the company: its people, its AI agents and what each may do, the systems with their tools, the rules, the books and the witnesses. The **Try it** tab lets you act as an agent, send a tool call, and watch it pass or fail each check. The page can also run the examples and open any log. It runs on your computer only. Close it by pressing Ctrl+C in the terminal.
+This opens a page in your web browser. Choose **Create the workspace** to start from Kestrel Foods, the company in the film on ae-os.org. **Set up** builds the company one part at a time: its certificate authority, its people, its AI agents and their identities, the books, the rules, the systems and the authority the CFO signs. **Architecture** draws every part and shows each call travelling through it. **Run the close** plays the film's quarter-end close as real calls, and **Try a call** lets you act as any agent. Everything is filled in, and you can change any of it. The page can also run the examples and open any log. It runs on your computer only. Close it by pressing Ctrl+C in the terminal.
 
 When you are ready to connect your own tools, rules or agents, read [building.md](building.md). The rest of this guide covers the commands for recording and checking a log.
 

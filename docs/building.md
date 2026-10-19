@@ -8,24 +8,40 @@ A workspace is a folder with one file, `workspace.json`, that describes your org
 
 | Section | What it holds |
 |---|---|
-| `organization` | The name, and a domain name your organization controls, such as `acme.example`. Every person, agent and service gets an identity under it, such as `spiffe://acme.example/agent/accounts-payable` |
-| `people` | Each person, and whether they are a controller (opens and closes months in the books) or an approver (releases payments that the rules hold back) |
-| `agents` | Each AI agent: the person who authorizes it, its purpose, its tools, its limit per call, its total budget and how many hours the authority lasts |
-| `systems` | Where the tools come from: the example ERP, a Python file of your own, or an MCP server |
-| `rules` | The built-in payment rules, your own compiled rules, or none |
-| `books` | The legal entity, the ledger, the currency and the chart of accounts |
+| `organization` | The name, a domain name your organization controls, such as `kestrel.example`, and the legal entities. Every person, agent and service gets an identity under the domain, such as `spiffe://kestrel.example/agent/stock/02` |
+| `people` | Each person, and whether they are a controller (opens and closes months in the books) or an approver (answers the calls that the rules send to a person) |
+| `instructions` | What a person authorizes agents to do, signed by that person: the purpose, the limits on payments, and how many hours the authority lasts |
+| `agents` | Each AI agent: the instruction it works under (or the person who authorizes it), its tools, and the entities whose books it may post to |
+| `systems` | Where the tools come from: records you type into the file, the example ERP, a Python file of your own, or an MCP server |
+| `rules` | The built-in close or payment rules, your own compiled rules, or none |
+| `books` | The ledger, the currency, the chart of accounts and the months that are open or closed, for each entity |
 | `witnesses` | Independent services that countersign each checkpoint, a signed summary of the log so far, and how many must sign |
 
-Create one from the example and open it in your web browser:
+Create one and open it in your web browser:
 
 ```
 aeos new my-aeos
 aeos ui my-aeos
 ```
 
-In the **Build** tab you can edit every section. A map at the top shows how a call travels from a person to an agent, through the gateway's checks, to your systems, the books and the log. **Save and apply** checks the file and saves it. When the page runs the platform, it restarts it with the new file; when `aeos up` runs it, restart `aeos up`. You can also edit `workspace.json` in any text editor and run `aeos check my-aeos` to find mistakes.
+`aeos new` starts from Kestrel Foods, the company in the film on [ae-os.org](https://ae-os.org): a food group with a UK subsidiary, a bank, and a quarter-end close run by agents under one instruction from the CFO. `aeos new my-aeos --example acme` starts from Acme, a smaller example that pays supplier invoices.
 
-The **Try it** tab lets you act as one of your agents. Choose a tool, fill in the arguments and send the call. The page shows each check the call passed or failed, in the order the gateway ran them:
+The page has these views:
+
+| View | What it does |
+|---|---|
+| **Architecture** | The layers from [How it works](https://ae-os.org/how-it-works), drawn from your workspace: people, agents, the controls, the systems and the ledger. Each call travels through the parts it touches, and each check lights green, amber or red. A live record lists everything the log receives, including calls from the command line or your own agents |
+| **Set up** | Builds the company the way the architecture does, one step at a time: the organization, the certificate authority, the people, the agents, their SPIFFE identities, the receipt log, the books, the rules, the systems, the delegated authority and the gateway. Each step has its settings, a link to the part of the site it matches, and shows what it made, such as the certificate chain or each agent's capability token |
+| **Run the close** | The film's chapters as real calls through the gateway: the instruction, the agents at work, the controls, the intercompany match, the CFO's decision and the audit |
+| **Try a call** | Act as any agent, send any tool call and see each check |
+| **Build with it** | Each part as a module of the toolkit, with the code and the command that use it on its own |
+| **Edit** | The whole `workspace.json` at once |
+
+**Save changes** checks the file and saves it. A step whose settings changed shows as changed until you run it again. When `aeos up` runs the workspace, restart `aeos up`. You can also edit `workspace.json` in any text editor and run `aeos check my-aeos` to find mistakes.
+
+`aeos build my-aeos` does the same setup from the terminal and prints what each step made; `aeos build my-aeos pki` stops after the certificate authority.
+
+Each call shows the checks it passed or failed, in the order the gateway ran them:
 
 | Check | What it asks |
 |---|---|
@@ -38,9 +54,7 @@ The **Try it** tab lets you act as one of your agents. Choose a tool, fill in th
 | Books of account | For a journal entry: does it balance, use known accounts, and fall in an open month? |
 | Receipt | Was the call recorded, and has a signed checkpoint sealed it? |
 
-The buttons above the form run ready-made cases, such as a payment that needs approval or an agent without the tool trying to pay. When a call waits for approval, choose who signs and approve or reject it.
-
-The **Decisions**, **Books**, **Agents** and **Records** tabs show what happened, and each refused or escalated call has a **Show each check** button. **Audit** runs the auditor's check of the whole folder.
+The **Decisions**, **Books**, **Agents** and **Records** views show what happened, and each refused or escalated call has a **Show each check** button. **Audit** runs the auditor's check of the whole folder.
 
 ## Run it without the browser
 
@@ -51,16 +65,15 @@ aeos up my-aeos
 This runs the platform until you press Ctrl+C, when it seals the log and the witnesses cosign it. From another terminal:
 
 ```
-aeos call my-aeos --as accounts-payable erp.invoice.get invoice=INV-1001
-aeos call my-aeos --as accounts-payable erp.invoice.pay invoice=INV-1002 amount_minor=780000 --approve-as cfo
-aeos period my-aeos 2026-10 close --as controller
+aeos call my-aeos --as stock/02 erp.stock.ageing site=OHIO
+aeos period my-aeos 2026-09 close --as controller --entity KF-US
 aeos seal my-aeos
 aeos decisions my-aeos
 aeos trace my-aeos 8
 aeos audit my-aeos
 ```
 
-Amounts in tool calls are in minor units: `amount_minor=780000` is 7,800.00. `aeos trace` shows the checks for any recorded call, by its record number. Without `aeos up` running, `aeos call` starts the platform for that one call.
+Amounts in tool calls are in minor units: `amount_minor=780000` is 7,800.00. `--approve-as cfo` sends a person's approval with a call that the rules would send to that person. `aeos trace` shows the checks for any recorded call, by its record number. Without `aeos up` running, `aeos call` starts the platform for that one call.
 
 ## Connect your own tools
 
@@ -101,9 +114,9 @@ Any MCP server that runs as a local process over standard input and output can p
 
 ## Write your own rules
 
-Rules are written in [Rego](https://www.openpolicyagent.org/docs/policy-language) and compiled to WebAssembly with Open Policy Agent. The built-in payment rules, [policy/payments.rego](../policy/payments.rego), are a good starting point. Change the `package` line to match your entrypoint, for example `package acme.payments` for `acme/payments/decision`.
+Rules are written in [Rego](https://www.openpolicyagent.org/docs/policy-language) and compiled to WebAssembly with Open Policy Agent. The built-in rules, [policy/close.rego](../policy/close.rego) for the close and [policy/payments.rego](../policy/payments.rego) for supplier payments, are good starting points. Change the `package` line to match your entrypoint, for example `package acme.payments` for `acme/payments/decision`.
 
-The gateway gives your rules this input on every call that passes the identity, allow list and authority checks:
+The gateway gives your rules this input on every call (here from Acme's payments) that passes the identity, allow list and authority checks:
 
 ```json
 {"tool": "erp.invoice.pay", "agent": "spiffe://acme.example/agent/accounts-payable",
@@ -141,9 +154,9 @@ While `aeos up` or the browser page runs a workspace, each agent's connection fi
 ```python
 from aeos import workspace
 
-agent = workspace.remote_client("my-aeos", "accounts-payable")
+agent = workspace.remote_client("my-aeos", "stock/02")
 agent.initialize()
-reply = agent.call("erp.invoice.get", {"invoice": "INV-1001"})
+reply = agent.call("erp.stock.ageing", {"site": "OHIO"})
 agent.close()
 ```
 
@@ -157,8 +170,10 @@ Certificates last 15 minutes. The platform renews them every few minutes and rew
 from aeos import workspace
 
 with workspace.Platform("my-aeos") as platform:
-    answer = platform.call("accounts-payable", "erp.invoice.pay",
-                           {"invoice": "INV-1002", "amount_minor": 780000})
+    answer = platform.call("stock/02", "ledger.post", {
+        "entity": "KF-US", "date": "2026-09-30", "text": "Write down aged stock",
+        "lines": [{"account": "5300", "debit_minor": 61_200_000},
+                  {"account": "1300", "credit_minor": 61_200_000}]})
     for step in answer["trace"]["steps"]:
         print(step["label"], step["state"], step["text"])
     if answer["trace"]["outcome"] == "waiting":

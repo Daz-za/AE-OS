@@ -44,8 +44,12 @@ function show(view) {
   if (view === "agents") loadAgents();
   if (view === "decisions") loadDecisions();
   if (view === "books") loadBooks();
-  if (view === "build") wsv.loadBuild();
+  if (view === "arch") wsv.loadArch();
+  if (view === "setup") wsv.loadSetup();
+  if (view === "close") wsv.loadClose();
   if (view === "try") wsv.loadTry();
+  if (view === "modules") wsv.loadModules();
+  if (view === "edit") wsv.loadEdit();
   if (view === "check" && !checkMounted && state && state.status) {
     mountCheck($("check"), { publicKey: state.status.public_key });
     checkMounted = true;
@@ -65,13 +69,16 @@ const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 
 function render(s) {
   state = s;
-  $("tabs").hidden = !s.folder;
-  $("tab-audit").hidden = !s.evidence;
   for (const n of document.querySelectorAll(".ws-only")) n.hidden = !s.workspace;
+  // The evidence views need a log; a workspace has one once its log step has run.
+  for (const t of document.querySelectorAll("#tabs .tab")) t.hidden = !s.status && t.dataset.view !== "start";
+  $("tabs").hidden = !s.folder;
+  $("tab-audit").hidden = !s.evidence || !s.status;
   $("seal").hidden = !s.workspace;
   $("cwd").textContent = s.cwd;
   if (!s.folder) return show("start");
   const st = s.status;
+  if (!st) return;
   $("log-id").textContent = s.workspace ? `${s.organization}: the log` : `Log ${st.log_id}`;
   $("log-folder").textContent = s.folder;
   const unsealed = st.records - st.last_checkpoint_size;
@@ -133,7 +140,7 @@ function fresh(s) {
   $("decision-trace").hidden = true;
   start = 0;
   render(s);
-  show(s.workspace ? "build" : "overview");
+  show(s.workspace ? (s.status ? "arch" : "setup") : "overview");
 }
 
 async function showChecks(ref, box, button) {
@@ -310,7 +317,7 @@ function formData(form) {
 
 document.addEventListener("DOMContentLoaded", async () => {
   wsv = workspaceViews({ api, act, el, show, refresh: async () => render(await api("/api/state")) });
-  $("new-ws-form").addEventListener("submit", (e) => {
+  for (const id of ["new-ws-form", "new-acme-form"]) $(id).addEventListener("submit", (e) => {
     e.preventDefault();
     act(e.submitter, async () => fresh(await api("/api/new-workspace", formData(e.target))));
   });
@@ -376,6 +383,6 @@ document.addEventListener("DOMContentLoaded", async () => {
       select.append(Object.assign(document.createElement("option"), { value: k, textContent: v, selected: k === "later" }));
     }
     render(s);
-    if (s.folder) show("overview");
+    if (s.folder) show(s.workspace ? (s.status ? "arch" : "setup") : "overview");
   });
 });

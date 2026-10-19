@@ -155,7 +155,7 @@ Auditors who prefer not to install anything can check receipts and growth proofs
 
 ## Build a workspace
 
-`aeos new FOLDER` writes `workspace.json`, one file that describes an organization: people, agents with their tools and limits, systems that provide tools (an example ERP, a Python file, or an MCP server), rules, books of account and witnesses. `aeos ui FOLDER` edits it and lets you send calls as an agent and see each check; `aeos up FOLDER` runs it for other programs; `aeos call`, `aeos period`, `aeos seal` and `aeos trace` work from the terminal. The folder is also an evidence folder for `aeos audit`. See [docs/building.md](../docs/building.md).
+`aeos new FOLDER` writes `workspace.json`, one file that describes an organization, filled in from Kestrel Foods in the film on ae-os.org (`--example acme` for the smaller Acme example): legal entities, people, the instruction a person signs, agents with their tools, systems that provide tools (records in the file, an example ERP, a Python file, or an MCP server), rules, books of account and witnesses. `aeos build FOLDER` sets it up step by step and prints what each step made. `aeos ui FOLDER` does the same in a web browser, draws the architecture with each call travelling through it, and plays the film's close as real calls; `aeos up FOLDER` runs it for other programs; `aeos call`, `aeos period`, `aeos seal` and `aeos trace` work from the terminal. The folder is also an evidence folder for `aeos audit`. See [docs/building.md](../docs/building.md).
 
 ## Work in the web browser
 

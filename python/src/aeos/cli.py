@@ -15,9 +15,10 @@
     aeos hook LOG --agent ID [--allow-tool T]...      (Claude Agent SDK / Claude Code)
     aeos agents FOLDER | aeos decisions FOLDER [--all] | aeos books FOLDER   [--json]
     aeos trace FOLDER REF [--json]
-    aeos new FOLDER | aeos check FOLDER | aeos up FOLDER [--port N]
+    aeos new FOLDER [--example kestrel|acme] | aeos check FOLDER
+    aeos build FOLDER [STEP] | aeos up FOLDER [--port N]
     aeos call FOLDER --as AGENT TOOL [key=value]... [--approve-as PERSON] [--json]
-    aeos period FOLDER YYYY-MM open|close --as PERSON | aeos seal FOLDER
+    aeos period FOLDER YYYY-MM open|close --as PERSON [--entity E] | aeos seal FOLDER
 """
 from __future__ import annotations
 
@@ -223,6 +224,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     p = sub.add_parser("new", help="create a workspace: one file describing your company's "
                        "people, agents, tools, rules and books")
     p.add_argument("folder")
+    p.add_argument("--example", choices=["kestrel", "acme"], default="kestrel",
+                   help="Kestrel Foods' quarter-end close, from the film on ae-os.org "
+                   "(default), or Acme's supplier payments")
+    p = sub.add_parser("build", help="set a workspace up step by step, the way the "
+                       "architecture builds it, and show what each step made")
+    p.add_argument("folder")
+    p.add_argument("step", nargs="?", choices=workspace.STEP_IDS[:-1], default="instruction",
+                   help="run the steps up to and including this one (default: all of "
+                   "them except starting the gateway, which aeos up does)")
     p = sub.add_parser("check", help="find mistakes in a workspace's workspace.json")
     p.add_argument("folder")
     p = sub.add_parser("up", help="run a workspace: identities, gateway, rules, books and log")
@@ -244,6 +254,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("period", help="the month, as YYYY-MM")
     p.add_argument("state", choices=["open", "close"])
     p.add_argument("--as", dest="person", required=True, help="the controller's id")
+    p.add_argument("--entity", help="the entity whose books to change (default: the first)")
     p = sub.add_parser("seal", help="sign a checkpoint of a workspace's log and have the "
                        "witnesses cosign it")
     p.add_argument("folder")
@@ -287,7 +298,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         else:
             print("\n".join(lines(view)))
         return 0
-    if a.cmd in ("new", "check", "up", "call", "period", "seal"):
+    if a.cmd in ("new", "build", "check", "up", "call", "period", "seal"):
         try:
             return _workspace(a)
         except workspace.WorkspaceError as e:
@@ -425,11 +436,25 @@ def main(argv: Optional[List[str]] = None) -> int:
 def _workspace(a: argparse.Namespace) -> int:
     folder = Path(a.folder)
     if a.cmd == "new":
-        workspace.create(folder)
-        print(f"Created {folder / workspace.FILE}: Acme, an example company with people, "
-              "agents, an example ERP, payment rules and books.\nNext:")
-        print(f"  aeos ui {folder}      build and try it in your web browser")
+        doc = workspace.example(a.example)
+        workspace.create(folder, doc)
+        print(f"Created {folder / workspace.FILE} for {doc['organization']['name']}, an "
+              "example company with people, agents, systems, rules and books.\nNext:")
+        print(f"  aeos ui {folder}      set it up and try it in your web browser")
+        print(f"  aeos build {folder}   set it up here, step by step")
         print(f"  aeos up {folder}      run it here, for agents to connect to")
+        return 0
+    if a.cmd == "build":
+        if workspace.running(folder):
+            print(f"{folder} is running; stop it before setting it up again.", file=sys.stderr)
+            return 2
+        p = workspace.Platform(folder)
+        try:
+            for step in workspace.STEP_IDS[:workspace.STEP_IDS.index(a.step) + 1]:
+                print("\n".join(workspace.describe_lines(p.run(step))))
+        finally:
+            p.stop(seal=False)
+        print(f"\nNext:  aeos up {folder}")
         return 0
     if a.cmd == "check":
         problems = workspace.check(workspace.load(folder), folder)
@@ -474,8 +499,8 @@ def _workspace(a: argparse.Namespace) -> int:
             return 0
         if a.cmd == "period":
             state = "open" if a.state == "open" else "closed"
-            p.change_period(a.period, state, a.person)
-            print(f"{a.period} is {state}, signed by {a.person}.")
+            got = p.change_period(a.period, state, a.person, entity=a.entity)
+            print(f"{a.period} is {state} for {got['entity']}, signed by {a.person}.")
             return 0
         out = p.call(a.agent, a.tool, workspace.parse_args(a.args))
         answers = [out]

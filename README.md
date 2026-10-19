@@ -39,8 +39,9 @@ The image above is a frame from the film on [ae-os.org](https://ae-os.org), whic
 
 ```
 pipx install "git+https://github.com/Daz-za/ae-os#subdirectory=python"
-aeos new my-aeos   # describe your organization in one file, starting from an example
-aeos ui my-aeos    # build it and try calls as an agent in your web browser
+aeos new my-aeos   # one file describing a company, filled in from the film on ae-os.org
+aeos ui my-aeos    # set it up step by step and watch the architecture work in your browser
+aeos build my-aeos # or set it up from the terminal and see what each step made
 aeos up my-aeos    # run it for your own agents to connect to
 aeos demo --full   # a narrated walk-through of every part, ending with an audit
 ```
