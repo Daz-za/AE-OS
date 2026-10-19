@@ -59,6 +59,17 @@ def find_key(folder: Path) -> Optional[Path]:
     return None
 
 
+def _workspaces_here(limit: int = 6) -> List[str]:
+    """Workspace folders directly inside the current folder, newest first, so the opening
+    page can offer to continue one."""
+    try:
+        found = [d for d in Path.cwd().iterdir() if (d / workspace.FILE).is_file()]
+    except OSError:
+        return []
+    found.sort(key=lambda d: (d / workspace.FILE).stat().st_mtime, reverse=True)
+    return [str(d) for d in found[:limit]]
+
+
 class App:
     """The page's functions. Every method returns a JSON-ready dict."""
 
@@ -82,7 +93,8 @@ class App:
                                "key": str(self.key) if self.key else None,
                                "evidence": str(self.evidence) if self.evidence else None,
                                "cwd": str(Path.cwd()), "modes": setup.MODES,
-                               "workspace": self.platform is not None}
+                               "workspace": self.platform is not None,
+                               "workspaces": _workspaces_here()}
         if self.platform is not None:
             out["organization"] = self.platform.doc["organization"]["name"]
         if self.folder is not None and (self.folder / "log.json").exists():

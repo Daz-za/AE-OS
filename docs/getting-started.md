@@ -59,7 +59,13 @@ To update later, run the install command above again with `--force` at the end. 
 aeos ui
 ```
 
-This opens a page in your web browser. Choose **Create the workspace** to start from Kestrel Foods, the company in the film on ae-os.org. **Set up** builds the company one part at a time: its certificate authority, its people, its AI agents and their identities, the books, the rules, the systems and the authority the CFO signs. **Architecture** draws every part and shows each call travelling through it. **Run the close** plays the film's quarter-end close as real calls, and **Try a call** lets you act as any agent. Everything is filled in, and you can change any of it. The page can also run the examples and open any log. It runs on your computer only. Close it by pressing Ctrl+C in the terminal.
+This opens a page in your web browser. Press **Start the guided tour**. It sets up Kestrel Foods, the company in the film on ae-os.org, and takes you through the stages numbered across the top of the page:
+
+1. **Set up** builds the company one part at a time: its certificate authority, its people, its AI agents and their identities, the books, the rules, the systems, the authority the CFO signs and the gateway. For each step, press **Run this step** (on the last step, **Start the gateway**), look at what it made, then press **Next step**.
+2. **Run the close** plays the film's quarter-end close as real calls through the gateway. Play the chapters in order; in one of them you decide for the CFO.
+3. **Try a call** lets you act as any agent. Afterwards, the tabs marked Evidence at the top show every record, who acted, what was refused and why, the books, and the auditor's check.
+
+Each page says what to do on it and has a button to the next one. **Architecture** draws every part and shows each call travelling through it, **Build with it** shows each part as a module you can use on its own, and **Edit** shows the whole company as one file. Everything is filled in, and you can change any of it. The page runs on your computer only. Close it by pressing Ctrl+C in the terminal. To come back later, run `aeos ui` in the same folder and press **Continue** followed by your folder's name.
 
 When you are ready to connect your own tools, rules or agents, read [building.md](building.md). The rest of this guide covers the commands for recording and checking a log.
 

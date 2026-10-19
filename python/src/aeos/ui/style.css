@@ -298,3 +298,28 @@ svg.arch { display: block; width: 100%; height: auto; font-family: inherit; }
   .arch-host { overflow-x: auto; }
   svg.arch { min-width: 720px; }
 }
+
+/* Guidance for people new to AE-OS: the opening page's tour, and on each view what to do
+   there and where to go next. */
+.hero { margin-top: 20px; border: 2px solid var(--blue); max-width: 760px; }
+.hero h2 { font-size: 24px; margin: 4px 0 12px; }
+.tour-steps { padding-left: 22px; margin: 0 0 20px; display: grid; gap: 8px; }
+.tour-steps strong { color: var(--ink); }
+button.big { font-size: 18px; padding: 12px 28px; justify-self: start; }
+.where { font-size: 14px; }
+.where[open] { gap: 8px; }
+.continue { margin-top: 20px; }
+.continue h2 { margin-top: 0; }
+h2.other { margin-top: 40px; font-size: 16px; color: var(--muted); }
+.aside + .aside { margin-top: 10px; }
+.guide { border-left: 4px solid var(--blue); background: var(--panel); border-radius: 0 10px 10px 0;
+  padding: 12px 18px; margin: 8px 0 16px; max-width: 860px; }
+.guide p { margin: 0 0 6px; }
+.guide p:last-child { margin-bottom: 0; }
+.guide .actions { margin-top: 10px; }
+.next-view { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 12px;
+  margin-top: 28px; padding-top: 16px; border-top: 1px solid var(--line); }
+.tab-n { display: inline-grid; place-items: center; width: 20px; height: 20px; margin-right: 6px; border-radius: 50%;
+  background: #2f353b; color: #fff; font-size: 12px; font-weight: 700; }
+.tab.active .tab-n { background: var(--accent); color: #1a1d20; }
+.nav-gap { width: 1px; background: #3a4047; margin: 6px 8px; }

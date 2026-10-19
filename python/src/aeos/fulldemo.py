@@ -131,7 +131,7 @@ def run(folder: Path, out: Callable[[str], None] = print) -> int:
         f"The accounts payable agent receives an X.509-SVID for {AP_AGENT}: a certificate "
         f"that names it, valid for 15 minutes ({ap.leaf.not_valid_before_utc:%H:%M} to "
         f"{ap.leaf.not_valid_after_utc:%H:%M} UTC), and a private key for the agent alone (in "
-        "this preview the issuer generates it; under SPIRE the key never leaves the "
+        "this walk-through the issuer generates it; under SPIRE the key never leaves the "
         "agent). The ERP gateway, a payments helper and a payroll agent get their own. "
         "Identity rests on the certificate alone.")
 
@@ -204,7 +204,7 @@ def run(folder: Path, out: Callable[[str], None] = print) -> int:
         f"and opening {books.period_name(opened)}. The books service accepts a period change "
         "only when a controller has signed it, and records the signature with it. To keep "
         f"the example short, the books start empty in {books.period_name(opened)}. In this "
-        f"preview the books service runs inside the gateway; {BOOKS_SERVICE} names it in "
+        f"walk-through the books service runs inside the gateway; {BOOKS_SERVICE} names it in "
         "the records.")
 
     tools = {**_erp(), books.TOOL: ledger.tool()}

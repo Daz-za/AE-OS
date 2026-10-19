@@ -14,7 +14,7 @@ unchanged.
     aeos up my-company           run it; agents connect with the files in private/connect/
     aeos call my-company --as stock/02 erp.stock.ageing site=OHIO
 
-Private keys stay in private/. In this preview the people's signing keys are files on
+Private keys stay in private/. Here the people's signing keys are files on
 this computer, so the platform can sign an instruction or an approval for a person when
 asked to. In production each person signs with their own passkey or smart card.
 """

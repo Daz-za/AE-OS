@@ -1,6 +1,6 @@
 # aeos
 
-The Python library and command line for [AE-OS](https://ae-os.org). It issues signed, independently verifiable receipts for AI agent actions, and includes a preview of agent identities, delegated authority, an MCP gateway and witnesses.
+The Python library, command line and browser workspace for [AE-OS](https://ae-os.org). It runs the AE-OS architecture on one computer: a certificate authority and SPIFFE identities for agents, delegated authority signed by a person, an MCP gateway, rules compiled to WebAssembly, books of account, witnesses, and a signed, independently verifiable receipt for every agent action.
 
 Every action an agent takes becomes a record in an append-only Merkle log (the structure Certificate Transparency uses). The log operator signs checkpoints. Anyone holding the log's public key can then check, offline, that a given record is in the log and that the log has only grown since a checkpoint they kept earlier.
 
@@ -13,9 +13,19 @@ pipx install "git+https://github.com/Daz-za/ae-os#subdirectory=python"
 pip install -e python          # or, from a clone of this repository
 ```
 
-Then run `aeos ui` to work in your web browser, or try `aeos demo` and create a log of your own with `aeos setup`. The [getting-started guide](../docs/getting-started.md) covers each step for people new to the command line.
+Then run `aeos ui` to set up the workspace in your web browser (see [Build a workspace](#build-a-workspace)), or try `aeos demo` and create a log of your own with `aeos setup`. The [getting-started guide](../docs/getting-started.md) covers each step for people new to the command line.
 
 Requires Python 3.10 or later, with the `cryptography`, `biscuit-python` and `wasmtime` packages (installed automatically). Rebuilding the example policy needs [OPA](https://www.openpolicyagent.org/); running it does not.
+
+## Build a workspace
+
+`aeos new FOLDER` writes `workspace.json`, one file that describes an organization, filled in from Kestrel Foods in the film on ae-os.org (`--example acme` for the smaller Acme example): legal entities, people, the instruction a person signs, agents with their tools, systems that provide tools (records in the file, an example ERP, a Python file, or an MCP server), rules, books of account and witnesses. `aeos build FOLDER` sets it up step by step and prints what each step made. `aeos ui FOLDER` does the same in a web browser. It draws the architecture with each call travelling through it, plays the film's close as real calls, and shows each part as a module with the code that uses it on its own. `aeos up FOLDER` runs the workspace for other programs, and `aeos call`, `aeos period`, `aeos seal` and `aeos trace` work from the terminal. The folder is also an evidence folder for `aeos audit`. See [docs/building.md](../docs/building.md).
+
+## Work in the web browser
+
+`aeos ui` opens a page on this computer. It starts with the workspace described above: **Start the guided tour** sets up Kestrel Foods and leads you through it, and **Continue** followed by a folder's name reopens a workspace you made earlier in the same folder. Under Other ways in, the page runs the short and narrated examples and opens any log or evidence folder. For an open folder it lists the records, agents, decisions and books, downloads receipts, signs checkpoints, checks receipts from other logs and runs the audit.
+
+The page is served only at 127.0.0.1, this computer's own address. Each launch makes a new access code that is part of the address; other websites open in the same browser do not have it and cannot use the page. `aeos ui FOLDER` opens a workspace, log or evidence folder directly, and `--no-browser` prints the address so you can paste it into a browser on this computer.
 
 ## Record an agent's MCP tool calls
 
@@ -151,14 +161,6 @@ The auditor should get the public key from a source they trust, not from the fil
 
 Auditors who prefer not to install anything can check receipts and growth proofs in a web browser at [ae-os.org/verify](https://ae-os.org/verify). The page runs [`verify.js`](src/aeos/ui/verify.js), the same checker that `aeos ui` uses; the files stay on the auditor's device. Its tests (`node --test src/aeos/ui/verify.test.mjs`) run the shared test vectors.
 
-## Build a workspace
-
-`aeos new FOLDER` writes `workspace.json`, one file that describes an organization, filled in from Kestrel Foods in the film on ae-os.org (`--example acme` for the smaller Acme example): legal entities, people, the instruction a person signs, agents with their tools, systems that provide tools (records in the file, an example ERP, a Python file, or an MCP server), rules, books of account and witnesses. `aeos build FOLDER` sets it up step by step and prints what each step made. `aeos ui FOLDER` does the same in a web browser, draws the architecture with each call travelling through it, and plays the film's close as real calls; `aeos up FOLDER` runs it for other programs; `aeos call`, `aeos period`, `aeos seal` and `aeos trace` work from the terminal. The folder is also an evidence folder for `aeos audit`. See [docs/building.md](../docs/building.md).
-
-## Work in the web browser
-
-`aeos ui` opens a page on this computer where you can run the short example or the full walk-through, create or open a log, look through its records, download receipts, sign checkpoints and check receipts from other logs. For an evidence folder it also shows who acted, what was refused or sent to a person and why, the journal and trial balance, and runs the audit. It is served only at 127.0.0.1, this computer's own address. Each launch makes a new access code that is part of the address; other websites open in the same browser do not have it and cannot use the page. Use `aeos ui ./ap-log` (or `aeos ui ./aeos-full-demo`) to open a log or evidence folder directly, and `--no-browser` to print the address without opening a browser, then open it in a browser on the same computer.
-
 ## Use it as a library
 
 ```python
@@ -173,9 +175,9 @@ assert verify_receipt(receipt, log.public_key) == []
 
 `examples/invoice_demo.py` walks through an escalated invoice payment, the auditor's checks and a tampering attempt.
 
-## Identities, delegated authority, policy, books, gateway and witnesses (preview)
+## The narrated example
 
-`aeos demo --full` runs more of the AE-OS architecture on one computer:
+`aeos demo --full` builds the AE-OS architecture one part at a time, with Acme's supplier payments as the example, and explains each part as it goes:
 
 - a SPIFFE trust domain issues 15-minute X.509-SVIDs to agents and to an MCP gateway;
 - a person signs an intent envelope (which tools, the limit per payment, the total budget, the expiry), and an authorization service turns it into a [Biscuit](https://www.biscuitsec.org/) capability token bound to the agent's SPIFFE ID; the agent can add checks to hand a narrower token to a helper, and nobody can remove one;
@@ -199,7 +201,7 @@ Each takes `--json` for other programs. They read what the log holds; `aeos audi
 
 Version 0.1 is an early release for evaluation.
 
-- The signing key is a file. Keep it outside the log directory (`--key`) and away from the agent; hardware or KMS keys are planned.
+- The signing key is a file. Keep it outside the log directory (`--key`) and away from the agent.
 - The whole log is held in memory and hashed on load, which suits logs up to a few hundred thousand records. Each `aeos hook` call loads the log, so start a new log per agent or per period when a single log grows large.
 - A receipt proves a record is in the log. Whether the log is complete depends on the agent being able to reach its tools only through a recorded path: the proxy, a gateway that reports to the sink, or the hook.
 - The gateway meters each intent's total budget in its own memory, and several gateways do not share it. A workspace rebuilds the budget spent from the log when it starts.

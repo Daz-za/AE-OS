@@ -75,9 +75,9 @@ def _report(problems: List[str], ok_message: str, kind: str = "") -> int:
 
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(prog="aeos",
-                                 description="Signed, verifiable receipts for AI agent actions, with a "
-                                 "preview of identities, delegated authority, an MCP "
-                                 "gateway and witnesses.",
+                                 description="AE-OS on one computer: agent identities, delegated "
+                                 "authority, an MCP gateway, rules, books of account, "
+                                 "witnesses and a signed receipt for every action.",
                                  epilog="New here? Run 'aeos ui' to work in your web browser, or "
                                         "'aeos demo' to see an example here.")
     ap.add_argument("--version", action="version", version=__version__)
