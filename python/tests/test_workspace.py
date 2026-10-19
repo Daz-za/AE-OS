@@ -18,7 +18,7 @@ TODAY = f"{dt.date.today():%Y-%m-%d}"
 
 @pytest.fixture
 def ws(tmp_path):
-    return workspace.create(tmp_path / "acme")
+    return workspace.create(tmp_path / "acme", workspace.example("acme"))
 
 
 def steps(answer):
@@ -27,7 +27,7 @@ def steps(answer):
 
 def test_the_example_is_ready_and_mistakes_are_named(ws):
     assert workspace.check(workspace.load(ws), ws) == []
-    doc = workspace.example()
+    doc = workspace.example("acme")
     doc["agents"][0]["authorized_by"] = "nobody"
     doc["agents"][0]["tools"].append("crm.customer.get")
     doc["agents"][0]["budget"] = "5.00"
@@ -218,3 +218,50 @@ def test_a_missing_mcp_program_or_file_is_named(ws):
     problems = workspace.check(doc, ws)
     assert "system a: the program no-such-program-x was not found on this computer" in problems
     assert "system b: there is no file server.py in the workspace folder" in problems
+
+
+def test_kestrel_is_built_step_by_step_and_plays_the_film(tmp_path):
+    from aeos import examples
+    folder = workspace.create(tmp_path / "kestrel")          # Kestrel Foods by default
+    p = workspace.Platform(folder)
+    assert {s["state"] for s in p.status()} == {"todo"}
+    made = p.run("pki")
+    assert made["step"]["state"] == "done"
+    assert [s["state"] for s in p.status()][:3] == ["done", "done", "todo"]
+    p.start()
+    try:
+        outcomes, escalation = [], None
+        for ch in examples.chapters():
+            for st in ch["steps"]:
+                if "agent" in st:
+                    t = p.call(st["agent"], st["tool"], st["args"])["trace"]
+                    outcomes.append((st["agent"], st["tool"], st["args"].get("entity"), t["outcome"]))
+                    if t["outcome"] == "waiting":
+                        escalation = t["escalation"]
+                elif "period" in st:
+                    p.change_period(st["period"], st["state"], st["by"], entity=st["entity"])
+            if ch["id"] == "decision":
+                assert p.approve(escalation, "cfo")["trace"]["outcome"] == "done"
+        assert ("accruals/05", "ledger.post", "KF-US", "done") in outcomes
+        assert ("accruals/05", "ledger.post", "KF-US", "refused") in outcomes    # closed month
+        assert ("stock/02", "ledger.post", "KF-US", "waiting") in outcomes       # above $250,000
+        assert ("ic-match/04", "ledger.post", "KF-US", "refused") in outcomes    # wrong company
+        assert ("ic-match/04", "ledger.post", "KF-UK", "done") in outcomes
+        assert p.call("bank-rec/01", "bank.payment.send", {})["trace"]["outcome"] == "refused"
+    finally:
+        p.stop()
+    assert workspace.Platform(folder).describe("instruction")["intents"]
+    findings, problems = audit.run(folder)
+    assert problems == []
+    assert any("KF-UK" in f for f in findings)
+
+
+def test_build_and_new_from_the_command_line(tmp_path, capsys):
+    assert cli.main(["new", str(tmp_path / "acme"), "--example", "acme"]) == 0
+    assert workspace.load(tmp_path / "acme")["organization"]["trust_domain"] == "acme.example"
+    assert cli.main(["new", str(tmp_path / "kestrel")]) == 0
+    capsys.readouterr()
+    assert cli.main(["build", str(tmp_path / "kestrel"), "pki"]) == 0
+    out = capsys.readouterr().out
+    assert "kestrel.example" in out
+    assert [s["state"] for s in workspace.Platform(tmp_path / "kestrel").status()][:2] == ["done", "done"]

@@ -301,9 +301,12 @@ def _check_books(log: ReceiptLog, principal_keys: Dict[str, bytes], setup: Dict[
     if not n:
         text = "The books hold no journal entries"
     else:
-        text = (f"The books hold {n} journal entr{'y' if n == 1 else 'ies'}"
-                + (f", {docs[0]} to {docs[-1]}, numbered without gaps" if n > 1 else
-                   f", {docs[0]}")
+        series: Dict[str, List[str]] = {}
+        for d in docs:                              # one series per entity and year
+            series.setdefault(d.rsplit("/", 1)[0], []).append(d)
+        ranges = [f"{ds[0]} to {ds[-1]}" if len(ds) > 1 else ds[0] for ds in series.values()]
+        text = (f"The books hold {n} journal entr{'y' if n == 1 else 'ies'}, "
+                + "; ".join(ranges) + (", numbered without gaps" if n > 1 else "")
                 + ". Each one balances, is linked to the tool call that asked for it, uses "
                 "accounts in the chart of accounts, and is dated in a period that was open "
                 "when it was recorded")

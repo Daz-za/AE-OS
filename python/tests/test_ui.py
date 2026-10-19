@@ -119,9 +119,40 @@ def test_full_walk_through_shows_agents_decisions_books_and_audit(page, tmp_path
     assert page("/api/audit", {})[0] == 400
 
 
+def test_kestrel_is_set_up_step_by_step(page, tmp_path):
+    status, body = page("/api/new-workspace", {"folder": str(tmp_path / "kestrel")})
+    state = json.loads(body)
+    assert status == 200 and state["workspace"] and "status" not in state   # no log yet
+    ws = json.loads(page("/api/ws")[1])
+    assert ws["running"]["organization"]["trust_domain"] == "kestrel.example"
+    assert [s["state"] for s in ws["steps"]] == ["todo"] * len(ws["steps"])
+    assert not ws["serving"]
+    org = json.loads(page("/api/ws/step?step=organization")[1])
+    assert org
+    status, body = page("/api/ws/step", {"step": "pki"})
+    assert status == 200
+    ws = json.loads(page("/api/ws")[1])
+    done = {s["id"] for s in ws["steps"] if s["state"] == "done"}
+    assert done == {"organization", "pki"}
+    pki = json.loads(page("/api/ws/step?step=pki")[1])
+    assert "kestrel.example" in json.dumps(pki)
+
+    page("/api/ws/step", {"step": "gateway"})
+    ws = json.loads(page("/api/ws")[1])
+    assert ws["serving"] and all(s["state"] == "done" for s in ws["steps"])
+    assert [c["film"] for c in ws["chapters"]] == [1, 2, 3, 4, 5, 6]
+    answer = json.loads(page("/api/ws/call", {"agent": "stock/02", "tool": "erp.stock.ageing",
+                                              "args": {"site": "OHIO"}})[1])
+    assert answer["trace"]["outcome"] == "done"
+    feed = json.loads(page("/api/feed?after=0")[1])
+    assert any(r["kind"] == "tool.call" for r in feed["records"])
+    assert feed["total"] == json.loads(page("/api/state")[1])["status"]["records"]
+
+
 def test_workspace_build_try_and_trace(page, tmp_path):
-    status, body = page("/api/new-workspace", {"folder": str(tmp_path / "acme")})
+    status, body = page("/api/new-workspace", {"folder": str(tmp_path / "acme"), "example": "acme"})
     assert status == 200 and json.loads(body)["workspace"]
+    page("/api/ws/step", {"step": "gateway"})
     ws = json.loads(page("/api/ws")[1])
     assert ws["problems"] == [] and "erp.invoice.pay" in ws["tools"]
 
@@ -137,6 +168,7 @@ def test_workspace_build_try_and_trace(page, tmp_path):
     status, body = page("/api/ws/call", {"agent": "accounts-payable", "tool": "erp.invoice.pay",
                                          "args": {"invoice": "INV-1001", "amount_minor": 420000}})
     answer = json.loads(body)
+    assert "trace" in answer, (body, json.loads(page("/api/ws")[1])["steps"])
     assert answer["trace"]["outcome"] == "waiting"
     status, body = page("/api/ws/approve", {"escalation": answer["trace"]["escalation"],
                                             "person": "cfo"})
@@ -151,7 +183,8 @@ def test_workspace_build_try_and_trace(page, tmp_path):
 
 def test_changes_that_cannot_start_are_not_saved(page, tmp_path):
     import sys
-    page("/api/new-workspace", {"folder": str(tmp_path / "acme")})
+    page("/api/new-workspace", {"folder": str(tmp_path / "acme"), "example": "acme"})
+    page("/api/ws/step", {"step": "gateway"})
     doc = json.loads(page("/api/ws")[1])["doc"]
     doc["systems"].append({"id": "broken", "type": "mcp-stdio", "tools": [],
                            "command": [sys.executable, "-c", "import sys; sys.exit(1)"]})

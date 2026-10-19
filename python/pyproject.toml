@@ -33,7 +33,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "aeos.ui" = ["*.html", "*.css", "*.js"]
-"aeos" = ["policies/*.wasm"]
+"aeos" = ["policies/*.wasm", "policies/*.rego"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
