@@ -1,4 +1,4 @@
-"""Command line for AE-OS Receipts.
+"""Command line for AE-OS.
 
     aeos init LOG [--log-id ID] [--key PATH]
     aeos append LOG --agent ID --kind KIND [--subject S] [--body JSON] [--parent CID]...
@@ -66,7 +66,9 @@ def _report(problems: List[str], ok_message: str, kind: str = "") -> int:
 
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(prog="aeos",
-                                 description="Signed, verifiable receipts for AI agent actions.",
+                                 description="Signed, verifiable receipts for AI agent actions, with a "
+                                 "preview of identities, delegated authority, an MCP "
+                                 "gateway and witnesses.",
                                  epilog="New here? Run 'aeos ui' to work in your web browser, or "
                                         "'aeos demo' to see an example here.")
     ap.add_argument("--version", action="version", version=__version__)

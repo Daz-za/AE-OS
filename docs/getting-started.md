@@ -1,8 +1,8 @@
 # Getting started with AE-OS
 
-This guide is for anyone who wants to try the AE-OS tools, including people who do not write code. It takes about ten minutes and uses copy-and-paste commands.
+This guide is for anyone who wants to try the AE-OS software, including people who do not write code. It takes about ten minutes and uses copy-and-paste commands.
 
-The `aeos` command keeps a tamper-evident record of what an AI agent does: each tool it uses, who it acted for, and what came back. The record is signed, so an auditor can later check any entry with a public key and confirm nothing was changed.
+The `aeos` command records what an AI agent does in a tamper-evident log: each tool it uses, who it acted for, and what came back. The record is signed, so an auditor can later check any entry with a public key and confirm nothing was changed.
 
 ## 1. Install
 
@@ -40,7 +40,7 @@ On every system, close and reopen the terminal after `pipx ensurepath` so it can
 aeos --version
 ```
 
-To update later, run `pipx upgrade aeos`.
+To update later, run `pipx upgrade aeos`. If you installed it under its earlier name, run `pipx uninstall aeos-receipts` and then the install command above.
 
 ## 2. Work in your web browser
 

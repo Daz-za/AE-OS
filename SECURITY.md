@@ -1,6 +1,6 @@
 # Security policy
 
-AE-OS Receipts produces evidence that auditors rely on, so security reports are taken seriously and handled privately.
+AE-OS produces evidence that auditors rely on, so security reports are taken seriously and handled privately.
 
 ## Reporting a vulnerability
 

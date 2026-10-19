@@ -38,7 +38,7 @@ def page(tmp_path, monkeypatch):
 
 def test_static_files_are_served_and_packaged(page):
     status, body = page("/")
-    assert status == 200 and b"AE-OS Receipts" in body
+    assert status == 200 and b"<title>AE-OS</title>" in body
     for name in ("/app.js", "/check.js", "/verify.js", "/style.css", "/check.css"):
         assert page(name)[0] == 200
 

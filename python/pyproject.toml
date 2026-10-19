@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "aeos"
 version = "0.1.0"
-description = "AE-OS building blocks: agent identity, delegated authority, an MCP gateway and signed receipts for AI agent actions"
+description = "Signed, independently verifiable receipts for AI agent actions, with a preview of agent identity, delegated authority, an MCP gateway and witnesses (AE-OS)"
 readme = "README.md"
 license = "Apache-2.0"
 authors = [{ name = "Darren Lentz" }]

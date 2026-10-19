@@ -134,7 +134,7 @@ export function mountCheck(root, opts = {}) {
       return show(null, `The public key could not be read: ${e.message}.`);
     }
     const kind = d && d.type === "aeos-receipt/v0" ? "receipt" : d && d.old && d.new ? "consistency" : null;
-    if (!kind) return show(false, "This file is neither a receipt nor a growth proof from AE-OS Receipts.");
+    if (!kind) return show(false, "This file is neither a receipt nor a growth proof from AE-OS.");
     let problems;
     try {
       problems = kind === "receipt" ? await verifyReceipt(d, key) : await verifyConsistency(d, key);

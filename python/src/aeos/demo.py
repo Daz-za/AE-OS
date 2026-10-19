@@ -32,7 +32,7 @@ def run(folder: Path, out: Callable[[str], None] = print) -> int:
         out(f"\n{step}. {title}")
         out(textwrap.fill(text, 88, initial_indent="   ", subsequent_indent="   "))
 
-    out("AE-OS Receipts demo: an AI agent pays a supplier invoice at Acme, a fictional "
+    out("AE-OS demo: an AI agent pays a supplier invoice at Acme, a fictional "
         "company,\nand an auditor checks the evidence.")
 
     log = ReceiptLog.create(folder / "log", log_id="urn:example:acme:accounts-payable",

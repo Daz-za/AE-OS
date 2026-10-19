@@ -1,4 +1,5 @@
-"""AE-OS Receipts: signed, independently verifiable receipts for AI agent actions."""
+"""AE-OS: signed, independently verifiable receipts for AI agent actions, with a preview of
+identities, delegated authority, an MCP gateway and witnesses."""
 
 __version__ = "0.1.0"
 

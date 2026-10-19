@@ -264,7 +264,7 @@ def serve(folder: Optional[Path] = None, key: Optional[Path] = None, port: int =
     server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(app, code, port_ref))
     port_ref[0] = server.server_address[1]
     url = f"http://127.0.0.1:{port_ref[0]}/#code={code}"
-    out("AE-OS Receipts is open in your web browser. If it did not open, copy this address "
+    out("AE-OS is open in your web browser. If it did not open, copy this address "
         f"into the browser:\n  {url}\nThe page works only on this computer. Press Ctrl+C here "
         "to close it.")
     if open_browser:

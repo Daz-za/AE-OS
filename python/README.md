@@ -1,6 +1,6 @@
 # aeos
 
-The open-source building blocks of [AE-OS](https://ae-os.org): signed, independently verifiable receipts for AI agent actions, plus a preview of agent identities, delegated authority, an MCP gateway and witnesses.
+The Python library and command line for [AE-OS](https://ae-os.org). It issues signed, independently verifiable receipts for AI agent actions, and includes a preview of agent identities, delegated authority, an MCP gateway and witnesses.
 
 Every action an agent takes becomes a record in an append-only Merkle log (the structure Certificate Transparency uses). The log operator signs checkpoints. Anyone holding the log's public key can then check, offline, that a given record is in the log and that the log has only grown since a checkpoint they kept earlier.
 
@@ -15,7 +15,7 @@ pip install -e python          # or, from a clone of this repository
 
 Then run `aeos ui` to work in your web browser, or try `aeos demo` and create a log of your own with `aeos setup`. The [getting-started guide](../docs/getting-started.md) covers each step for people new to the command line.
 
-This package was first called `aeos-receipts`. That command still works and runs the same thing as `aeos`, and `import aeos_receipts` still works too.
+This package was first called `aeos-receipts`. The `aeos-receipts` command and `import aeos_receipts` remain available as aliases of `aeos`. Logs set up under the earlier name keep their signing keys in `~/.config/aeos-receipts/keys/`, where `aeos ui` still finds them.
 
 Requires Python 3.10 or later, with the `cryptography` and `biscuit-python` packages (installed automatically).
 
