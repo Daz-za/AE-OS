@@ -8,8 +8,8 @@ import json
 import tempfile
 from pathlib import Path
 
-from aeos_receipts import ReceiptLog, make_record, verify_consistency_doc, verify_receipt
-from aeos_receipts.canon import json_digest
+from aeos import ReceiptLog, make_record, verify_consistency_doc, verify_receipt
+from aeos.canon import json_digest
 
 AGENT = "spiffe://acme.example/agent/accounts-payable/7f3a"
 CONTROLLER = "spiffe://acme.example/human/controller/j-smith"

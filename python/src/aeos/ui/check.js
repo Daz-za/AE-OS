@@ -1,5 +1,5 @@
 // "Check a receipt": a self-contained panel that checks receipts and growth proofs in
-// the browser with verify.js. Used by `aeos-receipts ui` and by ae-os.org/verify.
+// the browser with verify.js. Used by `aeos ui` and by ae-os.org/verify.
 //
 //   import { mountCheck } from "./check.js";
 //   const panel = mountCheck(document.getElementById("check"), { publicKey: "hex, optional" });

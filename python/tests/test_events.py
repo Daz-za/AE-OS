@@ -2,9 +2,9 @@ import json
 
 import pytest
 
-from aeos_receipts import ReceiptLog, Recorder
-from aeos_receipts.canon import json_digest
-from aeos_receipts.events import EventError, apply, otlp_events
+from aeos import ReceiptLog, Recorder
+from aeos.canon import json_digest
+from aeos.events import EventError, apply, otlp_events
 
 AGENT = "spiffe://acme.example/gateway/edge-1"
 

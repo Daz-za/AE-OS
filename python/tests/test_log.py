@@ -2,8 +2,8 @@ import json
 
 import pytest
 
-from aeos_receipts import ReceiptLog, make_record, verify_consistency_doc, verify_receipt
-from aeos_receipts.canon import json_digest
+from aeos import ReceiptLog, make_record, verify_consistency_doc, verify_receipt
+from aeos.canon import json_digest
 
 AGENT = "spiffe://acme.example/agent/ap-clerk/1"
 CFO = "spiffe://acme.example/human/cfo"
@@ -38,8 +38,8 @@ def test_receipt_rejects_wrong_key_and_altered_record(tmp_path):
     altered = dict(receipt)
     rec = log.record(e)
     rec["body"]["amount"] = 999_999
-    from aeos_receipts.canon import dag_cbor
-    from aeos_receipts.log import b64
+    from aeos.canon import dag_cbor
+    from aeos.log import b64
     altered["record"] = b64(dag_cbor(rec))
     problems = verify_receipt(altered, log.public_key)
     assert any("CID" in p for p in problems)
@@ -84,8 +84,8 @@ def test_verify_detects_edited_deleted_and_reordered_records(tmp_path):
     check(lines[:3] + [json.dumps(d)] + lines[4:], "readable view")
     # replace the signed bytes with a different record and matching CID
     rec = make_record("tool.call", AGENT, subject="erp.invoice.pay", body={"amount": 1}, ts=5)
-    from aeos_receipts.canon import cid_of_bytes, cid_str, dag_cbor
-    from aeos_receipts.log import b64, to_view
+    from aeos.canon import cid_of_bytes, cid_str, dag_cbor
+    from aeos.log import b64, to_view
     raw = dag_cbor(rec)
     forged = json.dumps({"i": 5, "cid": cid_str(cid_of_bytes(raw)), "cbor": b64(raw),
                          "view": to_view(rec)})

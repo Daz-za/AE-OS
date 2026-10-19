@@ -1,4 +1,4 @@
-"""A plain-language summary of a receipt log, for `aeos-receipts status` and the GUI."""
+"""A plain-language summary of a receipt log, for `aeos status` and the GUI."""
 from __future__ import annotations
 
 import datetime as dt
@@ -87,8 +87,8 @@ def describe(s: Dict[str, Any], folder: str) -> List[str]:
         lines.append("  No signed checkpoint yet")
     unsealed = s["records"] - s["last_checkpoint_size"]
     if unsealed > 0:
-        tip = f"aeos-receipts checkpoint {folder}" if s["can_sign"] else \
-            f"aeos-receipts checkpoint {folder} --key <signing key file>"
+        tip = f"aeos checkpoint {folder}" if s["can_sign"] else \
+            f"aeos checkpoint {folder} --key <signing key file>"
         lines.append(f"  {_n(unsealed, 'newer record')} not yet covered by a signed "
                      f"checkpoint. To sign one now: {tip}")
     else:

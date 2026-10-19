@@ -24,11 +24,11 @@ from pathlib import Path
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from aeos_receipts import ReceiptLog, make_record, verify_consistency_doc, verify_receipt
-from aeos_receipts import merkle
-from aeos_receipts.canon import (Link, canonical_json, cid_of_bytes, cid_str, dag_cbor,
-                                 decode_dag_cbor, json_digest)
-from aeos_receipts.log import b64, to_view
+from aeos import ReceiptLog, make_record, verify_consistency_doc, verify_receipt
+from aeos import merkle
+from aeos.canon import (Link, canonical_json, cid_of_bytes, cid_str, dag_cbor,
+                        decode_dag_cbor, json_digest)
+from aeos.log import b64, to_view
 
 OUT = Path(__file__).with_name("receipts-v0.json")
 

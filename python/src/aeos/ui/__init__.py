@@ -1,4 +1,4 @@
-"""A point-and-click view of a receipt log in the web browser: `aeos-receipts ui`.
+"""A point-and-click view of a receipt log in the web browser: `aeos ui`.
 
 The page is served only to this computer (127.0.0.1). Each launch makes a fresh access
 code that is part of the address the browser opens. Other websites open in the same
@@ -43,9 +43,10 @@ def find_key(folder: Path) -> Optional[Path]:
     except (OSError, ValueError):
         return None
     if log_id.startswith("urn:aeos:"):
-        guess = setup.default_key_dir() / f"{log_id[len('urn:aeos:'):]}.key"
-        if guess.exists():
-            return guess
+        for d in (setup.default_key_dir(), setup.earlier_key_dir()):
+            guess = d / f"{log_id[len('urn:aeos:'):]}.key"
+            if guess.exists():
+                return guess
     return None
 
 
@@ -173,7 +174,7 @@ ROUTES: Dict[Tuple[str, str], Callable[[App, Dict[str, Any]], Dict[str, Any]]] =
 
 def make_handler(app: App, code: str, port_ref: List[int]):
     class Handler(BaseHTTPRequestHandler):
-        server_version = "aeos-receipts-ui"
+        server_version = "aeos-ui"
 
         def log_message(self, fmt: str, *args: Any) -> None:
             pass
@@ -219,7 +220,7 @@ def make_handler(app: App, code: str, port_ref: List[int]):
             given = self.headers.get("X-AEOS-Code", "")
             if not hmac.compare_digest(given.encode(), code.encode()):
                 self._json(403, {"error": "This page's access code has changed. Close it and "
-                                          "open the address that aeos-receipts ui printed."})
+                                          "open the address that aeos ui printed."})
                 return
             req: Dict[str, Any] = {k: v[0] for k, v in parse_qs(url.query).items()}
             if method == "POST":

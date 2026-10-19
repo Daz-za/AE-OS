@@ -58,10 +58,10 @@ def ingest(rec: Recorder, lines: Iterable[str], fmt: str) -> Tuple[int, List[str
 
 def make_handler(rec: Recorder, token: Optional[str]):
     class Handler(BaseHTTPRequestHandler):
-        server_version = "aeos-receipts-sink"
+        server_version = "aeos-sink"
 
         def log_message(self, fmt: str, *args: Any) -> None:     # quieter default logging
-            sys.stderr.write("aeos-receipts sink: " + (fmt % args) + "\n")
+            sys.stderr.write("aeos sink: " + (fmt % args) + "\n")
 
         def _send(self, code: int, doc: Dict[str, Any]) -> None:
             data = json.dumps(doc).encode()
@@ -139,7 +139,7 @@ def serve(rec: Recorder, host: str, port: int, token: Optional[str],
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, stop)        # stop cleanly under a service manager too
-    print(f"aeos-receipts sink listening on http://{host}:{server.server_port}", file=out)
+    print(f"aeos sink listening on http://{host}:{server.server_port}", file=out)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

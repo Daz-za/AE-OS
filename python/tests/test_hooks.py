@@ -2,8 +2,8 @@ import json
 import subprocess
 import sys
 
-from aeos_receipts import ReceiptLog, Recorder
-from aeos_receipts.hooks import run
+from aeos import ReceiptLog, Recorder
+from aeos.hooks import run
 
 AGENT = "spiffe://acme.example/agent/claude-ap"
 
@@ -57,7 +57,7 @@ def test_hook_refuses_tool_when_it_cannot_record(tmp_path):
 
 def test_hook_command_line(tmp_path):
     ReceiptLog.create(tmp_path / "log")
-    cmd = [sys.executable, "-m", "aeos_receipts", "hook", str(tmp_path / "log"),
+    cmd = [sys.executable, "-m", "aeos", "hook", str(tmp_path / "log"),
            "--agent", AGENT]
     ev = hook("PostToolUseFailure", tool_name="Bash", tool_use_id="tu9", tool_input={},
               error="command failed")

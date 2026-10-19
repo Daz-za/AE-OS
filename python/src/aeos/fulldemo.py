@@ -1,4 +1,4 @@
-"""The architecture walk-through: `aeos-receipts demo --full`.
+"""The architecture walk-through: `aeos demo --full`.
 
 The simple demo shows receipts. This one runs the parts of the AE-OS architecture that
 are built so far, for real, on one computer:
@@ -10,9 +10,9 @@ are built so far, for real, on one computer:
 - an MCP gateway that takes the agent's identity from its certificate, checks the token
   against it, the tool, the amount and the time, and records every call and decision;
 - witnesses that cosign checkpoints and refuse a log that shows them a different history;
-- an end-to-end audit of the evidence (`aeos-receipts audit`).
+- an end-to-end audit of the evidence (`aeos audit`).
 
-It leaves an evidence folder for `aeos-receipts audit`. Private keys go in private/,
+It leaves an evidence folder for `aeos audit`. Private keys go in private/,
 apart from the evidence.
 """
 from __future__ import annotations
@@ -66,7 +66,7 @@ def run(folder: Path, out: Callable[[str], None] = print) -> int:
     folder = Path(folder)
     if folder.exists() and any(folder.iterdir()):
         out(f"{folder} already has files in it. Choose an empty or new folder, for example:\n"
-            f"  aeos-receipts demo --full {folder}-2")
+            f"  aeos demo --full {folder}-2")
         return 2
     step = 0
 
@@ -336,6 +336,6 @@ def run(folder: Path, out: Callable[[str], None] = print) -> int:
     out("\nStill to come in this walk-through: policy as code in a WebAssembly sandbox, "
         "with escalation to a person,\nand a ledger that refuses postings to a closed period.")
     out(f"\nThe evidence is in {folder}; the private keys are in {private}. Try:")
-    out(f"  aeos-receipts audit {folder}")
-    out(f"  aeos-receipts show {folder / 'log'}")
+    out(f"  aeos audit {folder}")
+    out(f"  aeos show {folder / 'log'}")
     return 0 if not problems else 1

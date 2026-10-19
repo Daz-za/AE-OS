@@ -6,8 +6,8 @@ from http.server import ThreadingHTTPServer
 
 import pytest
 
-from aeos_receipts import ReceiptLog, ui
-from aeos_receipts.log import verify_receipt
+from aeos import ReceiptLog, ui
+from aeos.log import verify_receipt
 
 
 @pytest.fixture
@@ -72,7 +72,7 @@ def test_create_and_open_a_log(page, tmp_path):
     state = json.loads(body)
     assert status == 200 and state["status"]["log_id"] == "urn:aeos:acme-ap"
     assert "hooks" in state["next_steps"] and state["status"]["can_sign"]
-    assert (tmp_path / "config" / "aeos-receipts" / "keys" / "acme-ap.key").exists()
+    assert (tmp_path / "config" / "aeos" / "keys" / "acme-ap.key").exists()
 
     assert page("/api/create", {"name": "Acme AP"})[0] == 400        # folder already used
     status, body = page("/api/open", {"folder": str(tmp_path / "acme-ap-log")})

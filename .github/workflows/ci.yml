@@ -42,4 +42,4 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - run: node --test python/src/aeos_receipts/ui/verify.test.mjs
+      - run: node --test python/src/aeos/ui/verify.test.mjs

@@ -1,8 +1,8 @@
 import json
 
-from aeos_receipts import ReceiptLog
-from aeos_receipts import demo, setup, status
-from aeos_receipts.cli import main
+from aeos import ReceiptLog
+from aeos import demo, setup, status
+from aeos.cli import main
 
 
 def test_demo_runs_and_leaves_example_files(tmp_path, capsys):
@@ -26,7 +26,7 @@ def test_setup_with_typed_answers(tmp_path):
     assert log.log_id == "urn:aeos:acme-ap" and log.can_sign
     assert not (tmp_path / "ap-log" / "signing.key").exists()
     hooks = json.loads((tmp_path / "ap-log" / "claude-settings.json").read_text())["hooks"]
-    assert "aeos-receipts hook" in hooks["PreToolUse"][0]["hooks"][0]["command"]
+    assert "aeos hook" in hooks["PreToolUse"][0]["hooks"][0]["command"]
     assert (tmp_path / "ap-log" / "NEXT-STEPS.txt").exists()
     assert (tmp_path / "ap-log" / "public-key.txt").read_text().strip() == log.public_key.hex()
 
@@ -36,7 +36,7 @@ def test_setup_from_options_for_a_gateway(tmp_path, capsys):
                  "--key", str(tmp_path / "k" / "ops.key"), "--mode", "gateway"])
     assert code == 0
     assert (tmp_path / "k" / "ops.sink-token").stat().st_mode & 0o777 == 0o600
-    assert "aeos-receipts sink" in capsys.readouterr().out
+    assert "aeos sink" in capsys.readouterr().out
     assert main(["setup", "--yes", "--log", str(tmp_path / "ops")]) == 2   # already a log
 
 
@@ -61,3 +61,10 @@ def test_empty_log_status_and_missing_record(tmp_path, capsys):
     assert "No records yet" in text and "covered by a signed checkpoint" not in text
     assert main(["receipt", str(tmp_path / "log"), "0", "--key", key]) == 1
     assert "No record 0" in capsys.readouterr().err
+
+
+def test_earlier_name_still_imports():
+    import aeos
+    import aeos_receipts
+    from aeos_receipts.log import ReceiptLog
+    assert ReceiptLog is aeos.log.ReceiptLog and aeos_receipts.ReceiptLog is aeos.ReceiptLog

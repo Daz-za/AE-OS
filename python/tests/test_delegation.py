@@ -5,9 +5,9 @@ import shutil
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from aeos_receipts import ReceiptLog, audit, delegation, fulldemo, identity, keys
-from aeos_receipts.gateway import AgentClient, Gateway
-from aeos_receipts.log import now_ms
+from aeos import ReceiptLog, audit, delegation, fulldemo, identity, keys
+from aeos.gateway import AgentClient, Gateway
+from aeos.log import now_ms
 
 DOMAIN = "acme.example"
 AGENT = f"spiffe://{DOMAIN}/agent/ap"

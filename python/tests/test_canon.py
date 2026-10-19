@@ -1,7 +1,7 @@
 import pytest
 
-from aeos_receipts.canon import (DecodeError, Link, canonical_json, cid_of_bytes, cid_parse,
-                                 cid_str, dag_cbor, decode_dag_cbor)
+from aeos.canon import (DecodeError, Link, canonical_json, cid_of_bytes, cid_parse,
+                        cid_str, dag_cbor, decode_dag_cbor)
 
 
 def test_rfc8949_integer_vectors():

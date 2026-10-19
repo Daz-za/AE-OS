@@ -3,9 +3,9 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "aeos-receipts"
+name = "aeos"
 version = "0.1.0"
-description = "Signed, independently verifiable receipts for AI agent actions (AE-OS)"
+description = "AE-OS building blocks: agent identity, delegated authority, an MCP gateway and signed receipts for AI agent actions"
 readme = "README.md"
 license = "Apache-2.0"
 authors = [{ name = "Darren Lentz" }]
@@ -21,7 +21,8 @@ classifiers = [
 test = ["pytest>=7"]
 
 [project.scripts]
-aeos-receipts = "aeos_receipts.cli:main"
+aeos = "aeos.cli:main"
+aeos-receipts = "aeos.cli:main"   # the earlier name, kept so existing scripts work
 
 [project.urls]
 Homepage = "https://ae-os.org"
@@ -31,7 +32,7 @@ Source = "https://github.com/Daz-za/ae-os"
 where = ["src"]
 
 [tool.setuptools.package-data]
-"aeos_receipts.ui" = ["*.html", "*.css", "*.js"]
+"aeos.ui" = ["*.html", "*.css", "*.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

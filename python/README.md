@@ -1,6 +1,6 @@
-# aeos-receipts
+# aeos
 
-Signed, independently verifiable receipts for AI agent actions. Part of [AE-OS](https://ae-os.org).
+The open-source building blocks of [AE-OS](https://ae-os.org): signed, independently verifiable receipts for AI agent actions, plus a preview of agent identities, delegated authority, an MCP gateway and witnesses.
 
 Every action an agent takes becomes a record in an append-only Merkle log (the structure Certificate Transparency uses). The log operator signs checkpoints. Anyone holding the log's public key can then check, offline, that a given record is in the log and that the log has only grown since a checkpoint they kept earlier.
 
@@ -13,7 +13,9 @@ pipx install "git+https://github.com/Daz-za/ae-os#subdirectory=python"
 pip install -e python          # or, from a clone of this repository
 ```
 
-Then run `aeos-receipts ui` to work in your web browser, or try `aeos-receipts demo` and create a log of your own with `aeos-receipts setup`. The [getting-started guide](../docs/getting-started.md) covers each step for people new to the command line.
+Then run `aeos ui` to work in your web browser, or try `aeos demo` and create a log of your own with `aeos setup`. The [getting-started guide](../docs/getting-started.md) covers each step for people new to the command line.
+
+This package was first called `aeos-receipts`. That command still works and runs the same thing as `aeos`, and `import aeos_receipts` still works too.
 
 Requires Python 3.10 or later, with the `cryptography` and `biscuit-python` packages (installed automatically).
 
@@ -22,15 +24,15 @@ Requires Python 3.10 or later, with the `cryptography` and `biscuit-python` pack
 Put the proxy between the agent and any MCP server that runs over stdio:
 
 ```
-aeos-receipts init ./ap-log --log-id urn:example:acme:ap
-aeos-receipts mcp-proxy ./ap-log \
+aeos init ./ap-log --log-id urn:example:acme:ap
+aeos mcp-proxy ./ap-log \
     --agent spiffe://acme.example/agent/accounts-payable \
     --on-behalf-of spiffe://acme.example/human/controller \
     --allow-tool erp.invoice.read --allow-tool erp.invoice.pay \
     -- python my_erp_mcp_server.py
 ```
 
-Configure the agent to launch the `aeos-receipts mcp-proxy ...` command in place of the server command. The proxy passes messages through unchanged and records a `tool.call` and a `tool.result` for every tool use. With `--allow-tool`, calls to other tools are refused before they reach the server and the refusal is recorded. Records hold SHA-256 digests of arguments and results; add `--store-content` to also keep the full content beside the log.
+Configure the agent to launch the `aeos mcp-proxy ...` command in place of the server command. The proxy passes messages through unchanged and records a `tool.call` and a `tool.result` for every tool use. With `--allow-tool`, calls to other tools are refused before they reach the server and the refusal is recorded. Records hold SHA-256 digests of arguments and results; add `--store-content` to also keep the full content beside the log.
 
 ## Record tool calls from a gateway or agent framework
 
@@ -40,7 +42,7 @@ The MCP proxy above works when the agent talks to its MCP servers over stdio. Fo
 
 ```
 export AEOS_SINK_TOKEN=$(python -c "import secrets; print(secrets.token_hex(24))")
-aeos-receipts sink ./ap-log --agent spiffe://acme.example/gateway/edge-1 --listen 127.0.0.1:4318
+aeos sink ./ap-log --agent spiffe://acme.example/gateway/edge-1 --listen 127.0.0.1:4318
 ```
 
 The sink accepts:
@@ -72,8 +74,8 @@ A `tool.result` may carry `error` in place of `result`, or `result_sha256` (and 
 Gateways that write audit logs to files, and the OpenTelemetry Collector's file exporter, can be recorded after the fact:
 
 ```
-aeos-receipts ingest ./ap-log events.jsonl --agent spiffe://acme.example/gateway/edge-1
-aeos-receipts ingest ./ap-log traces.jsonl --format otlp --agent spiffe://acme.example/gateway/edge-1
+aeos ingest ./ap-log events.jsonl --agent spiffe://acme.example/gateway/edge-1
+aeos ingest ./ap-log traces.jsonl --format otlp --agent spiffe://acme.example/gateway/edge-1
 ```
 
 A call reported again with the same `session_id` and `call_id` is recorded once, so a file can be ingested again safely. `ingest` signs a checkpoint when it finishes.
@@ -85,11 +87,11 @@ Claude Code runs hook commands before and after each tool use. Add this to `.cla
 ```json
 {
   "hooks": {
-    "SessionStart": [{"hooks": [{"type": "command", "command": "aeos-receipts hook ./ap-log --agent spiffe://acme.example/agent/claude-ap --allow-tool mcp__erp__invoice_read"}]}],
-    "PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "aeos-receipts hook ./ap-log --agent spiffe://acme.example/agent/claude-ap --allow-tool mcp__erp__invoice_read"}]}],
-    "PostToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "aeos-receipts hook ./ap-log --agent spiffe://acme.example/agent/claude-ap --allow-tool mcp__erp__invoice_read"}]}],
-    "PostToolUseFailure": [{"matcher": "*", "hooks": [{"type": "command", "command": "aeos-receipts hook ./ap-log --agent spiffe://acme.example/agent/claude-ap --allow-tool mcp__erp__invoice_read"}]}],
-    "SessionEnd": [{"hooks": [{"type": "command", "command": "aeos-receipts hook ./ap-log --agent spiffe://acme.example/agent/claude-ap --allow-tool mcp__erp__invoice_read"}]}]
+    "SessionStart": [{"hooks": [{"type": "command", "command": "aeos hook ./ap-log --agent spiffe://acme.example/agent/claude-ap --allow-tool mcp__erp__invoice_read"}]}],
+    "PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "aeos hook ./ap-log --agent spiffe://acme.example/agent/claude-ap --allow-tool mcp__erp__invoice_read"}]}],
+    "PostToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "aeos hook ./ap-log --agent spiffe://acme.example/agent/claude-ap --allow-tool mcp__erp__invoice_read"}]}],
+    "PostToolUseFailure": [{"matcher": "*", "hooks": [{"type": "command", "command": "aeos hook ./ap-log --agent spiffe://acme.example/agent/claude-ap --allow-tool mcp__erp__invoice_read"}]}],
+    "SessionEnd": [{"hooks": [{"type": "command", "command": "aeos hook ./ap-log --agent spiffe://acme.example/agent/claude-ap --allow-tool mcp__erp__invoice_read"}]}]
   }
 }
 ```
@@ -102,8 +104,8 @@ Agents built with the Claude Agent SDK for Python can call the same handler from
 
 ```python
 from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
-from aeos_receipts import ReceiptLog, Recorder
-from aeos_receipts.hooks import handle
+from aeos import ReceiptLog, Recorder
+from aeos.hooks import handle
 
 rec = Recorder(ReceiptLog.open("ap-log"), agent="spiffe://acme.example/agent/ap",
                allow_tools=["mcp__erp__invoice_read"])
@@ -124,7 +126,7 @@ Call `rec.end(session_id)` when the agent's session finishes, to record it and s
 `Recorder` is the piece all of the above share, and any framework's callbacks can use it:
 
 ```python
-from aeos_receipts import ReceiptLog, Recorder
+from aeos import ReceiptLog, Recorder
 
 rec = Recorder(ReceiptLog.open("ap-log"), agent="spiffe://acme.example/agent/ap")
 call, refusal = rec.call("erp.invoice.pay", call_id="c-17", session_id="s-4",
@@ -136,29 +138,29 @@ rec.end("s-4")
 ## Give an auditor evidence
 
 ```
-aeos-receipts checkpoint ./ap-log                     # sign the current state
-aeos-receipts receipt ./ap-log 12 -o receipt.json     # receipt for record 12
-aeos-receipts verify-receipt receipt.json --public-key <hex>
+aeos checkpoint ./ap-log                     # sign the current state
+aeos receipt ./ap-log 12 -o receipt.json     # receipt for record 12
+aeos verify-receipt receipt.json --public-key <hex>
 
-aeos-receipts consistency ./ap-log --old 40 -o proof.json   # log grew from size 40 without edits
-aeos-receipts verify-consistency proof.json --public-key <hex>
+aeos consistency ./ap-log --old 40 -o proof.json   # log grew from size 40 without edits
+aeos verify-consistency proof.json --public-key <hex>
 
-aeos-receipts verify ./ap-log                         # recompute and check everything
-aeos-receipts show ./ap-log                           # readable records
+aeos verify ./ap-log                         # recompute and check everything
+aeos show ./ap-log                           # readable records
 ```
 
 The auditor should get the public key from a source they trust, not from the files under review.
 
-Auditors who prefer not to install anything can check receipts and growth proofs in a web browser at [ae-os.org/verify](https://ae-os.org/verify). The page runs [`verify.js`](src/aeos_receipts/ui/verify.js), the same checker that `aeos-receipts ui` uses; the files stay on the auditor's device. Its tests (`node --test src/aeos_receipts/ui/verify.test.mjs`) run the shared test vectors.
+Auditors who prefer not to install anything can check receipts and growth proofs in a web browser at [ae-os.org/verify](https://ae-os.org/verify). The page runs [`verify.js`](src/aeos/ui/verify.js), the same checker that `aeos ui` uses; the files stay on the auditor's device. Its tests (`node --test src/aeos/ui/verify.test.mjs`) run the shared test vectors.
 
 ## Work in the web browser
 
-`aeos-receipts ui` opens a page on this computer where you can run the example, create or open a log, look through its records, download receipts, sign checkpoints and check receipts from other logs. It is served only at 127.0.0.1, this computer's own address. Each launch makes a new access code that is part of the address; other websites open in the same browser do not have it and cannot use the page. Use `aeos-receipts ui ./ap-log` to open a log directly, and `--no-browser` to print the address without opening a browser, then open it in a browser on the same computer.
+`aeos ui` opens a page on this computer where you can run the example, create or open a log, look through its records, download receipts, sign checkpoints and check receipts from other logs. It is served only at 127.0.0.1, this computer's own address. Each launch makes a new access code that is part of the address; other websites open in the same browser do not have it and cannot use the page. Use `aeos ui ./ap-log` to open a log directly, and `--no-browser` to print the address without opening a browser, then open it in a browser on the same computer.
 
 ## Use it as a library
 
 ```python
-from aeos_receipts import ReceiptLog, make_record, verify_receipt
+from aeos import ReceiptLog, make_record, verify_receipt
 
 log = ReceiptLog.create("ap-log")
 e = log.append(make_record("tool.call", "spiffe://acme.example/agent/ap",
@@ -171,7 +173,7 @@ assert verify_receipt(receipt, log.public_key) == []
 
 ## Identities, delegated authority, gateway and witnesses (preview)
 
-`aeos-receipts demo --full` runs more of the AE-OS architecture on one computer:
+`aeos demo --full` runs more of the AE-OS architecture on one computer:
 
 - a SPIFFE trust domain issues 15-minute X.509-SVIDs to agents and to an MCP gateway;
 - a person signs an intent envelope (which tools, the limit per payment, the total budget, the expiry), and an authorization service turns it into a [Biscuit](https://www.biscuitsec.org/) capability token bound to the agent's SPIFFE ID; the agent can add checks to hand a narrower token to a helper, and nobody can remove one;
@@ -179,13 +181,13 @@ assert verify_receipt(receipt, log.public_key) == []
 - expired certificates and certificates not issued under the trust bundle's root are refused during the handshake, and an identity without permission for a tool is refused and recorded;
 - two witnesses cosign the log's checkpoint, and a witness refuses a rewritten history.
 
-It leaves an evidence folder that `aeos-receipts audit FOLDER` checks from end to end. The audit replays every authorization decision from the token and the signed intent. The modules are `identity`, `delegation`, `gateway`, `witness` and `audit`; the formats are in [spec/identity-and-witnesses-draft.md](../spec/identity-and-witnesses-draft.md). The local trust domain stands in for SPIRE and does no machine or workload attestation.
+It leaves an evidence folder that `aeos audit FOLDER` checks from end to end. The audit replays every authorization decision from the token and the signed intent. The modules are `identity`, `delegation`, `gateway`, `witness` and `audit`; the formats are in [spec/identity-and-witnesses-draft.md](../spec/identity-and-witnesses-draft.md). The local trust domain stands in for SPIRE and does no machine or workload attestation.
 
 ## Status and limits
 
 Version 0.1 is an early release for evaluation.
 
 - The signing key is a file. Keep it outside the log directory (`--key`) and away from the agent; hardware or KMS keys are planned.
-- The whole log is held in memory and hashed on load, which suits logs up to a few hundred thousand records. Each `aeos-receipts hook` call loads the log, so start a new log per agent or per period when a single log grows large.
+- The whole log is held in memory and hashed on load, which suits logs up to a few hundred thousand records. Each `aeos hook` call loads the log, so start a new log per agent or per period when a single log grows large.
 - A receipt proves a record is in the log. Whether the log is complete depends on the agent being able to reach its tools only through a recorded path: the proxy, a gateway that reports to the sink, or the hook.
 - The gateway meters each intent's total budget in its own memory: a restart resets it, and several gateways do not share it.

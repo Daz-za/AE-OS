@@ -93,7 +93,7 @@ A checkpoint is final for an auditor when at least k of the n witnesses the audi
 
 ## 5. Evidence folder
 
-`aeos-receipts audit` checks a folder described by `evidence.json`:
+`aeos audit` checks a folder described by `evidence.json`:
 
 ```json
 {"format": "aeos-evidence/v0", "trust_domain": "acme.example", "bundle": "trust/bundle.pem",

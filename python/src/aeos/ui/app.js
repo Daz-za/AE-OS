@@ -1,4 +1,4 @@
-// The local page for `aeos-receipts ui`. Talks to the server in ui/__init__.py.
+// The local page for `aeos ui`. Talks to the server in ui/__init__.py.
 import { KINDS, mountCheck, recordDetails, when } from "./check.js";
 
 const code = new URLSearchParams(location.hash.slice(1)).get("code") || sessionStorage.getItem("aeos-code") || "";
