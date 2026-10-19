@@ -10,9 +10,16 @@ match the records to the certificate the agent presented.
 
 Connections without a valid SVID from the trust domain fail during the TLS handshake,
 before any request is read.
+
+With an authority key, the gateway also requires a capability token (in the
+`AEOS-Capability` header) on every tool call, and checks it with facts it knows itself:
+the SPIFFE ID from the connection, the tool, the call's amount and the time. It records
+each decision as a `policy.decision` linked to the call, with the intent the token is
+bound to, and meters each intent's total budget (see delegation.py).
 """
 from __future__ import annotations
 
+import base64
 import http.client
 import json
 import secrets
@@ -22,8 +29,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
-from . import identity
-from .log import ReceiptLog
+from . import delegation, identity
+from .log import ReceiptLog, now_ms
 from .recorder import Recorder
 
 Tool = Callable[[Dict[str, Any]], Any]
@@ -33,20 +40,31 @@ PROTOCOL_VERSION = "2025-06-18"
 class Gateway:
     """Route authenticated tool calls to tools and record them.
 
-    tools        tool name -> function taking the call's arguments
-    permissions  SPIFFE ID -> tool names it may call; other identities may call nothing
+    tools           tool name -> function taking the call's arguments
+    permissions     SPIFFE ID -> tool names it may call; other identities may call nothing
+    authority_key   when set, every tool call needs a capability token signed by this key
+    intents         the signed intent envelopes tokens may be bound to, by CID
+    principal_keys  each person's public key, by SPIFFE ID, to check envelope signatures
     """
 
     def __init__(self, log: ReceiptLog, tools: Dict[str, Tool], *,
                  permissions: Dict[str, Iterable[str]], trust_domain: str,
                  svid_files: Tuple[Path, Path], bundle_file: Path,
-                 on_behalf_of: Optional[Dict[str, str]] = None) -> None:
+                 on_behalf_of: Optional[Dict[str, str]] = None,
+                 authority_key: Optional[bytes] = None,
+                 intents: Optional[Dict[str, delegation.IntentEnvelope]] = None,
+                 principal_keys: Optional[Dict[str, bytes]] = None) -> None:
         self.log, self.tools, self.trust_domain = log, tools, trust_domain
         self.permissions = {k: set(v) for k, v in permissions.items()}
         self.obo = on_behalf_of or {}
         self.context = identity.server_context(svid_files, bundle_file)
         self._recorders: Dict[str, Recorder] = {}
         self._sessions: Dict[str, Tuple[str, str]] = {}   # MCP session -> (SPIFFE ID, SVID)
+        self.authority_key = authority_key
+        self.intents = dict(intents or {})
+        self.principal_keys = dict(principal_keys or {})
+        self.budget = delegation.Budget()
+        self.tokens: Dict[str, bytes] = {}                 # SHA-256 hex -> token presented
         self._lock = threading.Lock()
         self.server: Optional[ThreadingHTTPServer] = None
 
@@ -59,15 +77,18 @@ class Gateway:
             return self._recorders[spiffe_id]
 
     def handle(self, peer: str, svid_sha256: str, session: Optional[str],
-               msg: Dict[str, Any]) -> Tuple[Dict[str, Any], Optional[str]]:
+               msg: Dict[str, Any], token: Optional[str] = None
+               ) -> Tuple[Dict[str, Any], Optional[str]]:
         """Answer one JSON-RPC request from an authenticated peer."""
         method, rid = msg.get("method"), msg.get("id")
         if method == "initialize":
             session = secrets.token_hex(8)
             self._sessions[session] = (peer, svid_sha256)
-            self.recorder(peer).session(session, subject="mcp", extra={
-                "svid_sha256": bytes.fromhex(svid_sha256), "authenticated_by": "x509-svid-mtls",
-                "trust_domain": self.trust_domain})
+            extra = {"svid_sha256": bytes.fromhex(svid_sha256),
+                     "authenticated_by": "x509-svid-mtls", "trust_domain": self.trust_domain}
+            if self.authority_key is not None:
+                extra["authorization"] = delegation.POLICY
+            self.recorder(peer).session(session, subject="mcp", extra=extra)
             return _ok(rid, {"protocolVersion": PROTOCOL_VERSION, "capabilities": {"tools": {}},
                              "serverInfo": {"name": "aeos-gateway", "version": "0.1"}}), session
         known = self._sessions.get(session or "")
@@ -84,19 +105,69 @@ class Gateway:
         name, args = params.get("name"), params.get("arguments") or {}
         rec = self.recorder(peer)
         call_id = str(rid)
-        _, refusal = rec.call(name, call_id=call_id, session_id=session, arguments=args)
-        if refusal:
-            return _ok(rid, {"isError": True, "content": [{"type": "text", "text":
-                       f"Refused: {peer} may not use {name}"}]}), session
+        at = now_ms()
+        cap = self._authorize(peer, name, args, token, at) \
+            if self.authority_key is not None else None
+        entry, refusal = rec.call(name, call_id=call_id, session_id=session, arguments=args,
+                                  on_behalf_of=cap["principal"] if cap else None, ts=at)
+        reserved = cap["envelope"] if cap and cap["allowed"] else None
+        reasons = [f"{peer} may not use {name}"] if refusal else []
+        if cap:                                     # each check's outcome is recorded
+            rec.decision(entry, name, decision="allow" if cap["allowed"] else "deny",
+                         policy=delegation.POLICY, body=cap["body"],
+                         on_behalf_of=cap["principal"], ts=at)
+            reasons += cap["body"]["reasons"]
+        if reasons:
+            if reserved is not None:
+                self.budget.release(reserved, cap["body"]["amount"])
+            return _refused(rid, "; ".join(reasons)), session
+        obo = cap["principal"] if cap else None
         try:
             out = self.tools[name](args)
         except Exception as e:                      # the tool's failure is the agent's answer
-            rec.result(call_id, session_id=session, error={"message": str(e)})
+            if reserved is not None:                  # a call that did not run spends nothing
+                self.budget.release(reserved, cap["body"]["amount"])
+            rec.result(call_id, session_id=session, error={"message": str(e)}, on_behalf_of=obo)
             return _ok(rid, {"isError": True, "content": [{"type": "text", "text": str(e)}]}), \
                 session
-        rec.result(call_id, session_id=session, result=out)
+        rec.result(call_id, session_id=session, result=out, on_behalf_of=obo)
         return _ok(rid, {"content": [{"type": "text", "text": json.dumps(out)}],
                          "structuredContent": out}), session
+
+    def _authorize(self, peer: str, tool: str, args: Dict[str, Any], token: Optional[str],
+                   at: int) -> Dict[str, Any]:
+        """Check a tool call's capability token; the decision and what to record."""
+        amount = delegation.call_amount(args)
+        body: Dict[str, Any] = {"amount": amount, "reasons": []}
+        raw = delegation.parse_token(token) if token else None
+        envelope, principal = None, None
+        if not raw:
+            body["reasons"] = ["no readable capability token was presented"]
+        elif amount < 0:
+            body["reasons"] = ["the amount is not a whole, non-negative number of minor units"]
+        else:
+            sha = delegation.token_sha256(raw)
+            body["token_sha256"] = sha
+            with self._lock:
+                self.tokens[sha.hex()] = raw
+            d = delegation.authorize(raw, self.authority_key or b"", subject=peer, tool=tool,
+                                     amount=amount, at=at)
+            body["reasons"] = list(d.reasons)
+            if d.intent:
+                body["intent"] = d.intent
+                envelope = self.intents.get(d.intent)
+            if d.allowed:
+                if envelope is None:
+                    body["reasons"] = ["the token's intent is not one this gateway holds"]
+                elif not envelope.verify(self.principal_keys.get(envelope.principal, b"")):
+                    body["reasons"] = ["the intent's signature does not verify"]
+                else:
+                    principal = envelope.principal
+                    over = self.budget.reserve(envelope, amount)
+                    if over:
+                        body["reasons"] = [over]
+        return {"allowed": not body["reasons"], "body": body, "envelope": envelope,
+                "principal": principal}
 
     def end(self, session: str) -> None:
         known = self._sessions.pop(session, None)
@@ -127,7 +198,8 @@ class Gateway:
                 if self.path != "/mcp" or not isinstance(msg, dict):
                     self._send(404, _err(None, -32600, "invalid request"), None)
                     return
-                reply, session = gw.handle(peer, fp, self.headers.get("Mcp-Session-Id"), msg)
+                reply, session = gw.handle(peer, fp, self.headers.get("Mcp-Session-Id"), msg,
+                                           self.headers.get("AEOS-Capability"))
                 self._send(200, reply, session)
 
             def do_DELETE(self) -> None:
@@ -168,6 +240,10 @@ def _ok(rid: Any, result: Dict[str, Any]) -> Dict[str, Any]:
     return {"jsonrpc": "2.0", "id": rid, "result": result}
 
 
+def _refused(rid: Any, why: str) -> Dict[str, Any]:
+    return _ok(rid, {"isError": True, "content": [{"type": "text", "text": f"Refused: {why}"}]})
+
+
 def _err(rid: Any, code: int, message: str) -> Dict[str, Any]:
     return {"jsonrpc": "2.0", "id": rid, "error": {"code": code, "message": message}}
 
@@ -176,11 +252,13 @@ class AgentClient:
     """An agent's MCP client: connects with its SVID and checks the gateway's SPIFFE ID."""
 
     def __init__(self, port: int, svid_files: Tuple[Path, Path], bundle_file: Path, *,
-                 gateway_id: str, trust_domain: str, host: str = "127.0.0.1") -> None:
+                 gateway_id: str, trust_domain: str, host: str = "127.0.0.1",
+                 token: Optional[bytes] = None) -> None:
         self.host, self.port = host, port
         self.context = identity.client_context(svid_files, bundle_file)
         self.gateway_id, self.trust_domain = gateway_id, trust_domain
         self.session: Optional[str] = None
+        self.token = token                      # capability token sent with each request
         self._next = 0
 
     def _post(self, method: str, params: Optional[Dict[str, Any]] = None,
@@ -197,6 +275,8 @@ class AgentClient:
             headers = {"Content-Type": "application/json", "Accept": "application/json"}
             if self.session:
                 headers["Mcp-Session-Id"] = self.session
+            if self.token:
+                headers["AEOS-Capability"] = base64.urlsafe_b64encode(self.token).decode()
             conn.request(http_method, "/mcp", body=body, headers=headers)
             res = conn.getresponse()
             data = res.read()

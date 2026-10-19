@@ -15,7 +15,7 @@ pip install -e python          # or, from a clone of this repository
 
 Then run `aeos-receipts ui` to work in your web browser, or try `aeos-receipts demo` and create a log of your own with `aeos-receipts setup`. The [getting-started guide](../docs/getting-started.md) covers each step for people new to the command line.
 
-Requires Python 3.9 or later and the `cryptography` package.
+Requires Python 3.10 or later, with the `cryptography` and `biscuit-python` packages (installed automatically).
 
 ## Record an agent's MCP tool calls
 
@@ -169,16 +169,17 @@ assert verify_receipt(receipt, log.public_key) == []
 
 `examples/invoice_demo.py` walks through an escalated invoice payment, the auditor's checks and a tampering attempt.
 
-## Identities, gateway and witnesses (preview)
+## Identities, delegated authority, gateway and witnesses (preview)
 
 `aeos-receipts demo --full` runs more of the AE-OS architecture on one computer:
 
 - a SPIFFE trust domain issues 15-minute X.509-SVIDs to agents and to an MCP gateway;
-- the agent and the gateway authenticate each other over mutual TLS, and the gateway records every call under the identity in the agent's certificate;
+- a person signs an intent envelope (which tools, the limit per payment, the total budget, the expiry), and an authorization service turns it into a [Biscuit](https://www.biscuitsec.org/) capability token bound to the agent's SPIFFE ID; the agent can add checks to hand a narrower token to a helper, and nobody can remove one;
+- the agent and the gateway authenticate each other over mutual TLS; the gateway checks the token against the identity in the agent's certificate, the tool, the amount and the time, meters the intent's budget, and records every call and decision;
 - expired certificates and certificates not issued under the trust bundle's root are refused during the handshake, and an identity without permission for a tool is refused and recorded;
 - two witnesses cosign the log's checkpoint, and a witness refuses a rewritten history.
 
-It leaves an evidence folder that `aeos-receipts audit FOLDER` checks from end to end. The modules are `identity`, `gateway`, `witness` and `audit`; the formats are in [spec/identity-and-witnesses-draft.md](../spec/identity-and-witnesses-draft.md). The local trust domain stands in for SPIRE and does no machine or workload attestation.
+It leaves an evidence folder that `aeos-receipts audit FOLDER` checks from end to end. The audit replays every authorization decision from the token and the signed intent. The modules are `identity`, `delegation`, `gateway`, `witness` and `audit`; the formats are in [spec/identity-and-witnesses-draft.md](../spec/identity-and-witnesses-draft.md). The local trust domain stands in for SPIRE and does no machine or workload attestation.
 
 ## Status and limits
 
@@ -187,3 +188,4 @@ Version 0.1 is an early release for evaluation.
 - The signing key is a file. Keep it outside the log directory (`--key`) and away from the agent; hardware or KMS keys are planned.
 - The whole log is held in memory and hashed on load, which suits logs up to a few hundred thousand records. Each `aeos-receipts hook` call loads the log, so start a new log per agent or per period when a single log grows large.
 - A receipt proves a record is in the log. Whether the log is complete depends on the agent being able to reach its tools only through a recorded path: the proxy, a gateway that reports to the sink, or the hook.
+- The gateway meters each intent's total budget in its own memory: a restart resets it, and several gateways do not share it.

@@ -9,8 +9,8 @@ description = "Signed, independently verifiable receipts for AI agent actions (A
 readme = "README.md"
 license = "Apache-2.0"
 authors = [{ name = "Darren Lentz" }]
-requires-python = ">=3.9"
-dependencies = ["cryptography>=42"]
+requires-python = ">=3.10"
+dependencies = ["cryptography>=42", "biscuit-python>=0.4"]
 classifiers = [
   "Programming Language :: Python :: 3",
   "Topic :: Security :: Cryptography",

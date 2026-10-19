@@ -24,8 +24,10 @@ MEANING = {
             "copy of the folder as it is now, and compare it with a backup or with "
             "receipts issued earlier."),
     "audit": ("Every record is unchanged; each session record names a certificate that was "
-              "valid, at that time, for the identity the session was recorded under; and the "
-              "required number of trusted witnesses cosigned the latest checkpoint.",
+              "valid, at that time, for the identity the session was recorded under; where the "
+              "gateway required capability tokens, each decision gives the recorded answer "
+              "when replayed from the token and the signed intent, and every call that ran "
+              "had an allow decision; and the required number of trusted witnesses cosigned the latest checkpoint.",
               "Do not rely on this evidence until each problem listed is explained. Keep a "
               "copy of the folder as it is now."),
 }

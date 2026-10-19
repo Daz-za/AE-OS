@@ -136,6 +136,15 @@ class Recorder:
                                    "reasons": [reason]}, parents=[e.cid], ts=ts)
             return e, reason
 
+    def decision(self, call: Entry, tool: str, *, decision: str, policy: str,
+                 body: Optional[Dict[str, Any]] = None, agent: Optional[str] = None,
+                 on_behalf_of: Optional[str] = None, ts: Optional[int] = None) -> Entry:
+        """Record a policy decision about a call, linked to the call's record."""
+        with self._lock:
+            return self._append("policy.decision", agent=agent, obo=on_behalf_of, subject=tool,
+                                body={"decision": decision, "policy": policy, **(body or {})},
+                                parents=[call.cid], ts=ts)
+
     def _refusal(self, tool: str) -> Optional[str]:
         if self.allow is not None and tool not in self.allow:
             return "tool-not-in-allow-list"

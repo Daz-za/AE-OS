@@ -132,7 +132,7 @@ def test_full_demo_leaves_evidence_that_audits_clean_and_catches_changes(tmp_pat
     out = []
     folder = tmp_path / "full"
     assert fulldemo.run(folder, out=out.append) == 0
-    text = "\n".join(out)
+    text = " ".join("\n".join(out).split())          # undo line wrapping
     assert "has expired" in text and "not issued by a trusted authority" in text
     assert "split view" in text and "Result: VALID" in text
     assert audit.run(folder)[1] == []
