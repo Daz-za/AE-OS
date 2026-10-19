@@ -17,4 +17,4 @@ To rebuild `python/src/aeos/policies/payments.wasm` after changing the rules, in
 policy/build.sh
 ```
 
-CI runs `policy/build.sh --check` with a pinned OPA version, which fails if the committed module differs from a fresh build. The audit names each module by the SHA-256 of its bytes, so a changed module is a different policy.
+`policy/build.sh --check` fails if the committed module differs from a fresh build; CI runs it with a pinned OPA version. The log and the audit name each module by the SHA-256 of its bytes, and a module built from changed rules has a different name.

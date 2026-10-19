@@ -52,11 +52,11 @@ To authorize a call, the gateway supplies the facts `subject` (the SPIFFE ID fro
 
 ## 3. Policy and approvals
 
-A policy is written in Rego and compiled with `opa build -t wasm -e <entrypoint>` (OPA WebAssembly ABI 1.2 or later). The module must need no host built-in functions. The gateway runs it with wasmtime, with no imports other than memory and the abort and built-in hooks, a memory limit of 16 MiB and an instruction (fuel) limit per decision. The entrypoint returns `{"decision": "allow" | "deny" | "escalate", "reasons": [...]}`.
+A policy is written in Rego and compiled with `opa build -t wasm -e <entrypoint>` (OPA WebAssembly ABI 1.2 or later). The gateway refuses a module that lists any host built-in function. The gateway runs it with wasmtime in a new instance for each decision. The module may import only its memory (4 MiB, growing to at most 16 MiB), `opa_abort` and `opa_builtin0`–`opa_builtin4`, and the built-in hooks refuse every call. Each decision may use at most 50,000,000 units of wasmtime fuel, roughly one per instruction. The entrypoint returns `{"decision": "allow" | "deny" | "escalate", "reasons": [...]}`.
 
-The input is `{"tool", "agent", "principal", "arguments"}`, plus facts the gateway looks up for the call (the example policy uses `invoice`) and, when the agent repeats an escalated call, `approval` as `{"approver", "decision"}`. The policy's data (thresholds, lists) is fixed when the gateway starts. The example policy is `policy/payments.rego`; `policy/build.sh` rebuilds `python/src/aeos/policies/payments.wasm`, and CI checks that the committed module matches a build with a pinned OPA version.
+The input is `{"tool", "agent", "principal", "arguments"}`, plus facts the gateway looks up for the call (the example policy uses `invoice`) and, when the agent repeats an escalated call, `approval` as `{"approver", "decision"}`. The policy's data (thresholds, lists) is loaded with the module when the gateway is created, and every decision records its SHA-256. The example policy is `policy/payments.rego`; `policy/build.sh` rebuilds `python/src/aeos/policies/payments.wasm`, and CI checks that the committed module matches a build with a pinned OPA version.
 
-A call the policy escalates waits for a person. The person signs an **approval**, the DAG-CBOR map
+The gateway does not run a call the policy escalates. It answers with the escalation's CID, and the agent repeats the call with a person's signed approval. The person signs an **approval**, the DAG-CBOR map
 
 | Field | Meaning |
 |---|---|
@@ -67,7 +67,7 @@ A call the policy escalates waits for a person. The person signs an **approval**
 | `args_sha256` | the escalated call's `args_sha256` |
 | `time` | milliseconds since the Unix epoch |
 
-with Ed25519 over `"aeos/approval/v0\n" || DAG-CBOR(approval)`. The agent repeats the call with the approval as base64url JSON in the `AEOS-Approval` header. The gateway checks that the approval answers an open escalation for the same agent, tool and arguments and that its signature verifies against the approver's key, records it as an `approval` record (agent = the approver, parents = the escalation and the new call, body = the fields above plus `signature`), and runs the policy with `approval` in the input. The escalation closes when the policy then allows the call or the person rejected it.
+with Ed25519 over `"aeos/approval/v0\n" || DAG-CBOR(approval)`. The agent repeats the call with the approval as base64url JSON in the `AEOS-Approval` header. The gateway checks that the approval answers an open escalation for the same agent, tool and arguments and that its signature verifies against the approver's key, records it as an `approval` record (agent = the approver, parents = the escalation and the new call, body = the fields above plus `signature`), and runs the policy with `approval` in the input. The escalation closes when the policy allows the repeated call. A signed rejection is recorded and the call is refused; the escalation stays open, so an approver can still decide.
 
 ## 4. Gateway
 
@@ -139,6 +139,8 @@ An auditor should pass the trust bundle, the log's public key, the witness keys,
 ## 7. Not yet covered
 
 - A shared, durable budget: the preview keeps it in one gateway's memory, so a restart resets it and gateways do not share it.
+- Durable escalations: open escalations are kept in one gateway's memory, so a restart discards them. Approvals carry a time but no expiry.
+- Checking the facts a policy decided on: the audit replays each decision on the recorded invoice facts and does not check them against the ERP.
 - Revocation of tokens before they expire (Biscuit revocation IDs are not yet checked).
 - Agent manifests (APOs) that pin each tool's definition digest.
 - Host built-in functions for policies (time, cryptography, network lookups), and policy data that changes while the gateway runs.

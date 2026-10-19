@@ -221,7 +221,7 @@ def _check_policies(log: ReceiptLog, folder: Path, principal_keys: Dict[str, byt
            and r["parents"] and r["body"].get("outcome") != "error"}
     governed = {cid_str(e.cid) for e, r in records if r["kind"] == "session.start"
                 and "policy_sha256" in r["body"]}
-    allowed, counts, before, approvals = set(), {}, len(problems), 0
+    allowed, counts, before, approvals, early = set(), {}, len(problems), 0, 0
     for e, rec in records:
         body = rec["body"]
         if rec["kind"] == "approval":
@@ -234,6 +234,7 @@ def _check_policies(log: ReceiptLog, folder: Path, principal_keys: Dict[str, byt
         recorded = body.get("decision")
         counts[recorded] = counts.get(recorded, 0) + 1
         if "input_json" not in body:                # refused before the policy ran
+            early += 1
             if recorded != "deny":
                 problems.append(f"record {e.index}: a decision without its input must be deny")
             continue
@@ -258,11 +259,18 @@ def _check_policies(log: ReceiptLog, folder: Path, principal_keys: Dict[str, byt
                 cid_str(rec["parents"][0]) in governed and call in ran and call not in allowed:
             problems.append(f"record {e.index}: the call ran without the policy's allow")
     n = sum(counts.values())
-    findings.append(f"Each of the {n} policy decisions ({counts.get('allow', 0)} allowed, "
-                    f"{counts.get('escalate', 0)} escalated, {counts.get('deny', 0)} refused) "
-                    "gives the recorded answer when the same compiled policy runs again on the "
-                    f"recorded input, and each of the {approvals} approvals is signed by its "
-                    "approver and answers an escalated call"
+    tally = (f"{counts.get('allow', 0)} allowed, {counts.get('escalate', 0)} escalated, "
+             f"{counts.get('deny', 0)} refused")
+    findings.append((f"Each of the {n} policy decisions ({tally})" if not early else
+                     f"Of the {n} policy decisions ({tally}), each of the {n - early} the "
+                     "policy made")
+                    + " gives the recorded answer when the same compiled policy runs again on "
+                    "the recorded input"
+                    + (f", and the {early} refusals made before the policy ran are deny, as "
+                       "required" if early else "")
+                    + f"; each of the {approvals} approvals is signed by its approver and "
+                    "answers an escalation of the same call, and every call that ran had the "
+                    "policy's allow"
                     + ("" if len(problems) == before else " (except as listed below)"))
 
 

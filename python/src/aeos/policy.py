@@ -41,7 +41,7 @@ class Policy:
     """One compiled policy module with its data, ready to make decisions."""
 
     def __init__(self, wasm: bytes, data: Dict[str, Any], entrypoint: str) -> None:
-        self.wasm, self.data, self.entrypoint = wasm, data, entrypoint
+        self.wasm, self.data, self.entrypoint = wasm, json.loads(json.dumps(data)), entrypoint
         self.sha256 = policy_sha256(wasm)
         self.data_sha256 = data_sha256(data)
         config = wasmtime.Config()
@@ -74,6 +74,10 @@ class Policy:
         for n in range(5):
             imports[f"opa_builtin{n}"] = wasmtime.Func(
                 store, wasmtime.FuncType([i32] * (n + 2), [i32]), builtin)
+        unknown = sorted({i.name for i in self._module.imports} - set(imports))
+        if unknown:
+            raise PolicyError("the policy needs functions this host does not offer: "
+                              + ", ".join(unknown))
         ordered = [imports[i.name] for i in self._module.imports]
         instance = wasmtime.Instance(store, self._module, ordered)
         return store, instance.exports(store), memory

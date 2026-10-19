@@ -18,10 +18,10 @@ each decision as a `policy.decision` linked to the call, with the intent the tok
 bound to, and meters each intent's total budget (see delegation.py).
 
 With a policy, the gateway then runs a Rego policy compiled to WebAssembly on each call
-(see policy.py) and records its decision with the exact input it saw. A call the policy
-escalates waits for a person: the agent repeats it with that person's signed approval in
-the `AEOS-Approval` header, and the gateway records the approval before asking the
-policy again.
+(see policy.py) and records its decision with the exact input it saw. The gateway does
+not run a call the policy escalates. It answers with the escalation's CID, and the agent
+repeats the call with a person's signed approval in the `AEOS-Approval` header; the
+gateway records the approval before asking the policy again.
 """
 from __future__ import annotations
 
@@ -178,7 +178,7 @@ class Gateway:
             d = self.policy.evaluate(doc)
         except policy_mod.PolicyError as e:
             d = {"decision": "deny", "reasons": [str(e)]}
-        if approval and (d["decision"] == "allow" or doc["approval"]["decision"] == "reject"):
+        if approval and d["decision"] == "allow":
             with self._lock:                          # the escalation is settled
                 self.escalations.pop(escalation, None)
         entry = rec.decision(call, tool, decision=d["decision"], policy=policy_mod.POLICY,
@@ -198,7 +198,8 @@ class Gateway:
         return _ok(rid, {"isError": True, "structuredContent": {
             "escalation": escalation, "reasons": d["reasons"]},
             "content": [{"type": "text", "text": "Escalated: " + "; ".join(d["reasons"])
-                         + f". Repeat the call with a person's signed approval of {escalation}."}]})
+                         + f". Repeat the call with an approval of escalation {escalation}, "
+                         "signed by an approver."}]})
 
     def _approval(self, rec: Recorder, call: Any, text: str, peer: str, tool: str,
                   args: Dict[str, Any], at: int) -> Tuple[Dict[str, Any], Optional[str]]:

@@ -167,11 +167,12 @@ def run(folder: Path, out: Callable[[str], None] = print) -> int:
     say("Acme's payment rules are loaded into the gateway",
         "The rules are written in Rego, the policy language of Open Policy Agent "
         "(policy/payments.rego), and compiled to WebAssembly (module "
-        f"{rules.sha256.hex()[:16]}…). A payment must match an approved invoice and must "
+        f"{rules.sha256.hex()[:16]}…). A payment must match an invoice approved for payment, for the "
+        "invoice's amount, and must "
         "not go to a supplier on the sanctions list. A payment above USD 5,000.00 needs "
         "the approval of someone on the approvers list, other than the person who "
         "authorized the agent. The gateway runs the module in a sandbox that can read only "
-        "the call and the rules' data, with limits on memory and on the work done per "
+        "the call, the invoice it names and the rules' data, with limits on memory and on the work done per "
         "decision.")
 
     log = ReceiptLog.create(folder / "log", log_id="urn:example:acme:accounts-payable",
@@ -228,11 +229,12 @@ def run(folder: Path, out: Callable[[str], None] = print) -> int:
                                                                       controller_key))
         done = agent.call("erp.invoice.pay", big_args, approval=answer(CFO, cfo_key))
         payment2 = done["result"]["structuredContent"]["payment"]
-        say("A large payment waits for a person",
+        say("A large payment needs a person's approval",
             "The agent tries to pay invoice INV-20457 for USD 7,800.00. The token allows it, "
-            "but the rules escalate it: payments above the threshold need a person's "
-            "approval. The controller, who authorized the agent, signs an approval and is "
-            f"refused: {refusal(own)}. The CFO then signs an approval of that exact call "
+            "but the rules escalate it and the gateway does not run it: "
+            f"{big['structuredContent']['reasons'][0]}. The controller, who authorized the "
+            "agent, signs an approval, and the gateway refuses the call: "
+            f"{refusal(own)}. The CFO then signs an approval of that exact call "
             "(the invoice and amount), the agent repeats the call with it, and the payment "
             f"goes through (payment {payment2}). The escalation, each approval and each "
             "decision are recorded, with the exact input the rules saw.")

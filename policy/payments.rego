@@ -29,12 +29,12 @@ deny_reasons contains "the supplier is on the sanctions list" if {
 	input.invoice.vendor in data.sanctioned_vendors
 }
 
-deny_reasons contains "the amount differs from the invoice" if {
+deny_reasons contains "the amount differs from the invoice amount" if {
 	payment
 	amount != input.invoice.amount_minor
 }
 
-deny_reasons contains "the approver may not approve their own request" if {
+deny_reasons contains "the approver authorized the agent and may not approve its payments" if {
 	payment
 	input.approval.approver == input.principal
 }
@@ -61,7 +61,7 @@ default decision := {"decision": "allow", "reasons": []}
 
 decision := {"decision": "deny", "reasons": sort(deny_reasons)} if count(deny_reasons) > 0
 
-decision := {"decision": "escalate", "reasons": ["payments above the threshold need a person's approval"]} if {
+decision := {"decision": "escalate", "reasons": ["payments above the threshold need approval from someone on the approvers list"]} if {
 	count(deny_reasons) == 0
 	needs_approval
 	not approved

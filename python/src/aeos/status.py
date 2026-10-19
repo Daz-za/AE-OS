@@ -28,7 +28,9 @@ MEANING = {
               "gateway required capability tokens, each decision gives the recorded answer "
               "when replayed from the token and the signed intent, and every call that ran "
               "had an allow decision; where it ran a policy, each decision gives the recorded "
-              "answer when the policy runs again and each approval is signed by its approver; "
+              "answer when the same module runs again on the recorded input, each approval "
+              "is signed by its approver and answers an escalation of the same call, and "
+              "every call that ran had the policy's allow; "
               "and the required number of trusted witnesses cosigned the latest checkpoint.",
               "Do not rely on this evidence until each problem listed is explained. Keep a "
               "copy of the folder as it is now."),

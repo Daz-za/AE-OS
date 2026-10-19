@@ -179,10 +179,10 @@ assert verify_receipt(receipt, log.public_key) == []
 - a person signs an intent envelope (which tools, the limit per payment, the total budget, the expiry), and an authorization service turns it into a [Biscuit](https://www.biscuitsec.org/) capability token bound to the agent's SPIFFE ID; the agent can add checks to hand a narrower token to a helper, and nobody can remove one;
 - the agent and the gateway authenticate each other over mutual TLS; the gateway checks the token against the identity in the agent's certificate, the tool, the amount and the time, meters the intent's budget, and records every call and decision;
 - expired certificates and certificates not issued under the trust bundle's root are refused during the handshake, and an identity without permission for a tool is refused and recorded;
-- payment rules written in Rego (`policy/payments.rego`) and compiled to WebAssembly run in a wasmtime sandbox on every call; a payment above the threshold waits for a person's signed approval, and the person who authorized the agent may not approve it;
+- payment rules written in Rego (`policy/payments.rego`) and compiled to WebAssembly run in a wasmtime sandbox on every call that passes the identity and token checks; a payment above the threshold runs only when the agent repeats it with an approver's signed approval, and the person who authorized the agent may not approve it;
 - two witnesses cosign the log's checkpoint, and a witness refuses a rewritten history.
 
-It leaves an evidence folder that `aeos audit FOLDER` checks from end to end. The audit replays every authorization decision from the token and the signed intent. The audit also runs the same compiled policy on each recorded input. The modules are `identity`, `delegation`, `policy`, `gateway`, `witness` and `audit`; the formats are in [spec/identity-and-witnesses-draft.md](../spec/identity-and-witnesses-draft.md). The local trust domain stands in for SPIRE and does no machine or workload attestation.
+It leaves an evidence folder that `aeos audit FOLDER` checks from end to end. The audit replays every authorization decision from the token and the signed intent, and runs the same compiled policy again on each recorded input. The modules are `identity`, `delegation`, `policy`, `gateway`, `witness` and `audit`; the formats are in [spec/identity-and-witnesses-draft.md](../spec/identity-and-witnesses-draft.md). The local trust domain stands in for SPIRE and does no machine or workload attestation.
 
 ## Status and limits
 

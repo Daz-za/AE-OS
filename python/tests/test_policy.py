@@ -43,12 +43,12 @@ def test_payment_rules(rules):
         == "allow"
     own = ev(pay("I2", 900, approval={"approver": PERSON, "decision": "approve"}))
     assert own["decision"] == "deny" and \
-        "the approver may not approve their own request" in own["reasons"]
+        "the approver authorized the agent and may not approve its payments" in own["reasons"]
     assert ev(pay("I2", 900, approval={"approver": CFO, "decision": "reject"}))["reasons"] \
         == ["a person rejected this payment"]
     assert ev(pay("I3", 50))["reasons"] == ["the supplier is on the sanctions list"]
     assert ev(pay("I4", 50))["reasons"] == ["the invoice is not approved for payment"]
-    assert ev(pay("I1", 99))["reasons"] == ["the amount differs from the invoice"]
+    assert ev(pay("I1", 99))["reasons"] == ["the amount differs from the invoice amount"]
     assert ev(pay("NOPE", 1))["reasons"] == ["the invoice was not found"]
     assert ev({"tool": "erp.invoice.get", "agent": AGENT, "arguments": {}})["decision"] \
         == "allow"
@@ -112,7 +112,7 @@ def test_gateway_escalates_and_accepts_one_valid_approval(gateway):
                                            approval=approval(CFO, k["cfo"])))
     assert "does not verify" in text(c.call("erp.invoice.pay", args,
                                             approval=approval(CFO, k["person"])))
-    assert "their own request" in text(c.call("erp.invoice.pay", args,
+    assert "may not approve its payments" in text(c.call("erp.invoice.pay", args,
                                               approval=approval(PERSON, k["person"])))
     ok = c.call("erp.invoice.pay", args, approval=approval(CFO, k["cfo"]))
     assert ok["result"]["structuredContent"] == {"paid": "I2"}
