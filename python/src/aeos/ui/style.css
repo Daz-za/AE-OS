@@ -178,7 +178,10 @@ pre.code { margin: 0; padding: 12px; border-radius: 8px; background: var(--bg); 
 .top .evidence-nav { border-top: 1px solid #2f353b; padding-top: 4px; }
 .nav-label { align-self: center; font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: #8b949c; padding: 0 8px 0 2px; }
 .arch-host { margin: 16px 0 8px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 8px; }
-.arch-host.sticky { position: sticky; top: 0; z-index: 2; box-shadow: 0 6px 18px rgb(0 0 0 / 0.06); }
+.arch-host.sticky { position: sticky; top: 0; z-index: 2; box-shadow: 0 6px 18px rgb(0 0 0 / 0.08); }
+.arch-host.sticky svg.arch { max-height: 36vh; margin: 0 auto; }
+.arch-host.sticky .arch-caption { text-align: center; margin-top: 2px; }
+.pin { margin-top: 4px; font-size: 14px; color: var(--muted); }
 svg.arch { display: block; width: 100%; height: auto; font-family: inherit; }
 .arch .band { fill: color-mix(in srgb, var(--lay) 6%, transparent); }
 .arch .band-label { font-size: 15px; font-weight: 700; fill: var(--lay); }

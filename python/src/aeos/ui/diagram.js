@@ -66,7 +66,7 @@ export function createDiagram(host, { compact = false, onPick = null } = {}) {
     g.append(text(LEFT, 18, `${org.name} · trust domain ${org.trust_domain}`, "org", "start"));
     for (const L of LAYERS) {
       g.append(svg("rect", { x: 0, y: L.y - 8, width: W, height: L.h + 16, class: `band lay-${L.id}` }));
-      g.append(text(12, L.y + 22, L.label, "band-label", "start"));
+      g.append(text(12, L.y + 22, L.label, `band-label lay-${L.id}`, "start"));
       if (!compact) g.append(svg("foreignObject", { x: 10, y: L.y + 28, width: LEFT - 20, height: L.h - 22 },
         Object.assign(document.createElement("div"), { className: "band-note", textContent: L.note })));
     }
