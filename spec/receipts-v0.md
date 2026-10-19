@@ -126,10 +126,13 @@ signing.key         Ed25519 private key, PKCS#8 PEM (keep elsewhere in productio
 content/<cid>.json  optional full arguments and results
 ```
 
-## 7. Planned for later versions
+## 7. Test vectors
+
+`testvectors/receipts-v0.json` holds test vectors for every part of this format: canonical encodings, CIDs, Merkle roots and proofs, and valid and tampered receipts, consistency proofs and logs with the problems a verifier reports for each. The Python and Rust implementations in this repository both test against it. A change to this specification needs matching vectors.
+
+## 8. Planned for later versions
 
 - Salted commitments for arguments and results.
 - Independent witnesses that co-sign checkpoints, and C2SP signed-note checkpoint format.
 - Agent identity bound to a SPIFFE SVID presented at session start, and delegation from a person's digital identity wallet.
 - Hardware or cloud KMS keys for checkpoint signing.
-- A Rust verifier sharing the Python test vectors.

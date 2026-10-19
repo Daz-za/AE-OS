@@ -22,3 +22,15 @@ jobs:
       - run: pip install -e "python[test]"
       - run: pytest -q python/tests
       - run: python examples/invoice_demo.py
+
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup toolchain install stable --profile minimal --component clippy,rustfmt
+      - run: cargo fmt --check
+        working-directory: rust
+      - run: cargo clippy --locked --all-targets -- -D warnings
+        working-directory: rust
+      - run: cargo test --locked
+        working-directory: rust
