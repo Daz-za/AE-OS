@@ -42,7 +42,17 @@ aeos-receipts --version
 
 To update later, run `pipx upgrade aeos-receipts`.
 
-## 2. See an example
+## 2. Work in your web browser
+
+```
+aeos-receipts ui
+```
+
+This opens a page in your web browser where you can run the example, create a log, look through its records and check receipts, without typing further commands. The page runs on your computer only. Close it by pressing Ctrl+C in the terminal.
+
+The rest of this guide does the same things with commands.
+
+## 3. See an example
 
 ```
 aeos-receipts demo
@@ -55,7 +65,7 @@ aeos-receipts status aeos-demo/log
 aeos-receipts verify-receipt aeos-demo/payment-receipt.json --public-key aeos-demo/public-key.txt
 ```
 
-## 3. Create your own log
+## 4. Create your own log
 
 ```
 aeos-receipts setup
@@ -73,7 +83,7 @@ Setup asks a few questions, each with a suggested answer you can accept by press
 
 Setup then prints the exact commands for your choice and saves them in `NEXT-STEPS.txt` in the log folder.
 
-## 4. Check on the log
+## 5. Check on the log
 
 ```
 aeos-receipts status ./acme-accounts-payable-log
@@ -81,7 +91,7 @@ aeos-receipts status ./acme-accounts-payable-log
 
 The summary shows how many tool calls were recorded, how many were refused by policy or ended in an error, and whether every record is covered by a signed checkpoint. A checkpoint is a signed statement of how many records the log held at a moment, and their exact content. Once a record is covered by one, any later change to it is detected.
 
-## 5. Give an auditor evidence
+## 6. Give an auditor evidence
 
 Send the auditor the public key from `public-key.txt` in the log folder, through a channel they trust. For any record, create a receipt and send it to them:
 
@@ -96,6 +106,8 @@ aeos-receipts verify-receipt receipt-12.json --public-key public-key.txt
 ```
 
 Each check ends with a line that explains the result: what a valid result means, or what to do when a check fails.
+
+Auditors can also check a receipt in their web browser, with nothing to install, at [ae-os.org/verify](https://ae-os.org/verify). The files stay on their device.
 
 ## Getting help
 

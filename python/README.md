@@ -13,7 +13,7 @@ pipx install "git+https://github.com/Daz-za/ae-os#subdirectory=python"
 pip install -e python          # or, from a clone of this repository
 ```
 
-Then try `aeos-receipts demo`, and create a log of your own with `aeos-receipts setup`. The [getting-started guide](../docs/getting-started.md) covers each step for people new to the command line.
+Then run `aeos-receipts ui` to work in your web browser, or try `aeos-receipts demo` and create a log of your own with `aeos-receipts setup`. The [getting-started guide](../docs/getting-started.md) covers each step for people new to the command line.
 
 Requires Python 3.9 or later and the `cryptography` package.
 
@@ -148,6 +148,12 @@ aeos-receipts show ./ap-log                           # readable records
 ```
 
 The auditor should get the public key from a source they trust, not from the files under review.
+
+Auditors who prefer not to install anything can check receipts and growth proofs in a web browser at [ae-os.org/verify](https://ae-os.org/verify). The page runs [`verify.js`](src/aeos_receipts/ui/verify.js), the same checker that `aeos-receipts ui` uses; the files stay on the auditor's device. Its tests (`node --test src/aeos_receipts/ui/verify.test.mjs`) run the shared test vectors.
+
+## Work in the web browser
+
+`aeos-receipts ui` opens a page on this computer where you can run the example, create or open a log, look through its records, download receipts, sign checkpoints and check receipts from other logs. It is served at 127.0.0.1 only, and each launch makes a new access code that is part of the address, so other websites open in the same browser cannot use it. Use `aeos-receipts ui ./ap-log` to open a log directly, and `--no-browser` on a machine without a desktop, then open the printed address from the same machine.
 
 ## Use it as a library
 

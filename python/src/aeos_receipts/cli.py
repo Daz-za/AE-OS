@@ -23,10 +23,11 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
-from . import __version__, demo, hooks, mcp_proxy, setup, sink, status
+from . import __version__, demo, hooks, mcp_proxy, setup, sink, status, ui
 from .canon import cid_parse, cid_str
 from .log import ReceiptLog, make_record, to_view, verify_consistency_doc, verify_receipt
 from .recorder import Recorder
+from .status import MEANING
 
 
 def _public_key(value: str) -> bytes:
@@ -48,23 +49,6 @@ def _write(doc: dict, out: Optional[str]) -> None:
         sys.stdout.write(text)
 
 
-MEANING = {
-    "receipt": ("This record is in the log exactly as shown, and the log's owner signed "
-                "a checkpoint that includes it.",
-                "Do not rely on this receipt. Ask the log's owner for a fresh receipt, and "
-                "check that you used their public key from a source you trust."),
-    "consistency": ("The newer checkpoint contains every record of the older one, "
-                    "unchanged. Nothing was removed or rewritten in between.",
-                    "The log's history differs from what you were shown before. Keep both "
-                    "checkpoints as evidence and raise it with the log's owner."),
-    "log": ("Every record matches its fingerprint, every link points to an earlier record, "
-            "and every signed checkpoint matches the records it covers.",
-            "Records were changed, removed or reordered after they were written. Keep a "
-            "copy of the folder as it is now, and compare it with a backup or with "
-            "receipts issued earlier."),
-}
-
-
 def _report(problems: List[str], ok_message: str, kind: str = "") -> int:
     good, bad = MEANING.get(kind, ("", ""))
     if problems:
@@ -83,8 +67,8 @@ def _report(problems: List[str], ok_message: str, kind: str = "") -> int:
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(prog="aeos-receipts",
                                  description="Signed, verifiable receipts for AI agent actions.",
-                                 epilog="New here? Run 'aeos-receipts demo' to see an example, "
-                                        "then 'aeos-receipts setup' to create your own log.")
+                                 epilog="New here? Run 'aeos-receipts ui' to work in your web browser, or "
+                                        "'aeos-receipts demo' to see an example here.")
     ap.add_argument("--version", action="version", version=__version__)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -187,6 +171,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--yes", action="store_true", help="accept the suggestion for any "
                    "question not answered by an option")
 
+    p = sub.add_parser("ui", help="open a point-and-click view in the web browser")
+    p.add_argument("log", nargs="?", help="log folder to open (optional)")
+    p.add_argument("--key", help="signing key file (found automatically when setup made it)")
+    p.add_argument("--port", type=int, default=0, help="port on 127.0.0.1 (default: any free)")
+    p.add_argument("--no-browser", action="store_true", help="print the address only")
+
     p = sub.add_parser("status", help="summarize a log in plain language")
     p.add_argument("log")
     p.add_argument("--key")
@@ -198,6 +188,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         argv, server_cmd = argv[:cut], argv[cut + 1:]
     a = ap.parse_args(argv)
 
+    if a.cmd == "ui":
+        return ui.serve(Path(a.log) if a.log else None, Path(a.key) if a.key else None,
+                        port=a.port, open_browser=not a.no_browser)
     if a.cmd == "demo":
         return demo.run(Path(a.folder))
     if a.cmd == "setup":
