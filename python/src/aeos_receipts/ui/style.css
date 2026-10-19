@@ -81,3 +81,4 @@ table.records { border-collapse: collapse; width: 100%; font-size: 14px; }
   .summary dd { margin-bottom: 8px; }
   h1 { font-size: 23px; }
 }
+.muted { color: var(--muted); font-size: 14px; }

@@ -106,7 +106,7 @@ function renderStory(text) {
     ol.append(li);
   }
   const intro = Object.assign(document.createElement("p"), {
-    textContent: "An AI agent pays a supplier invoice at Acme, a fictional company, and an auditor checks the evidence. Look through the records, or try checking payment-receipt.json from the example folder under Check a receipt.",
+    textContent: "An AI agent pays a supplier invoice at Acme, a fictional company, and an auditor checks the evidence. Look through the records, or try checking payment-receipt.json under Check a receipt. It is in the aeos-demo folder, one level up from the log folder.",
   });
   $("story-text").replaceChildren(intro, ol);
 }
@@ -151,14 +151,15 @@ async function loadRecords() {
         const btn = document.createElement("button");
         btn.className = "primary";
         btn.textContent = "Download a receipt for this record";
+        const hint = Object.assign(document.createElement("p"), { className: "muted", textContent: "If no signed checkpoint covers this record yet, one is signed first." });
         btn.addEventListener("click", () => act(btn, async () => {
           download(`receipt-${item.index}.json`, await api(`/api/receipt?index=${item.index}`));
           render(await api("/api/state"));
         }));
         const cid = document.createElement("p");
         cid.className = "path";
-        cid.textContent = `Fingerprint (CID): ${item.cid}`;
-        td.append(recordDetails(rec), cid, btn);
+        cid.textContent = `Fingerprint, a code computed from the record's exact content: ${item.cid}`;
+        td.append(recordDetails(rec), cid, btn, hint);
         d.append(td);
         tr.after(d);
       };
@@ -167,7 +168,7 @@ async function loadRecords() {
       body.append(tr);
     }
     const last = r.start + r.records.length;
-    $("page-info").textContent = r.total ? `Records ${r.start} to ${last - 1} of ${r.total}` : "No records yet";
+    $("page-info").textContent = r.total ? `Showing records ${r.start} to ${last - 1} (${r.total} in total; numbering starts at 0)` : "No records yet";
     $("prev").disabled = r.start === 0;
     $("next").disabled = last >= r.total;
   });

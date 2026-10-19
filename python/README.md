@@ -153,7 +153,7 @@ Auditors who prefer not to install anything can check receipts and growth proofs
 
 ## Work in the web browser
 
-`aeos-receipts ui` opens a page on this computer where you can run the example, create or open a log, look through its records, download receipts, sign checkpoints and check receipts from other logs. It is served at 127.0.0.1 only, and each launch makes a new access code that is part of the address, so other websites open in the same browser cannot use it. Use `aeos-receipts ui ./ap-log` to open a log directly, and `--no-browser` on a machine without a desktop, then open the printed address from the same machine.
+`aeos-receipts ui` opens a page on this computer where you can run the example, create or open a log, look through its records, download receipts, sign checkpoints and check receipts from other logs. It is served only at 127.0.0.1, this computer's own address. Each launch makes a new access code that is part of the address; other websites open in the same browser do not have it and cannot use the page. Use `aeos-receipts ui ./ap-log` to open a log directly, and `--no-browser` to print the address without opening a browser, then open it in a browser on the same computer.
 
 ## Use it as a library
 

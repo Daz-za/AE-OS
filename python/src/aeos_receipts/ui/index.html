@@ -23,8 +23,8 @@
   <p id="error" class="error" role="alert" hidden></p>
 
   <section id="view-start" class="view" hidden>
-    <h1>Signed receipts for what your AI agents do</h1>
-    <p class="lead">A receipt log keeps a tamper-evident record of each tool an agent uses, who it acted for, and what came back. Auditors can check any record with the log's public key.</p>
+    <h1>Record and check what your AI agents do</h1>
+    <p class="lead">A receipt log keeps a record of each tool an agent uses, who it acted for, and what came back, in a form that shows any later change. The owner can issue a receipt for any record, and an auditor checks it with the log's public key.</p>
     <div class="cards">
       <article class="card">
         <h2>See an example</h2>
@@ -39,7 +39,7 @@
             <input name="name" placeholder="acme-accounts-payable" autocomplete="off"></label>
           <label>The agent's identity, written like a web address
             <input name="agent" placeholder="spiffe://acme.example/agent/acme-accounts-payable" autocomplete="off"></label>
-          <label>How the agent connects to its tools
+          <label>How the agent's tool calls reach the log
             <select name="mode" id="mode"></select></label>
           <details>
             <summary>Folder and signing key locations</summary>
@@ -76,6 +76,7 @@
       <pre id="next-steps-text"></pre>
     </div>
     <h2>Summary</h2>
+    <p>A signed checkpoint seals the records the log holds at that moment. A growth proof shows that a later checkpoint still contains every earlier record unchanged, and needs two checkpoints.</p>
     <dl id="summary" class="summary"></dl>
     <div class="actions">
       <button id="verify" class="primary">Check the whole log</button>

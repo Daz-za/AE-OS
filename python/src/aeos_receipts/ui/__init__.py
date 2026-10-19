@@ -1,8 +1,8 @@
 """A point-and-click view of a receipt log in the web browser: `aeos-receipts ui`.
 
 The page is served only to this computer (127.0.0.1). Each launch makes a fresh access
-code that is part of the address the browser opens, so other websites open in the same
-browser cannot use the page's functions. Receipts and growth proofs are checked inside
+code that is part of the address the browser opens. Other websites open in the same
+browser do not have it and cannot use the page's functions. Receipts and growth proofs are checked inside
 the browser by verify.js, the same checker that ae-os.org uses.
 """
 from __future__ import annotations

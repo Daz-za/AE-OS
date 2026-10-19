@@ -172,7 +172,7 @@ export function mountCheck(root, opts = {}) {
       el("label", { class: "chk-label", text: "The log's public key" }),
       keyBox,
       el("label", { class: "chk-keyfile" }, "Or choose the key file: ", keyFile)),
-    el("p", { class: "chk-note", text: "Get the public key from the log's owner through a channel you trust, such as their website or a known email address. The check runs on this device; the files are not uploaded." }),
+    el("p", { class: "chk-note", text: "Get the public key from the log's owner through a channel you trust, such as their website or a known email address. The check runs on this device, and the files stay here." }),
     result,
   );
   return {
