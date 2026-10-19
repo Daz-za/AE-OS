@@ -40,6 +40,8 @@ Record kinds:
 | `tool.result` | The tool answers | `outcome` (`ok`, `error`, `rpc-error`), `result_sha256`, `call_id` |
 | `policy.decision` | A policy allows, denies or escalates an action | `decision`, `reasons` |
 | `approval` | A person approves or rejects an escalated action | `decision`, `approver` |
+| `journal.entry` | The books record an entry in the accounts | `document`, `date`, `lines` |
+| `period.transition` | A controller opens or closes a posting period | `period`, `state`, `by` |
 | `note` | Anything else worth recording | free form |
 | `session.end` | The session ends | `unanswered_calls` |
 

@@ -34,7 +34,7 @@ FORMAT = "aeos-receipts/v0"
 CHECKPOINT_CONTEXT = b"aeos-receipts/checkpoint/v0\n"
 
 RECORD_KINDS = {"session.start", "session.end", "tool.call", "tool.result",
-                "policy.decision", "approval", "note"}
+                "policy.decision", "approval", "journal.entry", "period.transition", "note"}
 
 
 def now_ms() -> int:

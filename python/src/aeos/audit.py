@@ -11,6 +11,8 @@ An evidence folder holds a receipt log plus what is needed to check who acted:
                     agents presented, when the gateway required them
     policies/       the compiled policy modules (<sha256>.wasm) and their data
                     (data-<sha256>.json), when the gateway ran a policy
+    books           true when the log holds books of account (journal entries and
+                    signed period changes); people's keys are in the principals file
 
 The audit recomputes the whole log, then checks that each session was opened with an SVID whose
 fingerprint the gateway recorded, and that this SVID was valid for the recorded identity
@@ -19,7 +21,10 @@ checkpoint carries enough valid witness cosignatures. Where the gateway required
 tokens, it replays each recorded decision from the token, the person's signed intent and
 the facts in the record, and checks that every call that ran was allowed. Where it ran a
 policy, it runs the same compiled module on the recorded input again, checks each
-person's approval, and checks that every call that ran had the policy's allow. In a real audit the auditor takes
+person's approval, and checks that every call that ran had the policy's allow. Where the log holds books of
+account, it rebuilds them from the journal entries and checks that each entry balances, is
+dated in an open period and is numbered without gaps, and that each period change is
+signed. In a real audit the auditor takes
 the trust bundle, the log's public key, the witnesses' keys, the authorization service's
 key and each person's key from sources they trust,
 not from the folder under review; `audit` accepts them as options for that reason.
@@ -31,7 +36,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import delegation, identity, policy, witness
+from . import books, delegation, identity, policy, witness
 from .canon import cid_str
 from .log import ReceiptLog
 
@@ -108,6 +113,11 @@ def run(folder: Path, *, bundle: Optional[Path] = None, public_key: Optional[str
                               .read_text())
             pkeys = {k: bytes.fromhex(v) for k, v in pdoc.items()}
         _check_policies(log, folder / manifest["policies"], pkeys, findings, problems)
+
+    if manifest.get("books"):
+        pdoc = json.loads((Path(principals) if principals else folder / manifest["principals"])
+                          .read_text())
+        _check_books(log, {k: bytes.fromhex(v) for k, v in pdoc.items()}, findings, problems)
 
     wfile = Path(witnesses) if witnesses else folder / manifest["witnesses"]
     wdoc = json.loads(wfile.read_text())
@@ -273,6 +283,30 @@ def _check_policies(log: ReceiptLog, folder: Path, principal_keys: Dict[str, byt
                     "policy's allow"
                     + ("" if len(problems) == before else " (except as listed below)"))
 
+
+
+def _check_books(log: ReceiptLog, principal_keys: Dict[str, bytes], findings: List[str],
+                 problems: List[str]) -> None:
+    """Rebuild the books from the log and check their rules and numbering."""
+    records = [(e.index, cid_str(e.cid), log.record(e)) for e in log.entries()]
+    s, found = books.replay(records, principal_keys)
+    problems += found
+    docs = s["documents"]
+    span = f"documents {docs[0]} to {docs[-1]}" if len(docs) > 1 else \
+        (f"document {docs[0]}" if docs else "no documents")
+    currencies = {r["body"].get("currency") for _, _, r in records if r["kind"] == "journal.entry"}
+    cur = currencies.pop() if len(currencies) == 1 else ""
+    findings.append(
+        f"The books hold {s['entries']} journal entries ({span}, numbered without gaps), "
+        + ("1 of them a reversal that exactly undoes an earlier entry" if s["reversals"] == 1
+           else f"{s['reversals']} of them reversals that exactly undo earlier entries")
+        + "; each entry "
+        "balances, is linked to the tool call that asked for it, and is dated in a period "
+        f"that was open when it was recorded. Each of the {s['transitions']} period changes "
+        f"is signed by {', '.join(s['signers']) or 'nobody'}. Rebuilt from the entries, the "
+        f"trial balance has debits of {delegation.money(s['debits'], cur or '')} and credits "
+        f"of {delegation.money(s['credits'], cur or '')}"
+        + ("" if not found else " (except as listed below)"))
 
 
 def _check_approval(rec: Dict[str, Any], by_cid: Dict[str, Dict[str, Any]],
