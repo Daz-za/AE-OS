@@ -120,7 +120,7 @@ def test_gateway_requires_a_token_and_meters_the_budget(gateway, setup):
     assert ap.call("erp.pay", {"amount_minor": 500})["result"]["structuredContent"]
     assert "bank unavailable" in text(ap.call("erp.pay", {"amount_minor": 300, "fail": True}))
     assert ap.call("erp.pay", {"amount_minor": 300})["result"]["structuredContent"]
-    assert "budget would be exceeded" in text(ap.call("erp.pay", {"amount_minor": 1}))
+    assert "above its budget of USD 8.00" in text(ap.call("erp.pay", {"amount_minor": 1}))
     assert "whole, non-negative" in text(ap.call("erp.pay", {"amount_minor": -5}))
     assert gw.budget.spent[env.cid] == 800
     decisions = [log.record(e) for e in log.entries()

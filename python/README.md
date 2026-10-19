@@ -188,3 +188,4 @@ Version 0.1 is an early release for evaluation.
 - The signing key is a file. Keep it outside the log directory (`--key`) and away from the agent; hardware or KMS keys are planned.
 - The whole log is held in memory and hashed on load, which suits logs up to a few hundred thousand records. Each `aeos-receipts hook` call loads the log, so start a new log per agent or per period when a single log grows large.
 - A receipt proves a record is in the log. Whether the log is complete depends on the agent being able to reach its tools only through a recorded path: the proxy, a gateway that reports to the sink, or the hook.
+- The gateway meters each intent's total budget in its own memory: a restart resets it, and several gateways do not share it.

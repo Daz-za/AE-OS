@@ -133,6 +133,7 @@ def _check_capabilities(log: ReceiptLog, folder: Path, manifest: Dict[str, Any],
     allowed_calls = set()
     spent: Dict[str, int] = {}
     counts = {"allow": 0, "deny": 0}
+    before = len(problems)
     for e, rec in records:
         body = rec["body"]
         if rec["kind"] != "policy.decision" or body.get("policy") != delegation.POLICY:
@@ -158,8 +159,9 @@ def _check_capabilities(log: ReceiptLog, folder: Path, manifest: Dict[str, Any],
                 and call not in allowed_calls:
             problems.append(f"record {e.index}: the call ran without an allow decision")
     findings.append(f"Each of the {counts['allow'] + counts['deny']} capability decisions "
-                    f"({counts['allow']} allowed, {counts['deny']} refused) was replayed from "
-                    "the agent's token and the person's signed intent")
+                    f"({counts['allow']} allowed, {counts['deny']} refused) gives the recorded "
+                    "answer when replayed from the token the agent presented and the signed "
+                    "intent" + ("" if len(problems) == before else " (except as listed below)"))
 
 
 def _replay(rec: Dict[str, Any], tokens: Dict[str, bytes],

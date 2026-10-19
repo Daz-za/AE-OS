@@ -14,7 +14,8 @@ capability token bound to the envelope's CID:
 Biscuit tokens are public-key signed chains of Datalog blocks. Any holder can append a
 block of further checks offline, for example to hand a narrower token to a sub-agent
 (an agent whose SPIFFE ID extends its parent's path), and nobody can remove a block.
-Every check in every block must pass, so an appended block can only take authority away.
+An appended block can only take authority away, because every check in every block must
+pass.
 
 The gateway authorizes each tool call by supplying facts it knows itself: the SPIFFE ID
 from the mutual TLS connection, the tool, the call's amount and the current time. It
@@ -163,13 +164,22 @@ _PLAIN = (("check if subject", "the token was issued to a different agent"),
 def _plain(err: AuthorizationError) -> List[str]:
     text = str(err)
     failed = re.findall(r"Check n°\d+ in block n°(\d+): (check if \w+)", text)
-    reasons = []
+    issued, added = [], []
     for block, check in failed:
         for prefix, plain in _PLAIN:
             if check.startswith(prefix):
-                where = "" if block == "0" else " (a check added after the token was issued)"
-                reasons.append(plain + where)
-    return reasons or [text]
+                (issued if block == "0" else added).append(plain)
+    if len(added) > 1:
+        added = [", and ".join(added) + " (both are checks a holder added)"
+                 if len(added) == 2 else "; ".join(added) + " (checks a holder added)"]
+    elif added:
+        added = [added[0] + " (a check a holder added)"]
+    return issued + added or [text]
+
+
+def money(minor: int, currency: str) -> str:
+    """An amount in minor units as text, for two-decimal currencies such as USD."""
+    return f"{currency} {minor / 100:,.2f}"
 
 
 @dataclass
@@ -212,7 +222,8 @@ class Budget:
     """Spending against each intent envelope's total budget, metered by the gateway.
 
     The gateway reserves a call's amount when it allows the call and releases it if the
-    call does not run, so calls made at the same time cannot overspend together.
+    call does not run. Reserving under a lock stops simultaneous calls from overspending
+    together. The budget lives in one gateway's memory: a restart resets it.
     """
 
     def __init__(self) -> None:
@@ -224,8 +235,9 @@ class Budget:
         with self._lock:
             spent = self.spent.get(envelope.cid, 0)
             if spent + amount > envelope.budget_minor:
-                return (f"the intent's budget would be exceeded ({spent + amount} of "
-                        f"{envelope.budget_minor} {envelope.currency} minor units)")
+                return ("this payment would bring spending under the intent to "
+                        f"{money(spent + amount, envelope.currency)}, above its budget of "
+                        f"{money(envelope.budget_minor, envelope.currency)}")
             self.spent[envelope.cid] = spent + amount
             return None
 

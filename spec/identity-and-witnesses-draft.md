@@ -18,7 +18,7 @@ In production SPIRE issues SVIDs after attesting the node and the workload. The 
 
 ## 2. Delegated authority
 
-An agent acts only on a person's signed instruction. The person signs an **intent envelope**, the DAG-CBOR map
+When the gateway holds an authorization service's key, an agent can call tools only under an intent a person has signed. The intent is an **intent envelope**, the DAG-CBOR map
 
 | Field | Meaning |
 |---|---|
@@ -31,7 +31,7 @@ An agent acts only on a person's signed instruction. The person signs an **inten
 | `currency` | ISO 4217 code |
 | `not_after` | expiry, milliseconds since the Unix epoch |
 
-with Ed25519 over `"aeos/intent-envelope/v0\n" || DAG-CBOR(envelope)`. The envelope is named by its CIDv1 (dag-cbor, sha2-256). In production the signature comes from the person's passkey or smart card after step-up authentication; the preview uses an Ed25519 key file.
+The person signs it with Ed25519 over `"aeos/intent-envelope/v0\n" || DAG-CBOR(envelope)`. The envelope is named by its CIDv1 (dag-cbor, sha2-256). The preview signs with an Ed25519 key file. Signing with a passkey or smart card after step-up authentication will need a WebAuthn assertion format, which this draft does not yet define.
 
 An authorization service checks the signature and mints a [Biscuit](https://doc.biscuitsec.org/reference/specifications) (v3, Ed25519 root key) whose authority block is:
 
@@ -41,10 +41,12 @@ principal("<person's SPIFFE ID>");
 check if subject($s), $s == "<audience>" || $s.starts_with("<audience>/");
 check if tool($t), {<actions>}.contains($t);
 check if amount($a), $a <= <per_action_max_minor>;
-check if time($t), $t <= <not_after>;
+check if time($t), $t <= <not_after as an RFC 3339 date>;
 ```
 
-The token covers the audience and its sub-agents, whose SPIFFE ID paths extend the audience's. Any holder may append a block of further checks (`subject`, `tool`, `amount`, `time`) without contacting the service, for example to give a helper a token for reading only. Every check in every block must pass, so appending can only remove authority.
+Biscuit dates are whole seconds.
+
+The token covers the audience and its sub-agents, whose SPIFFE ID paths extend the audience's. Any holder may append a block of further checks (`subject`, `tool`, `amount`, `time`) without contacting the service, for example to give a helper a token for reading only. Appending can only remove authority, because every check in every block must pass.
 
 To authorize a call, the gateway supplies the facts `subject` (the SPIFFE ID from the mTLS connection), `tool`, `amount` (the call's `amount_minor` argument, 0 when absent) and `time` (rounded up to the whole second, since Biscuit times are seconds), with the policy `allow if intent($i)`. It then checks that it holds the envelope the token names and that the envelope's signature verifies against the principal's key. It meters `budget_minor` itself, reserving each allowed call's amount and releasing it if the call fails.
 
@@ -57,7 +59,7 @@ The gateway:
 1. ends any connection whose certificate is missing, expired or not issued under the bundle's root during the TLS handshake, and answers 403 to a peer whose SPIFFE ID is outside the trust domain;
 2. takes the agent's SPIFFE ID from its verified certificate, never from the request;
 3. allows each identity only the tools configured for it, and records a refusal as a `policy.decision` with decision `deny`;
-4. when it holds an authority key, requires a capability token in the `AEOS-Capability` header (base64url) on every `tools/call`, authorizes it as in section 2, and records the outcome as a `policy.decision` linked to the call, under the agent's SPIFFE ID and on behalf of the envelope's principal;
+4. when it holds an authority key, requires a capability token in the `AEOS-Capability` header (base64url) on every `tools/call`, authorizes it as in section 2, and records the outcome as a `policy.decision` linked to the call, under the agent's SPIFFE ID; an allowed call, its decision and its result also name the envelope's principal as `obo`;
 5. records `session.start`, `tool.call`, `tool.result` and `session.end` under the agent's SPIFFE ID.
 
 The `session.start` body adds:
@@ -69,7 +71,7 @@ The `session.start` body adds:
 | `trust_domain` | the trust domain whose bundle the gateway used |
 | `authorization` | `aeos-capability/v0` when every call in the session needs a token |
 
-A capability decision's body is `decision` (`allow` or `deny`), `policy` (`aeos-capability/v0`), `amount`, `reasons` (empty when allowed), and, when a token was readable, `token_sha256` (SHA-256 of the token's bytes) and `intent` (the envelope CID the token names).
+A capability decision's body is `decision` (`allow` or `deny`), `policy` (`aeos-capability/v0`), `amount`, `reasons` (empty when allowed), `token_sha256` (SHA-256 of the token's bytes) when the token decoded and the amount was valid, and `intent` (the envelope CID the token names) when the token's signature verified.
 
 ## 4. Witness cosignatures
 
@@ -104,7 +106,7 @@ A checkpoint is final for an auditor when at least k of the n witnesses the audi
 
 - recomputes the log (receipts-v0 section 6);
 - for each `session.start` with `svid_sha256`, checks the matching chain against the trust bundle at the record's time, and checks that its SPIFFE ID is the record's `agent`;
-- replays each `aeos-capability/v0` decision from the token, the record's `agent`, `subject`, `ts` and `amount`, the envelope and the principal's key, with the budget spent by earlier allowed calls that ran, and checks it gives the recorded decision and that the record's `obo` is the envelope's principal;
+- replays each `aeos-capability/v0` decision from the token, the record's `agent`, `subject`, `ts` and `amount`, the envelope and the principal's key, with the budget spent by earlier allowed calls that ran, and checks it gives the recorded decision and, for an allowed call, that the record's `obo` is the envelope's principal;
 - checks that, in sessions with `authorization`, every call with a successful `tool.result` has an allow decision;
 - checks that the latest checkpoint has at least k valid cosignatures.
 
@@ -112,6 +114,7 @@ An auditor should pass the trust bundle, the log's public key, the witness keys,
 
 ## 6. Not yet covered
 
+- A shared, durable budget: the preview keeps it in one gateway's memory, so a restart resets it and gateways do not share it.
 - Revocation of tokens before they expire (Biscuit revocation IDs are not yet checked).
 - Agent manifests (APOs) that pin each tool's definition digest.
 - Policy as code: Rego compiled to WebAssembly, with decisions that can be replayed.

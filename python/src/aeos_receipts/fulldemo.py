@@ -133,12 +133,13 @@ def run(folder: Path, out: Callable[[str], None] = print) -> int:
         json.dumps(envelope.to_json(), indent=2) + "\n")
     token = authority.mint(envelope, keys.public_bytes(controller_key))
     say("The controller signs what the agent may do",
-        "Acme's financial controller signs an intent: the accounts payable agent may read "
-        "and pay approved supplier invoices for October, up to USD 5,000.00 a payment and "
-        "USD 10,000.00 in total, for the next 8 hours. Acme's authorization service checks "
-        "the signature and gives the agent a capability token (a Biscuit) bound to that "
-        f"intent ({envelope.cid[:16]}…) and to the agent's SPIFFE ID. The agent has no "
-        "other authority.")
+        "Acme's financial controller signs an intent for the accounts payable agent: read "
+        "and pay supplier invoices, up to USD 5,000.00 a payment and USD 10,000.00 in "
+        "total, for the next 8 hours. The stated purpose, 'Pay approved supplier invoices "
+        "for October', is recorded with the intent; the gateway does not check it. Acme's "
+        "authorization service checks the signature and gives the agent a capability "
+        f"token (a Biscuit) bound to that intent ({envelope.cid[:16]}…) and to the agent's "
+        "SPIFFE ID. The gateway requires this token on every tool call the agent makes.")
 
     log = ReceiptLog.create(folder / "log", log_id="urn:example:acme:accounts-payable",
                             key_path=private / "log-signing.key")
@@ -195,7 +196,7 @@ def run(folder: Path, out: Callable[[str], None] = print) -> int:
         say("The agent hands a narrower token to a helper",
             "The agent adds a block to its own token, without contacting the authorization "
             "service: only its helper, whose identity sits under the agent's own "
-            f"({HELPER_AGENT}), may use it, only to read invoices, and for amounts of zero. "
+            f"({HELPER_AGENT}), may use it, only to read invoices, and only for calls that move no money. "
             "The helper reads invoice INV-20457. When it tries to pay "
             f"INV-20431, the gateway refuses: {refusal(tried)}. A block added to a token can "
             "only take authority away.")
@@ -207,8 +208,8 @@ def run(folder: Path, out: Callable[[str], None] = print) -> int:
         other.close()
         say("A copied token does not work for another agent",
             "The payroll agent has a valid Acme identity and a copy of the accounts payable "
-            "agent's token. The gateway refuses the payment and records the refusal under "
-            f"the payroll agent's identity: {refusal(refused)}.")
+            "agent's token. The gateway refuses the payment for two separate reasons and "
+            f"records both under the payroll agent's identity: {refusal(refused)}.")
 
         stale_svid = td.issue(AP_AGENT, not_before=dt.datetime.now(dt.timezone.utc)
                               - dt.timedelta(minutes=30))
@@ -327,7 +328,7 @@ def run(folder: Path, out: Callable[[str], None] = print) -> int:
     findings, problems = audit.run(folder)
     say("The auditor checks all of the evidence",
         "The auditor runs one command over the evidence folder. Here it uses the trust "
-        "bundle and witness keys in the folder; a real auditor passes their own copies with "
+        "bundle and keys stored in the folder; a real auditor passes their own copies with "
         "--bundle, --public-key, --witnesses, --authority-key and --principals. key-hierarchy.json lists every key "
         "and certificate involved: who holds it, what it signs, and what issued it. " + " ".join(f + "." for f in findings)
         + (" Result: VALID" if not problems else " Result: INVALID: " + "; ".join(problems)))
