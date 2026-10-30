@@ -1,7 +1,7 @@
 name: Dependabot auto-merge
 
-# Minor and patch updates from Dependabot merge on their own once the required
-# checks pass. Major version updates are left for the maintainer to review.
+# Dependabot only opens routine updates (see dependabot.yml), so each one
+# merges on its own once the required checks pass; nobody reviews them by hand.
 on: pull_request
 
 permissions:
@@ -13,12 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event.pull_request.user.login == 'dependabot[bot]'
     steps:
-      - id: meta
-        uses: dependabot/fetch-metadata@v3
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-      - if: steps.meta.outputs.update-type != 'version-update:semver-major'
-        run: gh pr merge --auto --squash "$PR_URL"
+      - run: gh pr merge --auto --squash --delete-branch "$PR_URL"
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

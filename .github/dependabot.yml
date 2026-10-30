@@ -1,6 +1,8 @@
 version: 2
 updates:
-  # Each ecosystem's updates arrive together as one weekly pull request.
+  # Each ecosystem's updates arrive together as one weekly pull request and
+  # merge on their own (dependabot-automerge.yml). Major Python and Rust
+  # versions are not opened: they change APIs, so they are deliberate work.
   - package-ecosystem: pip
     directory: /python
     schedule:
@@ -8,6 +10,9 @@ updates:
     groups:
       python-dependencies:
         patterns: ["*"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: cargo
     directory: /rust
     schedule:
@@ -15,6 +20,9 @@ updates:
     groups:
       rust-dependencies:
         patterns: ["*"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
