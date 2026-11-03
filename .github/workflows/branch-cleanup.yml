@@ -1,0 +1,60 @@
+# Deletes branches that are finished, so nobody tidies them by hand. A branch goes when its work is on the
+# default branch, a merged pull request carried its last commit, or it has had no commit for 14 days and has no
+# open pull request. Every deletion is logged with the command that restores it.
+name: Branch clean-up
+
+on:
+  schedule:
+    - cron: '23 2 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: branch-cleanup
+
+jobs:
+  clean:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Delete finished branches
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          STALE_DAYS: '14'
+          DRY_RUN: 'false'
+        run: |
+          set -uo pipefail
+          cutoff=$(date -u -d "-${STALE_DAYS} days" +%s)
+          owner=${REPO%%/*}
+          open_heads=$(gh api "repos/$REPO/pulls?state=open&per_page=100" --paginate --jq '.[].head.ref') || exit 1
+          branches=$(gh api "repos/$REPO/branches?per_page=100" --paginate --jq '.[] | select(.protected | not) | "\(.name) \(.commit.sha)"') || exit 1
+          while read -r name sha; do
+            [ -z "$name" ] || [ "$name" = "$DEFAULT_BRANCH" ] && continue
+            if grep -qxF -- "$name" <<<"$open_heads"; then echo "keep $name: open pull request"; continue; fi
+            reason=""
+            if [ "$(gh api "repos/$REPO/compare/$DEFAULT_BRANCH...$sha" --jq .ahead_by)" = "0" ]; then
+              reason="its work is on $DEFAULT_BRANCH"
+            fi
+            if [ -z "$reason" ]; then
+              for head in $(gh api "repos/$REPO/pulls?state=closed&head=$owner:$name&per_page=100" --jq '.[] | select(.merged_at) | .head.sha'); do
+                case "$(gh api "repos/$REPO/compare/$sha...$head" --jq .status)" in
+                  identical|ahead) reason="a merged pull request carried it"; break ;;
+                esac
+              done
+            fi
+            if [ -z "$reason" ]; then
+              last=$(gh api "repos/$REPO/commits/$sha" --jq .commit.committer.date)
+              if [ -n "$last" ] && [ "$(date -u -d "$last" +%s)" -lt "$cutoff" ]; then reason="no commit for $STALE_DAYS days"; fi
+            fi
+            if [ -z "$reason" ]; then echo "keep $name: recent work not on $DEFAULT_BRANCH"; continue; fi
+            if [ "$DRY_RUN" = "true" ] || gh api -X DELETE "repos/$REPO/git/refs/heads/$name" >/dev/null; then
+              echo "deleted $name ($reason). Restore: git push origin $sha:refs/heads/$name"
+            else
+              echo "::warning::could not delete $name"
+            fi
+          done <<<"$branches"
