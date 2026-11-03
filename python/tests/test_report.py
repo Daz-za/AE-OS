@@ -1,3 +1,4 @@
+import datetime as dt
 import json
 
 from aeos import ReceiptLog, cli, demo, fulldemo, report
@@ -21,7 +22,9 @@ def test_commands_on_an_evidence_folder(tmp_path, capsys):
 
     assert cli.main(["books", str(folder)]) == 0
     out = capsys.readouterr().out
-    assert "6100 Professional fees" in out and "September 2026: closed" in out
+    # The example dates its books from today, closing last month.
+    closed = dt.datetime.now(dt.timezone.utc).date().replace(day=1) - dt.timedelta(days=1)
+    assert "6100 Professional fees" in out and f"{closed:%B %Y}: closed" in out
     assert "debits (USD 1,250.00) and credits (USD 1,205.00) differ" in out
 
     assert cli.main(["decisions", str(folder)]) == 0
