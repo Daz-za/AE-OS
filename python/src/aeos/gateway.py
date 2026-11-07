@@ -26,6 +26,7 @@ gateway records the approval before asking the policy again.
 from __future__ import annotations
 
 import base64
+import contextlib
 import http.client
 import json
 import secrets
@@ -64,9 +65,11 @@ class Gateway:
                     and approvals
     policy          a compiled policy to run on every call that passes the other checks
     policy_facts    tool name, arguments -> facts the policy needs, such as the invoice
-    passkey_directory  the registry of passkey approvers (passkeys.Directory), a snapshot
-                    taken when the gateway starts; an approval by one of them needs a valid
-                    assertion, and each nonce and assertion is accepted once
+    passkey_directory  the registry of passkey approvers (passkeys.Directory); an approval by
+                    one of them needs a valid assertion, and each nonce and assertion is
+                    accepted once. Recorders that share the directory keep it current as they
+                    record changes; a change another process writes to the trail is seen only
+                    after a restart
     """
 
     def __init__(self, log: ActionLog, tools: Dict[str, Tool], *,
@@ -281,6 +284,13 @@ class Gateway:
         except (ValueError, KeyError, TypeError):
             return {}, "the approval could not be read"
         pk = self.passkey_directory and self.passkey_directory.principals.get(a.approver)
+        # A passkey approval is checked and recorded with the directory held, so a revocation
+        # recorded meanwhile lands before the check or after the approval, never between.
+        with (self.passkey_directory.lock if pk is not None else contextlib.nullcontext()):
+            return self._approval_locked(rec, call, a, pk, peer, tool, args, at)
+
+    def _approval_locked(self, rec: Recorder, call: Any, a: Any, pk: Any, peer: str, tool: str,
+                         args: Dict[str, Any], at: int) -> Tuple[Dict[str, Any], Optional[str]]:
         with self._lock:
             asked = self.escalations.get(a.escalation)
             if asked is None:
@@ -316,7 +326,7 @@ class Gateway:
         errs = self.passkey_directory.check(approver=a.approver, position=sys.maxsize,
                                             key=a.escalation, tool=a.tool,
                                             args_sha256=a.args_sha256, escalation=escalation,
-                                            ev=a.evidence, label="approved")
+                                            ev=a.evidence)
         return (errs and "the passkey's assertion was refused: " + errs[0]) or \
             passkeys.document_problem(a.evidence, args)
 

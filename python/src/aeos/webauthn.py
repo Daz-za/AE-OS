@@ -266,11 +266,12 @@ cloudfront.net azurewebsites.net s3.amazonaws.com amazonaws.com cloudflare.net t
 _LABEL = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
 
 
-def check_origin(rp_id: str, origin: str) -> None:
+def check_origin(rp_id: str, origin: str, demo: bool = False) -> None:
     """The relying party id and origin a credential may declare. The RP ID is a lower-case
     domain of at least two labels (or `localhost`), not an IP address and not a public suffix.
     The origin is in its browser serialisation: `https://host[:port]` (or `http` on localhost),
-    lower case, no path, and no default port. Its host is the RP ID or under it."""
+    lower case, no path, and no default port. Its host is the RP ID or under it. `localhost`
+    over `http` is refused unless `demo` is set."""
     if not isinstance(rp_id, str) or not isinstance(origin, str):
         raise WebAuthnError("the relying party id and origin must be text")
     try:
@@ -281,6 +282,9 @@ def check_origin(rp_id: str, origin: str) -> None:
     if is_ip:
         raise WebAuthnError("the relying party id is an IP address, not a domain")
     labels = rp_id.split(".")
+    if rp_id == "localhost" and not demo:
+        raise WebAuthnError("localhost is not a relying party id this audit accepts (run it "
+                            "with --demo to try one out)")
     if rp_id != "localhost" and (len(labels) < 2 or not all(_LABEL.match(x) for x in labels)):
         raise WebAuthnError("the relying party id is not a lower-case domain of two or more labels")
     if rp_id in PUBLIC_SUFFIXES:
@@ -290,7 +294,7 @@ def check_origin(rp_id: str, origin: str) -> None:
         host, port = u.hostname, u.port
     except ValueError:
         raise WebAuthnError("the origin is not a web origin") from None
-    ok_scheme = u.scheme == "https" or (u.scheme == "http" and host == "localhost")
+    ok_scheme = u.scheme == "https" or (demo and u.scheme == "http" and host == "localhost")
     default = {"https": 443, "http": 80}.get(u.scheme)
     netloc = host + (f":{port}" if port is not None else "") if host else ""
     if (not ok_scheme or not host or u.path or u.query or u.fragment or u.username

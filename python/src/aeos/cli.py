@@ -193,6 +193,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--authority-key", help="the authorization service's public key (hex) "
                    "you trust")
     p.add_argument("--principals", help="principals.json with the people's keys you trust")
+    p.add_argument("--demo", action="store_true", help="accept a passkey made for http://localhost "
+                   "(for trying AE-OS out; reported as a note)")
 
     p = sub.add_parser("setup", help="answer a few questions and create a ready-to-use log")
     p.add_argument("--name", help="short name for the log")
@@ -283,7 +285,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     if a.cmd == "audit":
         findings, problems = audit.run(Path(a.folder), bundle=a.bundle,
                                        public_key=a.public_key, witnesses=a.witnesses,
-                                       authority_key=a.authority_key, principals=a.principals)
+                                       authority_key=a.authority_key, principals=a.principals,
+                                       demo=a.demo)
         for f in findings:
             print(f"  - {f}")
         return _report(problems, "the evidence holds together", "audit")

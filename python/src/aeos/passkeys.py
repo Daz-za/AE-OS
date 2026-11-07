@@ -19,6 +19,7 @@ passkey, never the ones the evidence claims.
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -273,8 +274,13 @@ def load_principals(doc: Any) -> Tuple[Dict[str, bytes], Dict[str, Principal]]:
 class Directory:
     """Passkey approvers and their credentials, rebuilt from the trail in order."""
 
-    def __init__(self, principals: Dict[str, Principal]) -> None:
+    def __init__(self, principals: Dict[str, Principal], demo: bool = False) -> None:
         self.principals = principals
+        self.demo = demo                   # accept http://localhost, and say so in a note
+        # One lock for the whole directory. A gateway holds it from the check of an approval
+        # until the approval is recorded, and a recorder holds it around a registry change, so
+        # a revocation cannot fall between the two.
+        self.lock = threading.RLock()
         self.creds: Dict[bytes, Credential] = {}
         self.identity: Dict[str, List[Tuple[int, str]]] = {}      # approver -> (position, identity)
         self.epochs: Dict[str, List[int]] = {}                    # approver -> positions that began one
@@ -322,11 +328,18 @@ class Directory:
     # -- the checks --
 
     def check(self, *, approver: str, position: int, key: str, tool: str, args_sha256: bytes,
-              escalation: Optional[bytes], ev: Evidence, label: str) -> List[str]:
+              escalation: Optional[bytes], ev: Evidence) -> List[str]:
         """Check one assertion for one request, as the person at `approver` at `position`.
         `escalation` is the escalation an approval answers, or None for a confirmation of a
         registry change, which must be a single request. `key` names what the assertion
         answers, so a retry of the same answer is not a replay."""
+        with self.lock:
+            return self._check(approver, position, key, tool, args_sha256, escalation, ev)
+
+    def _check(self, approver: str, position: int, key: str, tool: str, args_sha256: bytes,
+               escalation: Optional[bytes], ev: Evidence) -> List[str]:
+        label = "approval" if escalation is not None else "change"
+        same = "the one approved" if escalation is not None else "the change it confirms"
         c = self.creds.get(ev.credential_id)
         if c is None:
             return ["the passkey is not in the registry"]
@@ -360,7 +373,7 @@ class Directory:
         except WebAuthnError as e:
             return [str(e)]
         if ev.request_digest != expected:
-            return ["the passkey signed a different request from the one " + label]
+            return [f"the passkey signed a different request from {same}"]
         try:
             got = verify_assertion(c.key, ev.authenticator_data, ev.client_data_json,
                                    ev.signature, rp_id=c.rp_id, origin=c.origin,
@@ -419,8 +432,7 @@ class Directory:
         if not mine:
             raise WebAuthnError("the confirming assertion is not in the trail")
         errs = self.check(approver=who, position=index, key=cid_str(cid), tool=tool,
-                          args_sha256=args, escalation=None, ev=mine[0],
-                          label="change confirmed")
+                          args_sha256=args, escalation=None, ev=mine[0])
         if errs:
             raise WebAuthnError("the change is not confirmed by a registered passkey: "
                                 + errs[0])
@@ -428,6 +440,10 @@ class Directory:
     def apply(self, index: int, cid: bytes, rec: Dict[str, Any], found: List[Evidence]) -> None:
         """Apply one registry record at `index`; raises WebAuthnError if it is refused.
         `found` are the confirming assertions that follow it."""
+        with self.lock:
+            self._apply(index, cid, rec, found)
+
+    def _apply(self, index: int, cid: bytes, rec: Dict[str, Any], found: List[Evidence]) -> None:
         b = rec["body"]
         kind = rec["kind"]
         who = self._declared(b.get("approver"))
@@ -463,7 +479,10 @@ class Directory:
         if not isinstance(public_key, bytes):
             raise WebAuthnError("the record names no public key")
         key = parse_cose_key(public_key)
-        check_origin(rp_id, origin)
+        check_origin(rp_id, origin, demo=self.demo)
+        if self.demo and (rp_id == "localhost" or origin.startswith("http://")):
+            self.notes.append(("demo", f"record {index}: the origin {origin} is accepted only "
+                               "because this audit was run with --demo"))
         root = not self.has_valid(who, index)
         if root:
             sign_in = SignIn.parse(b.get("identity_evidence"))
@@ -613,8 +632,7 @@ def check_approval(d: Directory, index: int, cid: bytes, rec: Dict[str, Any],
     except WebAuthnError as e:
         return [str(e)]
     errs = d.check(approver=b["approver"], position=index, key=b["escalation"],
-                   tool=b["tool"], args_sha256=b["args_sha256"], escalation=esc, ev=ev,
-                   label="approved")
+                   tool=b["tool"], args_sha256=b["args_sha256"], escalation=esc, ev=ev)
     if errs:
         return errs
     why = document_problem(ev, arguments_of(escalation, b["args_sha256"]))

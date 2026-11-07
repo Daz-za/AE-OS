@@ -14,11 +14,12 @@ reported twice (for example, an exporter retrying a batch) is recorded once.
 """
 from __future__ import annotations
 
+import contextlib
 import threading
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from .canon import cid_parse, json_digest
-from .log import Entry, ActionLog, make_record
+from .canon import cid_of_bytes, cid_parse, dag_cbor, json_digest
+from .log import Entry, ActionLog, make_record, now_ms
 
 _MISSING: Any = object()
 ALLOW_LIST_POLICY = "aeos-allow-list/v0"
@@ -198,23 +199,28 @@ class Recorder:
 
     def _registry(self, kind: str, approver: str, body: Dict[str, Any], identity_evidence: Any,
                   confirmation: Any, ts: Optional[int]) -> Entry:
-        """Append a registry record and, when the recorder holds the passkey directory, apply it
-        to the directory at once, so a gateway sharing it sees a revocation or a rebinding
-        immediately. A record the directory refuses stays in the trail (the trail is append-only)
-        and raises here; an audit reports it and the directory ignores it."""
-        with self._lock:
+        """Judge a registry record, then write it. With the passkey directory held, the record
+        is built first, the directory applies it at the position the trail will give it, and
+        only if it accepts it are the record and its confirming assertion written; a refusal
+        raises and writes nothing. The directory stays locked throughout, so a gateway that
+        shares it never sees a change half made."""
+        guard = self.passkeys.lock if self.passkeys is not None else contextlib.nullcontext()
+        with guard, self._lock:
             if identity_evidence is not None:
                 body["identity_evidence"] = identity_evidence.summary()
             if confirmation is not None:
                 body["evidence"] = confirmation.summary()
-            entry = self._append(kind, agent=approver, obo=None, subject=None, body=body,
-                                 parents=[], ts=ts)
+            rec = make_record(kind, approver, on_behalf_of=self.obo, subject=None, body=body,
+                              parents=[], ts=now_ms() if ts is None else ts)
+            cid = cid_of_bytes(dag_cbor(rec))
+            found = [confirmation] if confirmation is not None else []
+            judge = None if self.passkeys is None else \
+                (lambda index: self.passkeys.apply(index, cid, rec, found))
+            entry = self.log.append(rec, None, before=judge)
+            self._maybe_checkpoint()
             if confirmation is not None:
                 self._append("x-approval-evidence", agent=approver, obo=None, subject=None,
-                             body=confirmation.body(), parents=[entry.cid], ts=ts)
-            if self.passkeys is not None:
-                self.passkeys.apply(entry.index, bytes(entry.cid), self.log.record(entry),
-                                    [confirmation] if confirmation is not None else [])
+                             body=confirmation.body(), parents=[entry.cid], ts=rec["ts"])
             return entry
 
     def _refusal(self, tool: str) -> Optional[str]:

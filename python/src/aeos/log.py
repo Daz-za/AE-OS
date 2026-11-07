@@ -21,7 +21,7 @@ import uuid
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from . import keys, merkle
 from .canon import (Link, cid_of_bytes, cid_parse, cid_str, dag_cbor, decode_dag_cbor)
@@ -419,7 +419,8 @@ class ActionLog:
                                   "file (--key).")
 
     def append(self, record: Dict[str, Any], content: Optional[Dict[str, Any]] = None, *,
-               allow_unsigned: bool = False) -> Entry:
+               allow_unsigned: bool = False,
+               before: Optional[Callable[[int], None]] = None) -> Entry:
         """Append a record, signed with the issuer key, and return its index and CID.
 
         The first signed append to a trail first appends an issuer-signing marker record
@@ -433,6 +434,11 @@ class ActionLog:
 
         `content` (optional) is stored beside the log under content/<cid>.json, for
         operators who keep full arguments and results. The record itself holds digests.
+
+        `before(index)` runs with the trail locked, once the record is known to be new and
+        before anything is written, with the position the record will take (after the marker,
+        if this append writes one). If it raises, nothing is written: this is how a caller
+        refuses a record it has just judged, with no other writer able to move the position.
         """
         if not allow_unsigned:
             self.require_signing()
@@ -444,6 +450,9 @@ class ActionLog:
             for p in record.get("parents", []):
                 if bytes(p) not in self._by_cid:
                     raise KeyError(f"parent {cid_str(bytes(p))} is not in this log")
+            if before is not None:
+                before(len(self._entries) + (1 if not allow_unsigned
+                                             and self._marker_index is None else 0))
             if not allow_unsigned and self._marker_index is None:
                 marker = make_record(MARKER_KIND, self.log_id,
                                      body={"key_id": self.meta["key_id"]},
