@@ -795,3 +795,61 @@ def test_malformed_nested_evidence_is_reported_never_raised():
                 {"A": {"type": "other"}}, {"A": 5}):
         with pytest.raises((ValueError, TypeError, AttributeError)):
             passkeys.load_principals(bad)
+
+
+def test_approvals_and_registry_changes_from_many_threads_leave_a_clean_trail(gateway):
+    """Six agents each ask for and approve payments while six other threads each enrol a
+    passkey and revoke it, all on one trail and one directory."""
+    import threading
+    gw, log, c, rec, ctx = gateway
+    args = {"invoice": "I2", "amount_minor": 900}
+    extra = [SoftAuthenticator(f"stress-{i}") for i in range(6)]
+    errors, replies = [], []
+
+    def approver(k):
+        try:
+            cl = AgentClient(gw.server.server_address[1], ctx["files"]["ap"], ctx["bundle"],
+                             gateway_id=GATEWAY, trust_domain=DOMAIN, token=c.token)
+            cl.initialize()
+            for j in range(2):
+                asked = cl.call(TOOL, args)
+                esc = asked["result"].get("structuredContent", {}).get("escalation")
+                replies.append(asked if esc is None else
+                               cl.call(TOOL, args, approval=_approval(esc, A, 1000 + 10 * k + j,
+                                                                      args)))
+        except Exception as e:                  # noqa: BLE001 - reported by the assertion
+            errors.append(repr(e))
+
+    def registrar(i, k):
+        try:
+            rec.passkey_enrolled(CFO, identity=IDENTITY, credential_id=k.credential_id,
+                                 public_key=k.cose_key, rp_id=k.rp_id, origin=k.origin,
+                                 confirmation=A.evidence(nonce(5000 + 2 * i), passkeys.ENROL_TOOL,
+                                                         passkeys.enrol_args_sha256(
+                                                             CFO, IDENTITY, k.credential_id,
+                                                             k.cose_key, k.rp_id, k.origin)))
+            rec.passkey_revoked(CFO, credential_id=k.credential_id,
+                                confirmation=A.evidence(nonce(5001 + 2 * i), passkeys.REVOKE_TOOL,
+                                                        passkeys.revoke_args_sha256(
+                                                            CFO, k.credential_id)))
+        except Exception as e:                  # noqa: BLE001 - reported by the assertion
+            errors.append(repr(e))
+
+    threads = [threading.Thread(target=approver, args=(k,), daemon=True) for k in range(6)]
+    threads += [threading.Thread(target=registrar, args=(i, k), daemon=True)
+                for i, k in enumerate(extra)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+    assert not any(t.is_alive() for t in threads), "deadlock: threads still running"
+    assert errors == []
+    paid = [r for r in replies if r["result"].get("structuredContent") == {"paid": "I2"}]
+    assert len(replies) == 12 and len(paid) == 11      # the intent's budget allows 11 of 900
+    assert all("above its budget" in _text(r) for r in replies if r not in paid)
+    recs = [(e.index, bytes(e.cid), log.record(e)) for e in log.entries()]
+    assert audit.check_approvals(recs, principals())[1] == []
+    reopened = ActionLog.open(log.path)
+    assert reopened.verify().ok and len(reopened) == len(recs)
+    assert all(k.credential_id in gw.passkey_directory.creds and
+               gw.passkey_directory.creds[k.credential_id].revoked_at is not None for k in extra)
