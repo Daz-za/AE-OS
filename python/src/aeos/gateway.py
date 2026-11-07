@@ -140,76 +140,87 @@ class Gateway:
         rec = self.recorder(peer)
         call_id = str(rid)
         at = now_ms()
-        cap, reserved, obo = None, None, None
+        cap, obo, spent = None, None, False
         try:
-            cap = self._authorize(peer, name, args, token, at) \
-                if self.authority_key is not None else None
-            entry, refusal = rec.call(name, call_id=call_id, session_id=session, arguments=args,
-                                      on_behalf_of=cap["principal"] if cap else None, ts=at)
-            reserved = cap["envelope"] if cap and cap["allowed"] else None
-            reasons = [f"{peer} may not use {name}"] if refusal else []
-            if cap:                                     # each check's outcome is recorded
-                rec.decision(entry, name, decision="allow" if cap["allowed"] else "deny",
-                             policy=delegation.POLICY, body=cap["body"],
-                             on_behalf_of=cap["principal"], ts=at)
-                reasons += cap["body"]["reasons"]
-            if reasons:
-                if reserved is not None:
-                    self.budget.release(reserved, cap["body"]["amount"])
-                return _refused(rid, "; ".join(reasons)), session
-            obo = cap["principal"] if cap else None
-            if self.policy is not None:
-                stop = self._apply_policy(rec, entry, rid, peer, name, args, approval, obo, at)
-                if stop is not None:
-                    if reserved is not None:
-                        self.budget.release(reserved, cap["body"]["amount"])
-                    return stop, session
-        except OSError as e:     # the call's record (or its decision) could not be written
-            # Nothing has run: the tool is only called once its call and decisions are on record.
-            if reserved is not None:
-                self.budget.release(reserved, cap["body"]["amount"])
-            elif cap and cap["allowed"]:
-                self.budget.release(cap["envelope"], cap["body"]["amount"])
-            return self._not_recorded(rid, session, e, ran=False), session
-        tool = self.tools[name]
-        try:                                        # the books also need the call's record
-            out = tool(args, entry) if getattr(tool, "takes_call", False) else tool(args)
-        except Exception as e:                      # the tool's failure is the agent's answer
-            if reserved is not None:                  # a call that did not run spends nothing
-                self.budget.release(reserved, cap["body"]["amount"])
             try:
-                rec.result(call_id, session_id=session, error={"message": str(e)},
-                           on_behalf_of=obo)
-            except OSError as write_error:
-                return self._not_recorded(rid, session, write_error, ran=True), session
-            if isinstance(e, books.Refused):
-                return _refused(rid, str(e)), session
-            return _ok(rid, {"isError": True, "content": [{"type": "text", "text": str(e)}]}), \
-                session
-        try:
-            rec.result(call_id, session_id=session, result=out, on_behalf_of=obo)
-        except OSError as e:
-            # The tool has run and its answer cannot be written down. The call and its
-            # decisions are already on record, so the trail shows a call with no result.
-            return self._not_recorded(rid, session, e, ran=True), session
-        return _ok(rid, {"content": [{"type": "text", "text": json.dumps(out)}],
-                         "structuredContent": out}), session
+                cap = self._authorize(peer, name, args, token, at) \
+                    if self.authority_key is not None else None
+                entry, refusal = rec.call(name, call_id=call_id, session_id=session,
+                                          arguments=args,
+                                          on_behalf_of=cap["principal"] if cap else None, ts=at)
+                reasons = [f"{peer} may not use {name}"] if refusal else []
+                if cap:                                 # each check's outcome is recorded
+                    rec.decision(entry, name, decision="allow" if cap["allowed"] else "deny",
+                                 policy=delegation.POLICY, body=cap["body"],
+                                 on_behalf_of=cap["principal"], ts=at)
+                    reasons += cap["body"]["reasons"]
+                if reasons:
+                    return _refused(rid, "; ".join(reasons)), session
+                obo = cap["principal"] if cap else None
+                if self.policy is not None:
+                    stop = self._apply_policy(rec, entry, rid, peer, name, args, approval, obo,
+                                              at)
+                    if stop is not None:
+                        return stop, session
+            except OSError as e:     # the call's record (or its decision) could not be written
+                # Nothing has run: the tool is only called once its call and decisions are on
+                # record.
+                return self._not_recorded(rid, session, e, outcome="not_run"), session
+            tool = self.tools[name]
+            try:                                    # the books also need the call's record
+                out = tool(args, entry) if getattr(tool, "takes_call", False) else tool(args)
+            except Exception as e:                  # the tool's failure is the agent's answer
+                try:
+                    rec.result(call_id, session_id=session, error={"message": str(e)},
+                               on_behalf_of=obo)
+                except OSError as write_error:
+                    return self._not_recorded(rid, session, write_error, outcome="failed"), \
+                        session
+                if isinstance(e, books.Refused):
+                    return _refused(rid, str(e)), session
+                return _ok(rid, {"isError": True,
+                                 "content": [{"type": "text", "text": str(e)}]}), session
+            spent = True                            # the tool ran: what it moved stays spent
+            try:
+                rec.result(call_id, session_id=session, result=out, on_behalf_of=obo)
+            except OSError as e:
+                # The tool has run and its answer cannot be written down. The call and its
+                # decisions are already on record, so the trail shows a call with no result.
+                return self._not_recorded(rid, session, e, outcome="ran"), session
+            return _ok(rid, {"content": [{"type": "text", "text": json.dumps(out)}],
+                             "structuredContent": out}), session
+        finally:
+            # Every way out gives the reserved budget back, unless the tool ran: a call that
+            # was refused, failed, could not be recorded or hit an unexpected error spends
+            # nothing.
+            if cap and cap["allowed"] and not spent:
+                self.budget.release(cap["envelope"], cap["body"]["amount"])
 
     def _not_recorded(self, rid: Any, session: Optional[str], error: OSError, *,
-                      ran: bool) -> Dict[str, Any]:
-        """Tell the agent a record could not be written, and log it. Never stay silent."""
+                      outcome: str) -> Dict[str, Any]:
+        """Tell the agent a record could not be written, and log it. Never stay silent.
+
+        outcome: "not_run" (the call or a decision could not be written, so the tool was not
+        run), "ran" (the tool ran and its result could not be written) or "failed" (the
+        tool raised or was refused, and that could not be written)."""
         LOG.error("could not write to the audit trail %s (session %s): %s: %s", self.log.log_id,
                   session, type(error).__name__, error)
-        if ran:
+        if outcome == "ran":
             text = ("The action ran, but its result could not be written to the audit trail, "
                     "so it is not fully on record. Do not repeat it; ask an operator to "
                     "check the audit trail.")
+        elif outcome == "failed":
+            text = ("The action was attempted and failed, and its failure could not be "
+                    "written to the audit trail. Ask an operator to check the audit trail "
+                    "before trying again.")
         else:
             text = ("The action was not performed: it could not be written to the audit "
                     "trail first, and nothing is done unrecorded. Try again once an operator "
                     "has fixed the audit trail.")
         return _ok(rid, {"isError": True, "content": [{"type": "text", "text": text}],
-                         "structuredContent": {"recorded": False, "ran": ran}})
+                         "structuredContent": {"recorded": False, "ran": outcome == "ran",
+                                               **({"attempted": True}
+                                                  if outcome == "failed" else {})}})
 
     def _apply_policy(self, rec: Recorder, call: Any, rid: Any, peer: str, tool: str,
                       args: Dict[str, Any], approval: Optional[str], obo: Optional[str],
@@ -232,9 +243,6 @@ class Gateway:
             d = self.policy.evaluate(doc)
         except policy_mod.PolicyError as e:
             d = {"decision": "deny", "reasons": [str(e)]}
-        if approval and d["decision"] == "allow":
-            with self._lock:                          # the escalation is settled
-                self.escalations.pop(escalation, None)
         entry = rec.decision(call, tool, decision=d["decision"], policy=policy_mod.POLICY,
                              body={"reasons": d["reasons"],
                                    "policy_sha256": self.policy.sha256,
@@ -242,6 +250,9 @@ class Gateway:
                                    "entrypoint": self.policy.entrypoint,
                                    "input_json": canonical_json(doc)},
                              on_behalf_of=obo, ts=at)
+        if approval and d["decision"] == "allow":
+            with self._lock:      # settled only now: a failed write above keeps the approval
+                self.escalations.pop(escalation, None)   # usable for the retry
         if d["decision"] == "allow":
             return None
         if d["decision"] == "deny":

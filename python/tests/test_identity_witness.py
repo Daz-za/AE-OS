@@ -197,8 +197,14 @@ def test_a_refused_handshake_is_logged_at_info_without_certificate_contents(gate
         with pytest.raises(OSError):
             AgentClient(client("ap").port, old, tmp / "bundle.pem", gateway_id=GATEWAY,
                         trust_domain=DOMAIN, check_own_certificate=False).initialize()
-    refused = [r.getMessage() for r in caplog.records
-               if r.getMessage().startswith("refused a TLS handshake")]
+    def refusals():
+        return [r.getMessage() for r in caplog.records
+                if r.getMessage().startswith("refused a TLS handshake")]
+
+    deadline = time.monotonic() + 3          # the server thread logs as the client sees the alert
+    while not refusals() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    refused = refusals()
     assert refused and refused[0].startswith("refused a TLS handshake from 127.0.0.1: ")
     assert "certificate has expired" in refused[0] and "BEGIN" not in refused[0]
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]

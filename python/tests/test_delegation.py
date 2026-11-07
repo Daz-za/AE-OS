@@ -110,6 +110,66 @@ def text(reply):
     return reply["result"]["content"][0]["text"]
 
 
+def _fail_appends(log, when):
+    real = log.append
+
+    def append(record, *a, **kw):
+        if when(record):
+            raise OSError(28, "No space left on device")
+        return real(record, *a, **kw)
+
+    log.append = append
+    return real
+
+
+def test_a_decision_write_that_fails_gives_the_reserved_budget_back(gateway, setup):
+    gw, log, client = gateway
+    env = setup[1]
+    ap = client("ap")
+    assert ap.call("erp.pay", {"amount_minor": 100})["result"]["structuredContent"]
+    assert gw.budget.spent[env.cid] == 100
+    real = _fail_appends(log, lambda r: r["kind"] == "policy.decision")
+    reply = ap.call("erp.pay", {"amount_minor": 300})
+    assert reply["result"]["structuredContent"] == {"recorded": False, "ran": False}
+    assert gw.budget.spent[env.cid] == 100                     # the 300 went back
+    log.append = real
+    assert ap.call("erp.pay", {"amount_minor": 300})["result"]["structuredContent"]
+    assert gw.budget.spent[env.cid] == 400
+
+
+def test_an_unexpected_error_also_gives_the_reserved_budget_back(gateway, setup, monkeypatch,
+                                                                caplog):
+    gw, log, client = gateway
+    env = setup[1]
+    ap = client("ap")
+
+    def boom(*a, **kw):
+        raise RuntimeError("something nobody expected")
+
+    monkeypatch.setattr(gw.recorder(AGENT), "decision", boom)
+    with caplog.at_level("ERROR", logger="aeos.gateway"):
+        reply = ap.call("erp.pay", {"amount_minor": 200})
+    assert reply["error"]["code"] == -32603 and "may not have been recorded" in \
+        reply["error"]["message"]
+    assert gw.budget.spent.get(env.cid, 0) == 0
+    assert any("something nobody expected" in r.getMessage() or r.exc_info
+               for r in caplog.records if r.levelno == 40)
+
+
+def test_a_failure_that_cannot_be_recorded_is_not_called_a_success(gateway, setup):
+    gw, log, client = gateway
+    env = setup[1]
+    ap = client("ap")
+    _fail_appends(log, lambda r: r["kind"] == "tool.result")
+    reply = ap.call("erp.pay", {"amount_minor": 300, "fail": True})       # the tool raises
+    text_ = text(reply)
+    assert text_.startswith("The action was attempted and failed")
+    assert "ran" not in text_.split(",")[0]
+    assert reply["result"]["structuredContent"] == {"recorded": False, "ran": False,
+                                                    "attempted": True}
+    assert gw.budget.spent.get(env.cid, 0) == 0                # a call that failed spends nothing
+
+
 def test_gateway_requires_a_token_and_meters_the_budget(gateway, setup):
     gw, log, client = gateway
     env = setup[1]

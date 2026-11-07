@@ -218,6 +218,21 @@ def test_removing_the_marker_breaks_the_checkpoint_that_covers_it(tmp_path):
     assert any("covers more records" in p for p in problems), problems
 
 
+def test_a_corrupted_marker_is_reported_not_a_crash(tmp_path, capsys):
+    _log(tmp_path, 3)
+    path = tmp_path / "log" / "records.jsonl"
+    lines = path.read_text().splitlines()
+    d = json.loads(lines[0])
+    d["cbor"] = b64(base64.b64decode(d["cbor"]) + b"\x00")      # not canonical any more
+    lines[0] = json.dumps(d, separators=(",", ":"))
+    path.write_text("\n".join(lines) + "\n")
+    opened = ActionLog.open(tmp_path / "log", read_only=True)       # opens: it used to raise
+    problems = opened.verify().problems
+    assert problems[0] == "line 1: unreadable record (trailing bytes)"
+    assert main(["verify", str(tmp_path / "log")]) == 1             # and the CLI reports it
+    assert "unreadable record" in capsys.readouterr().out
+
+
 def test_a_marker_naming_another_key_is_a_problem(tmp_path):
     log = ActionLog.create(tmp_path / "log")
     other = keys.generate_key(tmp_path / "other.key")

@@ -337,7 +337,12 @@ class ActionLog:
                 if sig is not None and not self._first_signed_seen:
                     # the marker, when there is one, is the first signed record
                     self._first_signed_seen = True
-                    if decode_dag_cbor(raw).get("kind") == MARKER_KIND:
+                    try:
+                        first = decode_dag_cbor(raw)
+                        is_marker = isinstance(first, dict) and first.get("kind") == MARKER_KIND
+                    except (ValueError, KeyError):
+                        is_marker = False        # verify() reports the unreadable record
+                    if is_marker:
                         self._marker_index = int(d["i"])
                 self._add(Entry(int(d["i"]), cid, raw, sig, d.get("key_id") if sig else None))
 

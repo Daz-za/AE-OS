@@ -222,6 +222,9 @@ def tampered_logs(log: ActionLog, work: Path):
         sig[0] ^= 1
         d["sig"] = b64(bytes(sig))
 
+    def corrupt_bytes(d):
+        d["cbor"] = b64(base64_decode(d["cbor"]) + b"\x00")       # not canonical: trailing byte
+
     def empty_sig(d):
         d["sig"] = ""
 
@@ -257,6 +260,7 @@ def tampered_logs(log: ActionLog, work: Path):
         "every signature stripped, marker still in the trail": (strip(set(range(len(recs)))),
                                                                cps),
         "marker removed": (recs[1:], cps),
+        "marker bytes corrupted": (edit_record(0, corrupt_bytes), cps),
         "version 0 trail with no marker and no signatures": (
             v0_files["records"].splitlines(keepends=True),
             v0_files["checkpoints"].splitlines(keepends=True)),

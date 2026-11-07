@@ -119,12 +119,6 @@ In a trail check, the marker is the first record of kind `x-issuer-signing`, and
 
 This makes stripping signatures detectable against a trail with a marker: the marker cannot be removed without breaking the checkpoints that cover it, and everything after it must be signed. It does not detect removal of the marker together with everything after it, shown with an earlier genuine checkpoint: that is an older, genuine prefix of the trail, which only a consistency proof against a checkpoint someone kept can expose. An exported document on its own cannot show stripping, because a stripped record looks like a version 0 one: a log-signed-only record from a trail that has a marker means "check the full trail", not "fine".
 
-### 1.2 Order of writing
-
-The gateway writes a call's record and each decision (capability, policy, approval) before it runs the tool, and does not run the tool if they cannot be written: the agent is told the action was not performed and an error is logged. A tool's result can only be written after the tool has run. If that write fails, the tool has run, the trail holds the call and its decisions but no result, the agent is told the action ran but is not fully on record, and an error is logged. The gap shows in the trail as a call with no result.
-
-Signatures are checked strictly, the same way in every verifier: a public key or signature point of small order, and an S value that is not reduced, make the signature invalid (a small-order key verifies some signatures for every message, so lax checking lets forged checkpoints through). A trusted public key of small order is refused when it is loaded.
-
 **Digests instead of content.** By default a record holds the SHA-256 digest of a tool's arguments and result, computed over their canonical JSON form (section 5.3). Anyone holding the original arguments can recompute the digest and confirm they match the record. The full content can be kept beside the audit trail, but it stays outside the signed structure so it can be deleted under a retention policy without breaking any proof.
 
 Known limitation: a digest of a short, guessable value (such as `{"approve": true}`) can be confirmed by guessing. A later version will add salted commitments for operators who need to hide low-entropy arguments.
@@ -143,6 +137,12 @@ Known limitation: a digest of a short, guessable value (such as `{"approve": tru
 A digest field is left out when the reporting component did not share the arguments or result. Such a record proves that the component reported the call; it does not let anyone confirm what the arguments were.
 
 **Parents.** A record may only name parents that already appear earlier in the same audit trail. Records therefore form a causal graph inside the audit trail: a `tool.result` points to its `tool.call`, which points to the `session.start`.
+
+### 1.2 Order of writing
+
+The gateway writes a call's record and each decision (capability, policy, approval) before it runs the tool, and does not run the tool if they cannot be written: the agent is told the action was not performed and an error is logged. A tool's result can only be written after the tool has run. If that write fails, the tool has run, the trail holds the call and its decisions but no result, the agent is told the action ran but is not fully on record, and an error is logged. If the tool failed and that failure cannot be written, the agent is told the action was attempted and failed, and an error is logged. Either way the gap shows in the trail as a call with no result. An approval that answered an escalation stays usable until the allow decision that follows it is written, and budget reserved for a call is given back unless the tool ran.
+
+Signatures are checked strictly, the same way in every verifier: a public key or signature point of small order, and an S value that is not reduced, make the signature invalid (a small-order key verifies some signatures for every message, so lax checking lets forged checkpoints through). A trusted public key of small order is refused when it is loaded.
 
 ## 2. The audit trail
 
