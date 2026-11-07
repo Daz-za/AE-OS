@@ -361,6 +361,8 @@ class AgentClient:
             conn.connect()
             identity.peer_identity(conn.sock, trust_domain=self.trust_domain,
                                    expect=self.gateway_id)
+            if self.session is None:
+                self._read_early_alert(conn.sock)
             self._next += 1
             body = json.dumps({"jsonrpc": "2.0", "id": self._next, "method": method,
                                "params": params or {}})
@@ -379,6 +381,25 @@ class AgentClient:
             return json.loads(data or b"{}")
         finally:
             conn.close()
+
+    @staticmethod
+    def _read_early_alert(sock: ssl.SSLSocket) -> None:
+        """Surface a refusal of our certificate before sending anything.
+
+        With TLS 1.3 the client finishes its handshake before the gateway checks the client
+        certificate, and the gateway's alert ("certificate expired") arrives afterwards. If the
+        request were sent first, the gateway's close would reset the connection and the alert
+        would be lost, leaving only "connection reset". A refused connection reports its reason
+        within milliseconds; an accepted one stays silent until it gets a request.
+        """
+        previous = sock.gettimeout()
+        sock.settimeout(0.1)
+        try:
+            sock.recv(1)             # TLS 1.3 session tickets are consumed here; no data comes
+        except (TimeoutError, ssl.SSLWantReadError):
+            pass
+        finally:
+            sock.settimeout(previous)
 
     def initialize(self) -> Dict[str, Any]:
         return self._post("initialize", {"protocolVersion": PROTOCOL_VERSION,
