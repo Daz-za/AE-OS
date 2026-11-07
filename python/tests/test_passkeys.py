@@ -1090,7 +1090,8 @@ def test_writers_in_several_processes_leave_a_clean_trail_and_agreeing_directori
             d.sync(log._records_from(d.seen))
             built = passkeys.Directory.build(log._records_from(0),
                                              passkeys.load_principals(principals())[1])
-        return _directory_state(d) == _directory_state(built)
+        return d.problems == built.problems == [] and \
+            _directory_state(d) == _directory_state(built) and d.seen == len(log)
 
     def approving(k):
         log, d, rec = _reopened(path)
@@ -1104,7 +1105,8 @@ def test_writers_in_several_processes_leave_a_clean_trail_and_agreeing_directori
                     accepted += 1
                     break
                 except webauthn.WebAuthnError as e:
-                    assert "revoked" in str(e) or "not in the registry" in str(e), str(e)
+                    assert any(why in str(e) for why in (
+                        "revoked", "not in the registry", "different identity")), str(e)
         (tmp_path / f"accepted-{k}").write_text(str(accepted))
         assert agrees(d, log)
 
@@ -1113,7 +1115,26 @@ def test_writers_in_several_processes_leave_a_clean_trail_and_agreeing_directori
         for k in range(3):
             _revoke(rec, first[k], 5000 + 2 * k)
             _enrol(rec, second[k], 5001 + 2 * k)
-        assert agrees(d, log)
+        # then the approver is rebound, which ends every passkey, gets a new root passkey,
+        # and a second one confirmed by it
+        sign_in = sign_in_of(REBOUND_TO)
+        rec.approver_rebound(CFO, identity=REBOUND_TO, identity_evidence=sign_in,
+                             confirmation=A.evidence(nonce(5100), passkeys.REBIND_TOOL,
+                                                     passkeys.rebind_args_sha256(
+                                                         CFO, REBOUND_TO, sign_in)))
+        root, more = SoftAuthenticator("proc-root"), SoftAuthenticator("proc-more")
+        rec.passkey_enrolled(CFO, identity=REBOUND_TO, credential_id=root.credential_id,
+                             public_key=root.cose_key, rp_id=root.rp_id, origin=root.origin,
+                             identity_evidence=sign_in, registration=root.registration(
+                                 webauthn.enrol_challenge(CFO, sign_in.sha256)))
+        rec.passkey_enrolled(CFO, identity=REBOUND_TO, credential_id=more.credential_id,
+                             public_key=more.cose_key, rp_id=more.rp_id, origin=more.origin,
+                             confirmation=root.evidence(nonce(5101), passkeys.ENROL_TOOL,
+                                                        passkeys.enrol_args_sha256(
+                                                            CFO, REBOUND_TO, more.credential_id,
+                                                            more.cose_key, more.rp_id,
+                                                            more.origin)))
+        assert len(d.epochs[CFO]) == 3 and agrees(d, log)
 
     import os
     pids = []
@@ -1133,6 +1154,7 @@ def test_writers_in_several_processes_leave_a_clean_trail_and_agreeing_directori
     assert [os.waitstatus_to_exitcode(os.waitpid(p, 0)[1]) for p in pids] == [0] * 4
     rebuilt = _clean(path)
     assert all(rebuilt.creds[k.credential_id].revoked_at is not None for k in first)
+    assert len(rebuilt.epochs[CFO]) == 3 and rebuilt.problems == []
     accepted = sum(int((tmp_path / f"accepted-{k}").read_text()) for k in range(3))
     assert accepted and [r["kind"] for _, _, r in _trail(log)].count("approval") == accepted
 
@@ -1156,4 +1178,30 @@ def test_a_change_on_the_disk_is_applied_even_if_the_checkpoint_after_it_fails(t
         assert B.credential_id in d.creds             # written, so applied
     else:
         assert d.ledger.nonces.get(nonce(8)) is not None
+    assert _directory_state(d) == _directory_state(_clean(log.path))
+
+
+def test_the_directory_counts_what_it_wrote_as_seen(tmp_path):
+    """Once a judged write is applied, the directory has seen it: the next write's catch-up
+    must not apply it again (a rebinding applied twice would start two epochs)."""
+    log, d, rec = _fresh(tmp_path / "log")
+    assert d.seen == len(log)
+    sign_in = sign_in_of(REBOUND_TO)
+    rec.approver_rebound(CFO, identity=REBOUND_TO, identity_evidence=sign_in,
+                         confirmation=A.evidence(nonce(70), passkeys.REBIND_TOOL,
+                                                 passkeys.rebind_args_sha256(
+                                                     CFO, REBOUND_TO, sign_in)))
+    assert d.seen == len(log)
+    root = SoftAuthenticator("seen-root")
+    rec.passkey_enrolled(CFO, identity=REBOUND_TO, credential_id=root.credential_id,
+                         public_key=root.cose_key, rp_id=root.rp_id, origin=root.origin,
+                         identity_evidence=sign_in,
+                         registration=root.registration(webauthn.enrol_challenge(
+                             CFO, sign_in.sha256)))
+    call, esc = _escalate(rec, "c1")
+    rec.approval(call, delegation.Approval(
+        esc, CFO, "approve", TOOL, json_digest(ARGS), now_ms(),
+        evidence=root.evidence(nonce(71), TOOL, json_digest(ARGS),
+                               passkeys.escalation_cid(esc))))
+    assert d.seen == len(log) and d.problems == [] and len(d.epochs[CFO]) == 3
     assert _directory_state(d) == _directory_state(_clean(log.path))

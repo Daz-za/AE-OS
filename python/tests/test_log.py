@@ -435,3 +435,253 @@ def test_a_read_between_a_write_and_its_indexing_does_not_count_the_line_twice(t
     assert [x["i"] for x in lines] == [0, 1, 2, 3]
     assert log.checkpoint().size == 4
     assert ActionLog.open(log.path).verify().ok
+
+
+# ---- readers hold the lock shared; a stale or unreadable .pending; a torn checkpoint --------
+
+
+def _two(tag):
+    from aeos.canon import cid_of_bytes, dag_cbor
+    a = make_record("note", AGENT, body={"n": tag}, ts=1)
+    return [a, make_record("note", AGENT, body={"n": tag, "child": True},
+                           parents=[cid_of_bytes(dag_cbor(a))], ts=1)]
+
+
+def test_a_crash_its_recovery_and_a_new_batch_cannot_land_inside_one_read(tmp_path,
+                                                                        monkeypatch):
+    """A reader pauses inside its read. Meanwhile a writer process dies mid-batch, and another
+    writer recovers the trail and writes a new batch. The read holds the lock shared, so all
+    of that waits for it, and the reader never indexes the batch that was cut off."""
+    import threading
+    import aeos.log as log_module
+    log = ActionLog.create(tmp_path / "log")
+    _fill(log, 2)
+    reader = ActionLog.open(log.path)
+    writer = ActionLog.open(log.path)
+    real_pending, real_lines = reader._pending, log_module._lines
+    me, helpers = {}, []
+
+    def crash():
+        def child():
+            import os
+            for fd in os.listdir("/proc/self/fd"):     # a process of its own: not the
+                try:                                   # reader's lock, inherited by fork
+                    if os.readlink(f"/proc/self/fd/{fd}").endswith("/.lock"):
+                        os.close(int(fd))
+                except OSError:
+                    pass
+            die_after(monkeypatch, 2)                  # every byte, never declared finished
+            ActionLog.open(log.path)._append_all(_two("cut"))
+        fork(child)
+
+    def in_the_read(work):
+        t = threading.Thread(target=work)
+        t.start()
+        helpers.append(t)
+        t.join(1.0)                                    # finishes now only without the lock
+
+    def pending_then_crash():
+        got = real_pending()
+        if threading.get_ident() == me.get("reader") and not helpers:
+            in_the_read(crash)
+        return got
+
+    def lines_then_recover(data):
+        if threading.get_ident() == me.get("reader") and len(helpers) == 1:
+            in_the_read(lambda: writer._append_all(_two("new")))
+        return real_lines(data)
+
+    reader._pending = pending_then_crash
+    monkeypatch.setattr(log_module, "_lines", lines_then_recover)
+
+    def read():
+        me["reader"] = threading.get_ident()
+        reader.entries()
+
+    t = threading.Thread(target=read)
+    t.start()
+    t.join(10)
+    for h in helpers:
+        h.join(10)
+    monkeypatch.setattr(log_module, "_lines", real_lines)
+    assert len(helpers) == 2 and not any(h.is_alive() for h in helpers)
+    on_disk = [e.cid for e in ActionLog.open(log.path, read_only=True).entries()]
+    assert [e.cid for e in reader.entries()] == on_disk and len(on_disk) == 5
+    assert ActionLog.open(log.path).verify().ok
+
+
+def test_a_reader_waits_for_no_lock_file_and_never_makes_one(tmp_path):
+    log = ActionLog.create(tmp_path / "log")
+    _fill(log, 2)
+    (log.path / ".lock").unlink()                     # say, a read-only copy of the folder
+    copy = ActionLog.open(log.path, read_only=True)
+    assert len(copy.entries()) == 3 and copy.verify().ok and len(copy.checkpoints()) == 0
+    assert not (log.path / ".lock").exists()
+
+
+def test_writing_while_reading_on_the_same_thread_raises_instead_of_hanging(tmp_path):
+    log = ActionLog.create(tmp_path / "log")
+    with log._shared():
+        with pytest.raises(RuntimeError, match="would deadlock"):
+            log.append(make_record("note", AGENT, body={"n": 1}))
+    log.append(make_record("note", AGENT, body={"n": 1}))
+    assert len(log) == 2
+
+
+def _stale_pending(log, **over):
+    """A .pending naming the second record, as a copy of a trail taken mid-write would."""
+    lines = (log.path / "records.jsonl").read_bytes().split(b"\n")
+    offset = len(lines[0]) + 1
+    doc = {"offset": offset, "length": 700, "first_cid": json.loads(lines[1])["cid"], **over}
+    (log.path / ".pending").write_text(json.dumps(doc))
+    return doc
+
+
+@pytest.mark.parametrize("why", ["length", "first_cid", "checkpoint"])
+def test_a_stale_pending_never_cuts_records(tmp_path, why):
+    log = ActionLog.create(tmp_path / "log")
+    _fill(log, 6)
+    if why == "checkpoint":
+        log.checkpoint()
+        _stale_pending(log, length=10 ** 6)
+        reason = "a signed checkpoint covers records past its offset"
+    elif why == "first_cid":
+        _stale_pending(log, length=10 ** 6, first_cid="bafyother")
+        reason = "the record at its offset is not the first of its batch"
+    else:
+        _stale_pending(log)
+        reason = "the trail goes on past the batch it names"
+    before = (log.path / "records.jsonl").read_bytes()
+    reader = ActionLog.open(log.path, read_only=True)
+    assert len(reader.entries()) == 7                  # readers ignore it
+    assert reader.verify().problems == [f".pending is stale and was ignored: {reason}"]
+    writer = ActionLog.open(log.path)
+    with pytest.raises(log_module_error(), match="stale"):
+        writer.append(make_record("note", AGENT, body={"n": "next"}))
+    assert (log.path / "records.jsonl").read_bytes() == before      # nothing was cut
+    assert not (log.path / ".pending").exists() and (log.path / "torn" / "pending.json").exists()
+    writer.append(make_record("note", AGENT, body={"n": "next"}))
+    rep = ActionLog.open(log.path).verify()
+    assert rep.ok and rep.records == 8
+
+
+def log_module_error():
+    from aeos.log import StalePendingError
+    return StalePendingError
+
+
+def test_an_unreadable_pending_hides_nothing_and_is_moved_aside(tmp_path):
+    log = ActionLog.create(tmp_path / "log")
+    _fill(log, 2)
+    (log.path / ".pending").write_bytes(b'{"offset": 12')   # cut short as it was written
+    reader = ActionLog.open(log.path, read_only=True)
+    assert len(reader.entries()) == 3 and reader.verify().ok
+    log.append(make_record("note", AGENT, body={"n": "next"}))
+    assert not (log.path / ".pending").exists()
+    assert (log.path / "torn" / "pending.json").read_bytes() == b'{"offset": 12'
+    assert ActionLog.open(log.path).verify().ok
+
+
+def test_a_writer_that_dies_while_cutting_is_finished_by_the_next(tmp_path, monkeypatch):
+    log = ActionLog.create(tmp_path / "log")
+    _fill(log, 2)
+    size = (log.path / "records.jsonl").stat().st_size
+
+    def dies_mid_batch():
+        die_after(monkeypatch, 1)
+        ActionLog.open(log.path)._append_all(_two("cut"))
+
+    def dies_mid_cut():                                # the torn/ copy is kept, not the cut
+        import os
+        import aeos.log as log_module
+        monkeypatch.setattr(log_module.os, "truncate", lambda *a: os._exit(9))
+        ActionLog.open(log.path).append(make_record("note", AGENT, body={"n": "x"}))
+
+    assert fork(dies_mid_batch) == 9
+    assert fork(dies_mid_cut) == 9
+    assert (log.path / "torn" / f"{size}.bin").exists() and (log.path / ".pending").exists()
+    log.append(make_record("note", AGENT, body={"n": "after"}))
+    assert (log.path / "torn" / f"{size}.1.bin").exists()
+    rep = ActionLog.open(log.path).verify()
+    assert rep.ok and rep.records == 4
+
+
+def test_a_writer_that_indexed_past_an_unfinished_write_starts_its_index_again(tmp_path):
+    log = ActionLog.create(tmp_path / "log")
+    _fill(log, 3)
+    lines = (log.path / "records.jsonl").read_bytes().split(b"\n")
+    offset = sum(len(x) + 1 for x in lines[:3])
+    (log.path / ".pending").write_text(json.dumps({     # the last record: never finished
+        "offset": offset, "length": len(lines[3]) + 1, "first_cid": json.loads(lines[3])["cid"]}))
+    assert len(log) == 4                                # this process had indexed it
+    e = log.append(make_record("note", AGENT, body={"n": "next"}))
+    assert e.index == 3 and len(log) == 4
+    assert [x.cid for x in log.entries()] == [x.cid for x in ActionLog.open(log.path).entries()]
+    assert ActionLog.open(log.path).verify().ok
+
+
+def test_a_checkpoint_cut_short_is_reported_skipped_and_moved_aside(tmp_path):
+    log = ActionLog.create(tmp_path / "log")
+    log.append(make_record("note", AGENT, body={"n": 0}))
+    log.checkpoint()
+    path = log.path / "checkpoints.jsonl"
+    size = path.stat().st_size
+    with open(path, "a") as f:
+        f.write('{"log":"urn:x","size":2,"ro')           # a writer died mid-checkpoint
+    reader = ActionLog.open(log.path, read_only=True)
+    assert [c.size for c in reader.checkpoints()] == [2]
+    assert reader.verify().problems == ["checkpoints line 2: an unfinished write, not yet "
+                                        "recovered"]
+    log.append(make_record("note", AGENT, body={"n": 1}))
+    log.checkpoint()
+    assert (log.path / "torn" / f"checkpoints-{size}.bin").read_text().startswith('{"log"')
+    reader = ActionLog.open(log.path, read_only=True)
+    assert [c.size for c in reader.checkpoints()] == [2, 3] and reader.verify().ok
+    assert reader.action_record(reader.entries()[-1])["checkpoint"]["size"] == 3
+
+
+def test_content_that_cannot_be_stored_does_not_undo_the_record(tmp_path, monkeypatch, caplog):
+    import aeos.log as log_module
+    log = ActionLog.create(tmp_path / "log")
+    (log.path / "content").write_text("not a folder")   # the content store is broken
+    e = log.append(make_record("note", AGENT, body={"n": 1}), {"arguments": {"x": 1}})
+    assert e.index == 1 and ActionLog.open(log.path).verify().ok
+    assert any("could not be stored" in r.message and log.log_id in r.message
+               for r in caplog.records if r.name == log_module.LOG.name)
+
+
+def test_without_file_locking_a_read_between_a_write_and_its_indexing_still_waits(
+        tmp_path, monkeypatch):
+    """Where there are no file locks, the index lock alone keeps a reader in another thread
+    from indexing a line that is on the disk but not yet in the writer's index."""
+    import os
+    import threading
+    import aeos.log as log_module
+    monkeypatch.setattr(log_module, "fcntl", None)
+    log = ActionLog.create(tmp_path / "log")
+    log.append(make_record("note", AGENT, body={"n": 0}))
+    real_fsync = os.fsync
+    readers = []
+
+    def read_after_writing(fd):
+        real_fsync(fd)
+        if log._holder is not None and not readers and \
+                os.readlink(f"/proc/self/fd/{fd}").endswith("records.jsonl"):
+            reader = threading.Thread(target=log.entries)
+            reader.start()
+            readers.append(reader)
+            reader.join(0.3)          # blocks on the index lock; without it, it reads now
+
+    if not os.path.exists("/proc/self/fd"):
+        pytest.skip("needs /proc to name a file descriptor")
+    monkeypatch.setattr(log_module.os, "fsync", read_after_writing)
+    log.append(make_record("note", AGENT, body={"n": 1}))
+    monkeypatch.setattr(log_module.os, "fsync", real_fsync)
+    assert readers
+    for r in readers:
+        r.join(5)
+    log.append(make_record("note", AGENT, body={"n": 2}))
+    assert [e.index for e in log.entries()] == [0, 1, 2, 3]
+    assert [json.loads(x)["i"] for x in
+            (log.path / "records.jsonl").read_text().splitlines()] == [0, 1, 2, 3]
+    assert log.checkpoint().size == 4

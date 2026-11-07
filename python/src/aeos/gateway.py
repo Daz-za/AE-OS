@@ -67,8 +67,8 @@ class Gateway:
     policy_facts    tool name, arguments -> facts the policy needs, such as the invoice
     passkey_directory  the registry of passkey approvers (passkeys.Directory); an approval by
                     one of them needs a valid assertion, and each nonce and assertion is
-                    accepted once. Every write brings it up to the trail first, so a change
-                    or an approval any process wrote is seen
+                    accepted once. Every approval and registry change is judged after the
+                    directory is brought up to the trail
     """
 
     def __init__(self, log: ActionLog, tools: Dict[str, Tool], *,

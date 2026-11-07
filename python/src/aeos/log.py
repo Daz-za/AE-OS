@@ -294,6 +294,42 @@ def _lines(data: bytes) -> List[bytes]:
     return [p + b"\n" for p in parts[:-1]] + ([parts[-1]] if parts[-1] else [])
 
 
+UNFINISHED, STALE, UNREADABLE = "unfinished", "stale", "unreadable"
+
+
+def judge_pending(raw: bytes, records: bytes, covered: int) -> Tuple[str, int, str]:
+    """What a `.pending` (its bytes) says about records.jsonl (its bytes), where `covered` is
+    the size of the largest checkpoint that verifies (spec section 6). Returns (state,
+    offset, why): UNFINISHED with the offset where the unfinished batch starts; STALE, with
+    why, when it cannot describe the batch now at its offset (a copy restored beside later
+    records, say), so it must cut nothing; or UNREADABLE (cut short before any record)."""
+    try:
+        doc = json.loads(raw)
+        offset, length, first = doc["offset"], doc["length"], doc["first_cid"]
+    except (ValueError, KeyError, TypeError, RecursionError):
+        return UNREADABLE, 0, ""
+    if not all(isinstance(v, int) and not isinstance(v, bool) and v >= 0
+               for v in (offset, length)) or not isinstance(first, str):
+        return UNREADABLE, 0, ""
+    if offset > len(records):
+        return STALE, offset, "it names an offset past the end of the trail"
+    if offset and records[offset - 1:offset] != b"\n":
+        return STALE, offset, "it names an offset inside a record"
+    if len(records) > offset + length:
+        return STALE, offset, "the trail goes on past the batch it names"
+    end = records.find(b"\n", offset)
+    if end >= 0:
+        try:
+            cid = json.loads(records[offset:end + 1]).get("cid")
+        except (ValueError, AttributeError, RecursionError):
+            cid = None
+        if cid != first:
+            return STALE, offset, "the record at its offset is not the first of its batch"
+    if covered > records.count(b"\n", 0, offset):
+        return STALE, offset, "a signed checkpoint covers records past its offset"
+    return UNFINISHED, offset, ""
+
+
 def _fsync_dir(path: Path) -> None:
     """Make a file's creation, renaming or removal in `path` durable (POSIX only)."""
     if not hasattr(os, "O_DIRECTORY"):
@@ -339,13 +375,17 @@ class VerifyReport:
         return not self.problems
 
 
+class StalePendingError(RuntimeError):
+    """A `.pending` that cannot describe the batch at its offset: nothing was cut."""
+
+
 class ActionLog:
     """An audit trail on disk, safe to share between threads and between processes.
 
     Lock order, across AE-OS: the passkey directory, then the gateway, then the recorder,
     then this trail's file lock. A thread takes them in that order and never the other way
-    round; the trail's in-memory index lock is taken inside the file lock, and readers take
-    it alone.
+    round. Writers hold the file lock (.lock) exclusive and readers hold it shared, each
+    taking the in-memory index lock inside it.
 
     A write is durable when it returns: each batch of records is announced in `.pending`,
     written and flushed to the disk, and only then is `.pending` removed. A batch whose
@@ -371,6 +411,7 @@ class ActionLog:
         # thread never loads a line a writer in another has written but not yet indexed.
         self._index_lock = threading.RLock()
         self._holder: Optional[int] = None         # thread holding the file lock, if any
+        self._readers = threading.local()          # .shared: this thread holds it shared
 
     # ---- creation and opening ---------------------------------------------------------
 
@@ -418,15 +459,16 @@ class ActionLog:
 
     @contextlib.contextmanager
     def _locked(self) -> Iterator[None]:
-        """Hold the trail's file lock, then its index lock, with any unfinished write cut off
-        and the index brought up to date.
+        """Hold the trail's file lock exclusive, then its index lock, with any unfinished
+        write cut off and the index brought up to date.
 
         Lock order: directory, gateway, recorder, file (see the class). A thread that already
-        holds this lock and asks for it again, for example by writing from inside the judge
-        of a write, would wait for itself forever, so it is refused at once instead."""
-        if self._holder == threading.get_ident():
-            raise RuntimeError("this thread is already writing to the audit trail: a write "
-                               "from inside another write would deadlock")
+        holds the file lock and asks for it again, for example by writing from inside the
+        judge of a write or while reading, would wait for itself forever, so it is refused at
+        once instead."""
+        if self._holder == threading.get_ident() or getattr(self._readers, "shared", False):
+            raise RuntimeError("this thread already holds the audit trail's lock: a write "
+                               "from inside another write or a read would deadlock")
         with open(self.path / ".lock", "a") as lf:
             if fcntl:
                 fcntl.flock(lf, fcntl.LOCK_EX)
@@ -446,75 +488,143 @@ class ActionLog:
                 if fcntl:
                     fcntl.flock(lf, fcntl.LOCK_UN)
 
-    def _pending_offset(self) -> Optional[int]:
-        """Where the unfinished write announced in `.pending` starts, or None if there is none.
-        A `.pending` that cannot be read is being written, or was cut short, before any record
-        of its batch was: it holds nothing back."""
+    @contextlib.contextmanager
+    def _shared(self) -> Iterator[None]:
+        """Hold the trail's file lock shared, then its index lock, for a read: no writer of
+        any process is mid-write meanwhile. The same order as writers take them (the reverse
+        would deadlock). A thread that already holds the file lock reads under it. Without
+        .lock (a read-only copy) or file locking, it reads without one."""
+        if not fcntl or self._holder == threading.get_ident() or \
+                getattr(self._readers, "shared", False):
+            with self._index_lock:
+                yield
+            return
         try:
-            doc = json.loads((self.path / PENDING).read_bytes())
-            offset = doc["offset"]
-        except (FileNotFoundError, ValueError, KeyError, TypeError):
-            return None
-        if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
-            return None
-        return offset
+            fd: Optional[int] = os.open(self.path / ".lock", os.O_RDONLY)
+        except OSError:                                  # missing or not permitted
+            fd = None
+        try:
+            if fd is not None:
+                fcntl.flock(fd, fcntl.LOCK_SH)
+            self._readers.shared = True
+            with self._index_lock:
+                yield
+        finally:
+            self._readers.shared = False
+            if fd is not None:
+                os.close(fd)                             # lets the lock go
+
+    def _covered(self) -> int:
+        """The size of the largest checkpoint of this trail that verifies."""
+        best = 0
+        for line in self._checkpoint_lines():
+            try:
+                cp = Checkpoint.from_json(json.loads(line))
+            except (KeyError, ValueError, TypeError, RecursionError):
+                continue
+            if cp.size > best and cp.log_id == self.log_id and cp.verify(self.public_key):
+                best = cp.size
+        return best
+
+    def _checkpoint_lines(self) -> List[bytes]:
+        """checkpoints.jsonl's whole lines, without an unended last one."""
+        lines = _lines((self.path / "checkpoints.jsonl").read_bytes())
+        return [x for x in lines if x.endswith(b"\n") and x.strip()]
+
+    def _pending(self) -> Tuple[str, int, str]:
+        """What `.pending` says, as `judge_pending`; ("", 0, "") when there is none."""
+        try:
+            raw = (self.path / PENDING).read_bytes()
+        except FileNotFoundError:
+            return "", 0, ""
+        return judge_pending(raw, (self.path / "records.jsonl").read_bytes(), self._covered())
 
     def _recover_pending(self) -> None:
         """Cut off a batch that `.pending` says was never finished, then remove `.pending`.
-        Called with the file lock held, so its writer is gone. Raises if it cannot."""
-        if not (self.path / PENDING).exists():
+        Called with the file lock held exclusive, so its writer is gone. A `.pending` that
+        cannot be read is moved aside under torn/; one that is stale is moved aside too, with
+        nothing cut, and StalePendingError raised. Raises if it cannot cut."""
+        state, offset, why = self._pending()
+        if not state:
             return
-        offset = self._pending_offset()
-        if offset is None:                     # announced, then cut before any record was
+        if state != UNFINISHED:
+            kept = self._keep("pending", (self.path / PENDING).read_bytes(), ".json")
             (self.path / PENDING).unlink()
             _fsync_dir(self.path)
+            if state == STALE:
+                LOG.error("audit trail %s: %s is stale (%s); nothing was cut; moved to %s",
+                          self.log_id, PENDING, why, kept)
+                raise StalePendingError(
+                    f"audit trail {self.log_id}: {PENDING} is stale ({why}), so nothing was "
+                    f"cut; it was moved to {kept}. Check the trail, then write again.")
             return
-        if offset < self._offset:
-            raise RuntimeError(f"audit trail {self.log_id}: this process indexed records past "
-                               f"the unfinished write at offset {offset}")
+        if offset < self._offset:              # indexed past it: start the index again
+            self._entries, self._leaves, self._by_cid = [], [], {}
+            self._offset, self._marker_index, self._first_signed_seen = 0, None, False
         self._cut(offset, "an unfinished write")
         (self.path / PENDING).unlink()
         _fsync_dir(self.path)
 
+    def _keep(self, stem: str, data: bytes, suffix: str = ".bin") -> Path:
+        """Store bytes taken out of the trail under torn/, durably, under a new name."""
+        torn = self.path / TORN
+        if not torn.exists():
+            torn.mkdir()
+            _fsync_dir(self.path)
+        keep, n = torn / f"{stem}{suffix}", 1
+        while keep.exists():
+            keep, n = torn / f"{stem}.{n}{suffix}", n + 1
+        _write_durably(keep, data)
+        _fsync_dir(torn)
+        return keep
+
     def _cut(self, offset: int, what: str) -> None:
         """Cut records.jsonl back to `offset`, keeping the bytes cut under torn/. Called with
-        the file lock held; never without one (a write in progress would be cut)."""
+        the file lock held exclusive; never without (a write in progress would be cut)."""
         path = self.path / "records.jsonl"
         if path.stat().st_size <= offset:
             return
         with open(path, "rb") as f:
             f.seek(offset)
             cut = f.read()
-        torn = self.path / TORN
-        torn.mkdir(exist_ok=True)
-        keep, n = torn / f"{offset}.bin", 1
-        while keep.exists():
-            keep, n = torn / f"{offset}.{n}.bin", n + 1
-        _write_durably(keep, cut)
-        _fsync_dir(torn)
+        keep = self._keep(str(offset), cut)
         os.truncate(path, offset)
         with open(path, "rb+") as f:
             os.fsync(f.fileno())
         LOG.warning("audit trail %s: cut %s of %d bytes at offset %d, kept in %s",
                     self.log_id, what, len(cut), offset, keep)
 
+    def _cut_checkpoint_tail(self) -> None:
+        """Move an unended last line of checkpoints.jsonl (a checkpoint cut short) under torn/,
+        so the next checkpoint starts on a line of its own. Called with the file lock held
+        exclusive."""
+        path = self.path / "checkpoints.jsonl"
+        data = path.read_bytes()
+        if not data or data.endswith(b"\n"):
+            return
+        offset = data.rfind(b"\n") + 1
+        keep = self._keep(f"checkpoints-{offset}", data[offset:])
+        os.truncate(path, offset)
+        with open(path, "rb+") as f:
+            os.fsync(f.fileno())
+        LOG.warning("audit trail %s: moved a checkpoint cut short at offset %d to %s",
+                    self.log_id, offset, keep)
+
     def _load_new(self) -> None:
-        """Read records appended since the last read (possibly by another process). Lines are
-        indexed under the index lock, so a read in one thread and a write in another never
-        both count the same line."""
-        with self._index_lock:
+        """Read records appended since the last read (possibly by another process), holding
+        the file lock shared, then the index lock."""
+        with self._shared():
             self._load_new_locked()
 
     def _load_new_locked(self) -> None:
         """Index the whole new lines, stopping before an unfinished write: a line not yet
-        ended, or anything from the offset of a `.pending` present before or after the read."""
-        before = self._pending_offset()
+        ended, or the batch a `.pending` announces."""
+        state, offset, _ = self._pending()
         with open(self.path / "records.jsonl", "rb") as f:
             f.seek(self._offset)
             data = f.read()
-        after = self._pending_offset()
-        end = min([self._offset + len(data)] + [o for o in (before, after) if o is not None])
-        data = data[:max(0, end - self._offset)]
+        if state == UNFINISHED:
+            data = data[:max(0, offset - self._offset)]
         for line in _lines(data):
             if not line.endswith(b"\n"):
                 break                          # partial write in progress
@@ -737,7 +847,8 @@ class ActionLog:
         offset = self._offset
         pending = self.path / PENDING
         if fcntl:
-            _write_durably(pending, json.dumps({"offset": offset, "length": len(data)}).encode())
+            _write_durably(pending, json.dumps({"offset": offset, "length": len(data),
+                                                "first_cid": cid_str(entries[0].cid)}).encode())
             _fsync_dir(self.path)
         try:
             with open(path, "ab") as f:
@@ -758,10 +869,23 @@ class ActionLog:
             self._add(e)
         for e, (_, content) in zip(entries, batch):
             if content is not None:
-                cdir = self.path / "content"
-                cdir.mkdir(exist_ok=True)
-                (cdir / f"{cid_str(e.cid)}.json").write_text(json.dumps(content, indent=2))
+                self._store_content(e, content)
         return entries
+
+    def _store_content(self, e: Entry, content: Dict[str, Any]) -> None:
+        """Keep a record's full content beside it. The record is already on the disk and is
+        the truth, so a failure here is logged, by trail and record, and not raised."""
+        try:
+            cdir = self.path / "content"
+            if not cdir.exists():
+                cdir.mkdir()
+                _fsync_dir(self.path)
+            _write_durably(cdir / f"{cid_str(e.cid)}.json",
+                           json.dumps(content, indent=2).encode())
+            _fsync_dir(cdir)
+        except OSError as err:
+            LOG.error("audit trail %s: record %d (%s) is written, but its content could not "
+                      "be stored: %s", self.log_id, e.index, cid_str(e.cid), err)
 
     def checkpoint(self, ts: Optional[int] = None) -> Checkpoint:
         """Sign the current tree head and record it in checkpoints.jsonl, on the disk when
@@ -771,6 +895,8 @@ class ActionLog:
             cp = Checkpoint(self.log_id, len(self._leaves), merkle.root(self._leaves),
                             now_ms() if ts is None else ts, self.meta["key_id"])
             cp = Checkpoint(**{**cp.__dict__, "sig": self._key.sign(cp.message())})
+            if fcntl:
+                self._cut_checkpoint_tail()
             with open(self.path / "checkpoints.jsonl", "a") as f:
                 f.write(json.dumps(cp.to_json(), separators=(",", ":")) + "\n")
                 f.flush()
@@ -780,12 +906,14 @@ class ActionLog:
     # ---- reading ----------------------------------------------------------------------
 
     def checkpoints(self) -> List[Checkpoint]:
-        with open(self.path / "checkpoints.jsonl") as f:
-            return [Checkpoint.from_json(json.loads(line)) for line in f if line.strip()]
+        """The signed checkpoints, without a last one cut short (verify() reports it)."""
+        with self._shared():
+            lines = self._checkpoint_lines()
+        return [Checkpoint.from_json(json.loads(line)) for line in lines]
 
     def entry(self, ref: str) -> Entry:
         """Look up a record by index or CID string."""
-        with self._index_lock:
+        with self._shared():
             self._load_new_locked()
             if ref.isdigit():
                 return self._entries[int(ref)]
@@ -795,7 +923,7 @@ class ActionLog:
         return decode_dag_cbor(e.raw)
 
     def entries(self) -> List[Entry]:
-        with self._index_lock:
+        with self._shared():
             self._load_new_locked()
             return list(self._entries)
 
@@ -822,7 +950,7 @@ class ActionLog:
             checkpoint = covering[-1] if covering else self.checkpoint()
         if checkpoint.size <= e.index:
             raise ValueError("checkpoint does not cover this record")
-        with self._index_lock:                 # another process may have written more since
+        with self._shared():                   # another process may have written more since
             self._load_new_locked()
             leaves = list(self._leaves)
         if checkpoint.size > len(leaves):
@@ -844,7 +972,7 @@ class ActionLog:
 
     def consistency_proof(self, old_size: int, new_size: int) -> List[bytes]:
         """Hashes proving the tree of new_size extends the tree of old_size (RFC 9162)."""
-        with self._index_lock:
+        with self._shared():
             self._load_new_locked()
             leaves = list(self._leaves)
         if not 0 <= old_size <= new_size <= len(leaves):
@@ -854,7 +982,7 @@ class ActionLog:
         return merkle.consistency_proof(old_size, leaves[:new_size])
 
     def consistency(self, old: Checkpoint, new: Checkpoint) -> Dict[str, Any]:
-        with self._index_lock:                 # another process may have written more since
+        with self._shared():                   # another process may have written more since
             self._load_new_locked()
             leaves = list(self._leaves)
         if not old.size <= new.size <= len(leaves):
@@ -872,14 +1000,17 @@ class ActionLog:
         leaves: List[bytes] = []
         seen: Dict[bytes, int] = {}
         marker_at: Optional[int] = None
-        pending = self._pending_offset()
-        with open(self.path / "records.jsonl", "rb") as f:
-            data = f.read()
-        if pending is not None and pending < len(data):
-            data = data[:pending]
+        with self._shared():
+            state, offset, why = self._pending()
+            data = (self.path / "records.jsonl").read_bytes()
+            checkpoint_data = (self.path / "checkpoints.jsonl").read_bytes()
+        if state == UNFINISHED and offset < len(data):
+            data = data[:offset]
             first = data.count(b"\n") + 1
             rep.problems.append(f"line {first} on: an unfinished write, not yet recovered "
                                 "(.pending is present)")
+        elif state == STALE:
+            rep.problems.append(f".pending is stale and was ignored: {why}")
         lines = _lines(data)
         if lines and not lines[-1].endswith(b"\n"):
             rep.problems.append(f"line {len(lines)}: an unfinished write, not yet recovered")
@@ -935,8 +1066,12 @@ class ActionLog:
             seen[cid] = n
             leaves.append(merkle.leaf_hash(cid))
         prev: Optional[Checkpoint] = None
-        with open(self.path / "checkpoints.jsonl", "rb") as f:
-            checkpoint_lines = [(n, line) for n, line in enumerate(f) if line.strip()]
+        checkpoint_lines = [(n, line) for n, line in enumerate(_lines(checkpoint_data))
+                            if line.strip()]
+        if checkpoint_lines and not checkpoint_lines[-1][1].endswith(b"\n"):
+            n, _ = checkpoint_lines.pop()
+            rep.problems.append(f"checkpoints line {n + 1}: an unfinished write, not yet "
+                                "recovered")
         for n, line in checkpoint_lines:
             rep.checkpoints += 1
             try:
