@@ -1,12 +1,12 @@
 import datetime as dt
 import json
 
-from aeos import ReceiptLog, cli, demo, fulldemo, report
+from aeos import ActionLog, cli, demo, fulldemo, report
 
 
 def test_views_of_the_short_example(tmp_path, capsys):
     demo.run(tmp_path / "d", out=lambda _: None)
-    log = ReceiptLog.open(tmp_path / "d" / "log")
+    log = ActionLog.open(tmp_path / "d" / "log")
     view = report.decisions(log)
     assert view["counts"] == {"ap-limits/v3": {"escalate": 1}}
     assert view["decisions"][0]["approvals"][0]["answer"] == "approve"   # linked by parent

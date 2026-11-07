@@ -16,9 +16,9 @@
   <a href="https://ae-os.org/#research">Research paper</a>
 </p>
 
-<a href="https://ae-os.org"><img src="assets/film.jpg" alt="A 3D model of one company's systems in four layers: people at the top, software agents, a control layer that checks every action, and a ledger that keeps a receipt for each one. A bank with its own agents sits to the left and a subsidiary to the right."></a>
+<a href="https://ae-os.org"><img src="assets/film.jpg" alt="A 3D model of one company's systems in four layers: people at the top, software agents, a control layer that checks every action, and a ledger that keeps an action record for each one. A bank with its own agents sits to the left and a subsidiary to the right."></a>
 
-AE-OS is an early-stage open-source framework and research project by Darren Lentz. It studies how an organization's core systems could be run by software agents working under human authority, with a signed receipt for every action that an auditor can check independently.
+AE-OS is an early-stage open-source framework and research project by Darren Lentz. It studies how an organization's core systems could be run by software agents working under human authority, with an action record for every action, sealed in a signed audit trail that an auditor can check independently.
 
 The image above is a frame from the film on [ae-os.org](https://ae-os.org), which follows one simulated quarter-end close at a fictional company. The site also has the research paper and an interactive map of the architecture.
 
@@ -26,11 +26,11 @@ The image above is a frame from the film on [ae-os.org](https://ae-os.org), whic
 
 | Path | What it is |
 |---|---|
-| [`spec/receipts-v0.md`](spec/receipts-v0.md) | AE-OS Receipts format: records, Merkle log, signed checkpoints, receipts and consistency proofs |
+| [`spec/action-records-v1.md`](spec/action-records-v1.md) | The action record format, in the vocabulary of IETF SCITT: action records, the Merkle audit trail, signed checkpoints, Receipts and consistency proofs, and where AE-OS is and is not yet SCITT-conformant. [`spec/receipts-v0.md`](spec/receipts-v0.md) is its earlier name |
 | [`spec/identity-and-witnesses-draft.md`](spec/identity-and-witnesses-draft.md) | SPIFFE identities, delegated authority, policy and approvals, books of account, the mutual-TLS gateway, witness cosignatures and evidence folders (draft) |
 | [`policy/`](policy/) | The quarter-end close rules and the supplier payment rules in Rego, and the script that compiles them to WebAssembly |
-| [`python/`](python/) | `aeos`, the Python library, command line and browser workspace. It runs the architecture on one computer: a certificate authority and SPIFFE identities, delegated authority, an MCP gateway, rules compiled to WebAssembly, books of account, the receipt log and witnesses. Its recorder takes tool calls from MCP servers, gateways, OpenTelemetry traces and Claude agents |
-| [`rust/`](rust/) | `aeos-verify`, a separate verifier in Rust, sharing no code with the Python library, that auditors can use to check receipts, consistency proofs and whole logs |
+| [`python/`](python/) | `aeos`, the Python library, command line and browser workspace. It runs the architecture on one computer: a certificate authority and SPIFFE identities, delegated authority, an MCP gateway, rules compiled to WebAssembly, books of account, the audit trail and witnesses. Its recorder takes tool calls from MCP servers, gateways, OpenTelemetry traces and Claude agents |
+| [`rust/`](rust/) | `aeos-verify`, a separate verifier in Rust, sharing no code with the Python library, that auditors can use to verify action records, consistency proofs and whole audit trails |
 | [`testvectors/`](testvectors/) | Shared test vectors that keep the Python, Rust and browser implementations in agreement |
 | [`docs/`](docs/) | [Getting started](docs/getting-started.md), for people new to the command line, and [Build your own AE-OS](docs/building.md), for connecting your own tools, rules and agents |
 | [`examples/`](examples/) | A worked example: an agent pays an invoice, and an auditor checks the evidence |
@@ -55,6 +55,14 @@ See [python/README.md](python/README.md) for the command line and the MCP proxy,
 ## Status
 
 Early release (0.1) for evaluation and comment. Feedback is welcome through GitHub issues.
+
+AE-OS follows the IETF SCITT standards (RFC 9943 and RFC 9942) in its vocabulary and uses the same Merkle tree, but it is SCITT-aligned, not yet SCITT-conformant. [`spec/action-records-v1.md`](spec/action-records-v1.md) lists what matches and what does not.
+
+## Roadmap
+
+- **Document type.** Writers emit `aeos-action-record/v1` instead of `aeos-receipt/v0` once the verifier deployed at ae-os.org/verify reads it (it reads only `aeos-receipt/v0` today; every verifier in this repository reads both).
+- **Separate issuer key.** A gateway issuer key distinct from the audit trail's checkpoint key, so the issuer and the Transparency Service are different signing parties (today they share one key).
+- **COSE wire format.** The gateway's issuer signature on each action record, today in JSON form, as COSE_Sign1 with CWT Claims; Receipts as COSE Receipts (RFC 9942); Transparent Statements carrying them in the `receipts` header, so a generic SCITT verifier can check AE-OS evidence. The JSON formats stay readable.
 
 ## License
 

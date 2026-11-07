@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from aeos import ReceiptLog, Recorder
+from aeos import ActionLog, Recorder
 from aeos.canon import json_digest
 from aeos.events import EventError, apply, otlp_events
 
@@ -49,13 +49,13 @@ def test_mcp_tool_span_becomes_call_and_result(tmp_path):
     assert call["source"]["service"] == "acme-mcp-gateway"
     assert result["outcome"] == "ok" and result["ts"] == 1760000000250
 
-    log = ReceiptLog.create(tmp_path / "log")
+    log = ActionLog.create(tmp_path / "log")
     rec = Recorder(log, agent=AGENT)
     for ev in events:
         apply(rec, ev)
     for ev in otlp_events(payload):          # an exporter retry adds nothing
         apply(rec, ev)
-    recs = [log.record(e) for e in log.entries()]
+    recs = [log.record(e) for e in log.entries()[1:]]            # [0] is the signing marker
     assert [r["kind"] for r in recs] == ["session.start", "tool.call", "tool.result"]
     assert recs[1]["body"]["args_sha256"] == json_digest({"invoice": "INV-1"})
     assert recs[1]["body"]["source"]["trace_id"] == "4bf92f3577b34da6a3ce929d0e0e4736"
@@ -73,7 +73,7 @@ def test_failed_genai_tool_span():
 
 
 def test_event_validation(tmp_path):
-    rec = Recorder(ReceiptLog.create(tmp_path / "log"), agent=AGENT, allow_tools=["a"])
+    rec = Recorder(ActionLog.create(tmp_path / "log"), agent=AGENT, allow_tools=["a"])
     with pytest.raises(EventError):
         apply(rec, {"event": "tool.call", "call_id": "c1"})
     with pytest.raises(EventError):
@@ -83,4 +83,4 @@ def test_event_validation(tmp_path):
     out = apply(rec, {"event": "tool.call", "tool": "b", "call_id": "c2",
                       "agent": "spiffe://acme.example/agent/x"})
     assert out["decision"] == "deny" and out["reason"] == "tool-not-in-allow-list"
-    assert rec.log.record(rec.log.entries()[0])["agent"] == "spiffe://acme.example/agent/x"
+    assert rec.log.record(rec.log.entries()[1])["agent"] == "spiffe://acme.example/agent/x"

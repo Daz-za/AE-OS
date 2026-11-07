@@ -1,12 +1,16 @@
-// AE-OS Receipts v0 verifier for web browsers and Node.js 20+ (spec/receipts-v0.md).
+// AE-OS action record verifier for web browsers and Node.js 20+ (spec/action-records-v1.md).
 //
-// Checks receipts and consistency proofs offline with the Web Crypto API (SHA-256 and
-// Ed25519); nothing is sent anywhere. Problems are reported in the same words as the
-// Python reference implementation and the Rust verifier; an empty list means valid.
-// Tested against testvectors/receipts-v0.json by verify.test.mjs.
+// Checks action records (with their Receipts) and consistency proofs offline with the Web
+// Crypto API (SHA-256 and Ed25519); nothing is sent anywhere. Problems are reported in the
+// same words as the Python reference implementation and the Rust verifier; an empty list
+// means the action record is verified. Reads both `aeos-action-record/v1` documents and the
+// version 0 `aeos-receipt/v0`. Tested against testvectors/action-records-v1.json and the
+// frozen testvectors/receipts-v0.json by verify.test.mjs.
 
 const subtle = globalThis.crypto.subtle;
 const CHECKPOINT_CONTEXT = new TextEncoder().encode("aeos-receipts/checkpoint/v0\n");
+// The issuer signs the binary CID of each action record under this context.
+const STATEMENT_CONTEXT = new TextEncoder().encode("aeos-action-record/statement/v1\n");
 const CID_PREFIX = [0x01, 0x71, 0x12, 0x20];
 const BASE32 = "abcdefghijklmnopqrstuvwxyz234567";
 
@@ -271,7 +275,7 @@ export async function verifyConsistencyProof(oldSize, newSize, proof, oldRoot, n
 }
 
 // ---------------------------------------------------------------------------------------
-// Checkpoints, receipts and consistency proofs (spec sections 3-4)
+// Checkpoints, action records and consistency proofs (spec sections 3-4)
 // ---------------------------------------------------------------------------------------
 
 function field(d, k) {
@@ -312,7 +316,66 @@ export async function keyId(publicKey) {
   return hex(await sha256(publicKey)).slice(0, 16);
 }
 
+// Edwards25519, for the strict checks in verifySignature. Verifiers disagree about keys and
+// signature points of small order (some forgeries then verify for every message) and about
+// scalars that are not reduced. AE-OS refuses all of them, in every verifier, so each one
+// gives the same answer.
+const P = 2n ** 255n - 19n;
+const L = 2n ** 252n + 27742317777372353535851937790883648493n;
+const D = (-121665n * modPow(121666n, P - 2n, P)) % P + P;
+
+function modPow(base, exp, mod) {
+  let result = 1n;
+  base %= mod;
+  for (; exp > 0n; exp >>= 1n) {
+    if (exp & 1n) result = (result * base) % mod;
+    base = (base * base) % mod;
+  }
+  return result;
+}
+
+function leInt(bytes) {
+  let n = 0n;
+  for (let i = bytes.length - 1; i >= 0; i--) n = (n << 8n) | BigInt(bytes[i]);
+  return n;
+}
+
+function decodePoint(enc) {
+  if (enc.length !== 32) return null;
+  const n = leInt(enc);
+  const y = (n & ((1n << 255n) - 1n)) % P;
+  const sign = n >> 255n;
+  const u = (y * y - 1n + P) % P;
+  const v = (D * y * y + 1n) % P;
+  const x2 = (u * modPow(v, P - 2n, P)) % P;
+  let x = modPow(x2, (P + 3n) / 8n, P);
+  if ((x * x - x2 + P) % P !== 0n) x = (x * modPow(2n, (P - 1n) / 4n, P)) % P;
+  if ((x * x - x2 + P) % P !== 0n) return null;
+  if ((x & 1n) !== sign) x = (P - x) % P;
+  return [x, y];
+}
+
+function addPoints([x1, y1], [x2, y2]) {
+  const t = (D * x1 * x2 * y1 * y2) % P;
+  return [
+    (((x1 * y2 + x2 * y1) % P) * modPow((1n + t) % P, P - 2n, P)) % P,
+    (((y1 * y2 + x1 * x2) % P) * modPow((1n - t + P) % P, P - 2n, P)) % P,
+  ];
+}
+
+/** True if the encoded point has an order dividing 8 (including the identity). */
+export function isSmallOrder(enc) {
+  let point = decodePoint(enc);
+  if (point === null) return false;
+  for (let i = 0; i < 3; i++) point = addPoints(point, point);
+  return point[0] === 0n && point[1] === 1n;
+}
+
 export async function verifySignature(publicKey, signature, message) {
+  if (signature.length !== 64 || isSmallOrder(publicKey) || isSmallOrder(signature.slice(0, 32))
+      || leInt(signature.slice(32)) >= L) {
+    return false;
+  }
   try {
     const key = await subtle.importKey("raw", publicKey, { name: "Ed25519" }, false, ["verify"]);
     return await subtle.verify("Ed25519", key, signature, message);
@@ -328,22 +391,45 @@ async function checkpointVerifies(cp, publicKey) {
   return verifySignature(publicKey, cp.sig, concat(CHECKPOINT_CONTEXT, dagCbor(body)));
 }
 
-/** Check an aeos-receipt/v0 document offline against a trusted public key (bytes). */
-export async function verifyReceipt(receipt, publicKey) {
-  if (receipt === null || typeof receipt !== "object" || receipt.type !== "aeos-receipt/v0") {
-    return ["not an aeos-receipt/v0 document"];
+export const ACTION_RECORD_TYPE = "aeos-action-record/v1";
+export const LEGACY_RECEIPT_TYPE = "aeos-receipt/v0";
+
+/** True for the document types verifyActionRecord reads. */
+export function isActionRecordDoc(doc) {
+  return doc !== null && typeof doc === "object"
+    && (doc.type === ACTION_RECORD_TYPE || doc.type === LEGACY_RECEIPT_TYPE);
+}
+
+export const ISSUER_SIGNED = "issuer-signed";
+export const LOG_SIGNED_ONLY = "log-signed only";
+
+/** Check an action record with its Receipt offline against a trusted public key (bytes).
+ *  Returns the list of problems; an empty list means verified. */
+export async function verifyActionRecord(doc, publicKey) {
+  return (await verifyActionRecordDetail(doc, publicKey)).problems;
+}
+
+/** Like verifyActionRecord, plus how the record is vouched for: { problems, signature } where
+ *  signature is ISSUER_SIGNED (an issuer signature is present; a wrong one is a problem) or
+ *  LOG_SIGNED_ONLY (none, as for every record written under version 0). */
+export async function verifyActionRecordDetail(doc, publicKey) {
+  if (!isActionRecordDoc(doc)) {
+    return {
+      problems: [`not an ${ACTION_RECORD_TYPE} document (or ${LEGACY_RECEIPT_TYPE})`],
+      signature: LOG_SIGNED_ONLY,
+    };
   }
   let cp, raw, index, proof;
   try {
-    cp = checkpointFromJson(field(receipt, "checkpoint"));
-    raw = unb64(text(receipt, "record"));
-    index = uint(receipt, "index");
-    proof = hexList(receipt, "inclusion_proof");
+    cp = checkpointFromJson(field(doc, "checkpoint"));
+    raw = unb64(text(doc, "record"));
+    index = uint(doc, "index");
+    proof = hexList(doc, "inclusion_proof");
   } catch (e) {
-    return [`malformed receipt: ${e.message}`];
+    return { problems: [`malformed action record: ${e.message}`], signature: LOG_SIGNED_ONLY };
   }
   const problems = [];
-  if (cp.log !== receipt.log_id) problems.push("checkpoint belongs to a different log");
+  if (cp.log !== doc.log_id) problems.push("checkpoint belongs to a different log");
   if (!(await checkpointVerifies(cp, publicKey))) {
     problems.push("checkpoint signature does not verify with the given public key");
   }
@@ -353,11 +439,30 @@ export async function verifyReceipt(receipt, publicKey) {
     problems.push(`record bytes are not canonical: ${e.message}`);
   }
   const cid = await cidOfBytes(raw);
-  if (cidStr(cid) !== receipt.cid) problems.push("record CID does not match the record bytes");
+  if (cidStr(cid) !== doc.cid) problems.push("record CID does not match the record bytes");
   if (!(await verifyInclusion(await leafHash(cid), index, cp.size, proof, cp.root))) {
     problems.push("inclusion proof does not lead to the checkpoint root");
   }
-  return problems;
+  let signature = LOG_SIGNED_ONLY;
+  if ("statement_signature" in doc) {
+    signature = ISSUER_SIGNED;
+    let sigKeyId, sig;
+    try {
+      const s = doc.statement_signature;
+      sigKeyId = text(s, "key_id");
+      sig = unb64(text(s, "sig"));
+    } catch {
+      problems.push("issuer signature is malformed");
+    }
+    if (sig !== undefined) {
+      if (sigKeyId !== (await keyId(publicKey))) {
+        problems.push("issuer signature names a different key than the given public key");
+      } else if (!(await verifySignature(publicKey, sig, concat(STATEMENT_CONTEXT, cid)))) {
+        problems.push("issuer signature does not verify with the given public key");
+      }
+    }
+  }
+  return { problems, signature };
 }
 
 /** Check that a newer checkpoint extends an older one (nothing rewritten or removed). */
@@ -383,14 +488,20 @@ export async function verifyConsistency(doc, publicKey) {
   return problems;
 }
 
-/** The readable record inside a receipt, or null if its bytes do not decode. */
-export function receiptRecord(receipt) {
+/** Deprecated version 0 name of verifyActionRecord, kept for one release. */
+export const verifyReceipt = verifyActionRecord;
+
+/** The readable record inside an action record document, or null if its bytes do not decode. */
+export function actionRecordContent(doc) {
   try {
-    return toView(decodeDagCbor(unb64(receipt.record)));
+    return toView(decodeDagCbor(unb64(doc.record)));
   } catch {
     return null;
   }
 }
+
+/** Deprecated version 0 name of actionRecordContent, kept for one release. */
+export const receiptRecord = actionRecordContent;
 
 /** A public key given as hex, or as the text of a log.json file. */
 export function parsePublicKey(input) {
@@ -405,5 +516,6 @@ export function parsePublicKey(input) {
   }
   const key = unhex(h);
   if (key.length !== 32) throw new Error("a public key is 64 hexadecimal characters");
+  if (isSmallOrder(key)) throw new Error("this is not a usable public key: it is a point of small order, which makes forged signatures possible");
   return key;
 }

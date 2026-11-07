@@ -1,4 +1,4 @@
-"""Canonical encodings used by AE-OS Receipts.
+"""Canonical encodings used by AE-OS action records.
 
 * Deterministic DAG-CBOR (the subset AE-OS needs): null, bool, int, text, bytes,
   list, map with text keys, and tag-42 CID links. Floats are rejected so that every
@@ -90,7 +90,9 @@ def _read_arg(data: bytes, i: int, info: int) -> Tuple[int, int]:
     return int.from_bytes(data[i:i + size], "big"), i + size
 
 
-def _decode(data: bytes, i: int) -> Tuple[Any, int]:
+def _decode(data: bytes, i: int, depth: int = 0) -> Tuple[Any, int]:
+    if depth > 256:
+        raise DecodeError("nesting too deep")
     if i >= len(data):
         raise DecodeError("truncated")
     ib = data[i]
@@ -117,19 +119,19 @@ def _decode(data: bytes, i: int) -> Tuple[Any, int]:
     if major == 4:
         out = []
         for _ in range(n):
-            x, i = _decode(data, i)
+            x, i = _decode(data, i, depth + 1)
             out.append(x)
         return out, i
     if major == 5:
         m = {}
         for _ in range(n):
-            k, i = _decode(data, i)
+            k, i = _decode(data, i, depth + 1)
             if not isinstance(k, str):
                 raise DecodeError("map key must be text")
-            m[k], i = _decode(data, i)
+            m[k], i = _decode(data, i, depth + 1)
         return m, i
     if major == 6 and n == 42:
-        body, i = _decode(data, i)
+        body, i = _decode(data, i, depth + 1)
         if not isinstance(body, bytes) or not body.startswith(b"\x00"):
             raise DecodeError("bad CID link")
         return Link(body[1:]), i

@@ -61,7 +61,7 @@ def test_calls_pass_each_check_and_the_evidence_audits(ws):
         got = p.call("accounts-payable", "erp.invoice.get", {"invoice": "INV-1001"})
         assert got["ok"] and got["result"]["amount_minor"] == 420_000
         assert steps(got) == {"identity": "pass", "allow": "pass", "authority": "pass",
-                              "rules": "pass", "tool": "pass", "receipt": "pass"}
+                              "rules": "pass", "tool": "pass", "record": "pass"}
 
         big = {"invoice": "INV-1002", "amount_minor": 780_000}
         waiting = p.call("accounts-payable", "erp.invoice.pay", big)

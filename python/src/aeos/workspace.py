@@ -5,7 +5,7 @@ instructions they sign, its agents and what each may do, the systems that provid
 the rules, the books of account and the witnesses. `Platform` sets the company up step by
 step, the way the architecture is built (see STEPS), and then runs the whole stack on one
 computer: a certificate authority and SPIFFE identities, an authorization service, the MCP
-gateway with the rules, the books, the receipt log and the witnesses. The workspace folder
+gateway with the rules, the books, the audit trail and the witnesses. The workspace folder
 is also an evidence folder, so `aeos audit`, the reports and the browser page work on it
 unchanged.
 
@@ -41,7 +41,7 @@ from biscuit_auth import Biscuit
 from . import books, delegation, examples, identity, keys, policy, report, witness
 from .canon import cid_of_bytes, cid_str, dag_cbor, json_digest
 from .gateway import AgentClient, Gateway
-from .log import ReceiptLog, make_record, now_ms
+from .log import ActionLog, make_record, now_ms
 
 FORMAT = examples.FORMAT
 FILE = "workspace.json"
@@ -88,9 +88,9 @@ STEPS: List[Dict[str, Any]] = [
              "mutual TLS, where both sides show a certificate, and hold no passwords. The "
              "platform renews them every 5 minutes. In production SPIRE, an identity "
              "service, issues them after checking the machine and the software."},
-    {"id": "log", "title": "Receipt log", "layer": "ledger", "section": "07 Records",
+    {"id": "log", "title": "Audit trail", "layer": "ledger", "section": "07 Records",
      "film": 6, "module": "log",
-     "text": "Start the receipt log, which records every step and regularly signs a "
+     "text": "Start the audit trail, which records every step and regularly signs a "
              "checkpoint that fixes everything recorded so far, and register the "
              "independent witnesses who cosign each checkpoint."},
     {"id": "books", "title": "Books of account", "layer": "ledger", "section": "06 Books",
@@ -117,7 +117,7 @@ STEPS: List[Dict[str, Any]] = [
      "film": 2, "module": "gateway",
      "text": "Start the gateway for MCP, the protocol agents use to call tools. Every call passes its checks in order: identity, allow "
              "list, delegated authority and rules, then the tool, the books and the "
-             "receipt."},
+             "action record."},
 ]
 STEP_IDS = [s["id"] for s in STEPS]
 
@@ -833,9 +833,9 @@ class Platform:
         f, priv = self.folder, self.private
         log_dir = f / "log"
         if (log_dir / "log.json").exists():
-            self.log = ReceiptLog.open(log_dir, key_path=priv / "log-signing.key")
+            self.log = ActionLog.open(log_dir, key_path=priv / "log-signing.key")
         else:
-            self.log = ReceiptLog.create(log_dir, log_id=f"urn:aeos:{self.domain}",
+            self.log = ActionLog.create(log_dir, log_id=f"urn:aeos:{self.domain}",
                                          key_path=priv / "log-signing.key")
         (f / "public-key.txt").write_text(self.log.public_key.hex() + "\n")
         self._witnesses()
@@ -1280,7 +1280,7 @@ class Platform:
                 "renew_minutes": RENEW_EVERY // 60}
 
     def _view_log(self) -> Dict[str, Any]:
-        log = self.log if hasattr(self, "log") else ReceiptLog.open(self.folder / "log")
+        log = self.log if hasattr(self, "log") else ActionLog.open(self.folder / "log")
         cps = log.checkpoints()
         w = json.loads((self.folder / "witnesses.json").read_text())
         return {"log_id": log.log_id, "public_key": log.public_key.hex(), "records": len(log),
@@ -1290,7 +1290,7 @@ class Platform:
                 "required": w["required"]}
 
     def _view_books(self) -> Dict[str, Any]:
-        log = self.log if hasattr(self, "log") else ReceiptLog.open(self.folder / "log")
+        log = self.log if hasattr(self, "log") else ActionLog.open(self.folder / "log")
         b = self.doc["books"] or {}
         view = report.books_view(log, dict(b.get("accounts") or {}))
         names = entity_names(self.doc)
@@ -1428,7 +1428,7 @@ class Platform:
             return {"size": cp.size, "witnesses": [g["witness"] for g in got]}
 
 
-def answer(log: ReceiptLog, reply: Dict[str, Any], agent: str, tool: str,
+def answer(log: ActionLog, reply: Dict[str, Any], agent: str, tool: str,
            names: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """The gateway's reply in plain terms, with the trace of the call it made."""
     result = reply.get("result") or {}

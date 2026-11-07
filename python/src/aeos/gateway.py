@@ -4,7 +4,7 @@ Agents send MCP JSON-RPC requests (initialize, tools/list, tools/call) as HTTP P
 /mcp, as in MCP's Streamable HTTP transport, over a TLS connection on which both sides
 present X.509-SVIDs. The gateway takes the agent's identity from its verified
 certificate, never from the request, checks that the identity may use the tool, runs the
-tool, and records the call and its result in the receipt log under that identity. Each
+tool, and records the call and its result in the audit trail under that identity. Each
 session's first record carries the fingerprint of the agent's SVID, so an auditor can
 match the records to the certificate the agent presented.
 
@@ -29,19 +29,28 @@ import base64
 import http.client
 import json
 import secrets
+import socket
 import ssl
+import sys
 import threading
+import time
+import datetime as dt
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
+import logging
+
+from cryptography import x509
+
 from . import books, delegation, identity, policy as policy_mod
 from .canon import canonical_json, cid_str, json_digest
-from .log import ReceiptLog, now_ms
+from .log import ActionLog, now_ms
 from .recorder import Recorder
 
 Tool = Callable[[Dict[str, Any]], Any]
 PROTOCOL_VERSION = "2025-06-18"
+LOG = logging.getLogger("aeos.gateway")
 
 
 class Gateway:
@@ -57,7 +66,7 @@ class Gateway:
     policy_facts    tool name, arguments -> facts the policy needs, such as the invoice
     """
 
-    def __init__(self, log: ReceiptLog, tools: Dict[str, Tool], *,
+    def __init__(self, log: ActionLog, tools: Dict[str, Tool], *,
                  permissions: Dict[str, Iterable[str]], trust_domain: str,
                  svid_files: Tuple[Path, Path], bundle_file: Path,
                  on_behalf_of: Optional[Dict[str, str]] = None,
@@ -67,6 +76,7 @@ class Gateway:
                  policy: Optional[policy_mod.Policy] = None,
                  policy_facts: Optional[Callable[[str, Dict[str, Any]], Dict[str, Any]]] = None
                  ) -> None:
+        log.require_signing()
         self.log, self.tools, self.trust_domain = log, tools, trust_domain
         self.permissions = {k: set(v) for k, v in permissions.items()}
         self.obo = on_behalf_of or {}
@@ -105,7 +115,14 @@ class Gateway:
                 extra["authorization"] = delegation.POLICY
             if self.policy is not None:
                 extra["policy_sha256"] = self.policy.sha256
-            self.recorder(peer).session(session, subject="mcp", extra=extra)
+            try:
+                self.recorder(peer).session(session, subject="mcp", extra=extra)
+            except OSError as e:
+                self._sessions.pop(session, None)
+                LOG.error("could not write to the audit trail %s (new session): %s: %s",
+                          self.log.log_id, type(e).__name__, e)
+                return _err(rid, -32003, "the session was not opened: it could not be written "
+                                         "to the audit trail"), None
             return _ok(rid, {"protocolVersion": PROTOCOL_VERSION, "capabilities": {"tools": {}},
                              "serverInfo": {"name": "aeos-gateway", "version": "0.1"}}), session
         known = self._sessions.get(session or "")
@@ -123,42 +140,87 @@ class Gateway:
         rec = self.recorder(peer)
         call_id = str(rid)
         at = now_ms()
-        cap = self._authorize(peer, name, args, token, at) \
-            if self.authority_key is not None else None
-        entry, refusal = rec.call(name, call_id=call_id, session_id=session, arguments=args,
-                                  on_behalf_of=cap["principal"] if cap else None, ts=at)
-        reserved = cap["envelope"] if cap and cap["allowed"] else None
-        reasons = [f"{peer} may not use {name}"] if refusal else []
-        if cap:                                     # each check's outcome is recorded
-            rec.decision(entry, name, decision="allow" if cap["allowed"] else "deny",
-                         policy=delegation.POLICY, body=cap["body"],
-                         on_behalf_of=cap["principal"], ts=at)
-            reasons += cap["body"]["reasons"]
-        if reasons:
-            if reserved is not None:
-                self.budget.release(reserved, cap["body"]["amount"])
-            return _refused(rid, "; ".join(reasons)), session
-        obo = cap["principal"] if cap else None
-        if self.policy is not None:
-            stop = self._apply_policy(rec, entry, rid, peer, name, args, approval, obo, at)
-            if stop is not None:
-                if reserved is not None:
-                    self.budget.release(reserved, cap["body"]["amount"])
-                return stop, session
-        tool = self.tools[name]
-        try:                                        # the books also need the call's record
-            out = tool(args, entry) if getattr(tool, "takes_call", False) else tool(args)
-        except Exception as e:                      # the tool's failure is the agent's answer
-            if reserved is not None:                  # a call that did not run spends nothing
-                self.budget.release(reserved, cap["body"]["amount"])
-            rec.result(call_id, session_id=session, error={"message": str(e)}, on_behalf_of=obo)
-            if isinstance(e, books.Refused):
-                return _refused(rid, str(e)), session
-            return _ok(rid, {"isError": True, "content": [{"type": "text", "text": str(e)}]}), \
-                session
-        rec.result(call_id, session_id=session, result=out, on_behalf_of=obo)
-        return _ok(rid, {"content": [{"type": "text", "text": json.dumps(out)}],
-                         "structuredContent": out}), session
+        cap, obo, spent = None, None, False
+        try:
+            try:
+                cap = self._authorize(peer, name, args, token, at) \
+                    if self.authority_key is not None else None
+                entry, refusal = rec.call(name, call_id=call_id, session_id=session,
+                                          arguments=args,
+                                          on_behalf_of=cap["principal"] if cap else None, ts=at)
+                reasons = [f"{peer} may not use {name}"] if refusal else []
+                if cap:                                 # each check's outcome is recorded
+                    rec.decision(entry, name, decision="allow" if cap["allowed"] else "deny",
+                                 policy=delegation.POLICY, body=cap["body"],
+                                 on_behalf_of=cap["principal"], ts=at)
+                    reasons += cap["body"]["reasons"]
+                if reasons:
+                    return _refused(rid, "; ".join(reasons)), session
+                obo = cap["principal"] if cap else None
+                if self.policy is not None:
+                    stop = self._apply_policy(rec, entry, rid, peer, name, args, approval, obo,
+                                              at)
+                    if stop is not None:
+                        return stop, session
+            except OSError as e:     # the call's record (or its decision) could not be written
+                # Nothing has run: the tool is only called once its call and decisions are on
+                # record.
+                return self._not_recorded(rid, session, e, outcome="not_run"), session
+            tool = self.tools[name]
+            try:                                    # the books also need the call's record
+                out = tool(args, entry) if getattr(tool, "takes_call", False) else tool(args)
+            except Exception as e:                  # the tool's failure is the agent's answer
+                try:
+                    rec.result(call_id, session_id=session, error={"message": str(e)},
+                               on_behalf_of=obo)
+                except OSError as write_error:
+                    return self._not_recorded(rid, session, write_error, outcome="failed"), \
+                        session
+                if isinstance(e, books.Refused):
+                    return _refused(rid, str(e)), session
+                return _ok(rid, {"isError": True,
+                                 "content": [{"type": "text", "text": str(e)}]}), session
+            spent = True                            # the tool ran: what it moved stays spent
+            try:
+                rec.result(call_id, session_id=session, result=out, on_behalf_of=obo)
+            except OSError as e:
+                # The tool has run and its answer cannot be written down. The call and its
+                # decisions are already on record, so the trail shows a call with no result.
+                return self._not_recorded(rid, session, e, outcome="ran"), session
+            return _ok(rid, {"content": [{"type": "text", "text": json.dumps(out)}],
+                             "structuredContent": out}), session
+        finally:
+            # Every way out gives the reserved budget back, unless the tool ran: a call that
+            # was refused, failed, could not be recorded or hit an unexpected error spends
+            # nothing.
+            if cap and cap["allowed"] and not spent:
+                self.budget.release(cap["envelope"], cap["body"]["amount"])
+
+    def _not_recorded(self, rid: Any, session: Optional[str], error: OSError, *,
+                      outcome: str) -> Dict[str, Any]:
+        """Tell the agent a record could not be written, and log it. Never stay silent.
+
+        outcome: "not_run" (the call or a decision could not be written, so the tool was not
+        run), "ran" (the tool ran and its result could not be written) or "failed" (the
+        tool raised or was refused, and that could not be written)."""
+        LOG.error("could not write to the audit trail %s (session %s): %s: %s", self.log.log_id,
+                  session, type(error).__name__, error)
+        if outcome == "ran":
+            text = ("The action ran, but its result could not be written to the audit trail, "
+                    "so it is not fully on record. Do not repeat it; ask an operator to "
+                    "check the audit trail.")
+        elif outcome == "failed":
+            text = ("The action was attempted and failed, and its failure could not be "
+                    "written to the audit trail. Ask an operator to check the audit trail "
+                    "before trying again.")
+        else:
+            text = ("The action was not performed: it could not be written to the audit "
+                    "trail first, and nothing is done unrecorded. Try again once an operator "
+                    "has fixed the audit trail.")
+        return _ok(rid, {"isError": True, "content": [{"type": "text", "text": text}],
+                         "structuredContent": {"recorded": False, "ran": outcome == "ran",
+                                               **({"attempted": True}
+                                                  if outcome == "failed" else {})}})
 
     def _apply_policy(self, rec: Recorder, call: Any, rid: Any, peer: str, tool: str,
                       args: Dict[str, Any], approval: Optional[str], obo: Optional[str],
@@ -181,9 +243,6 @@ class Gateway:
             d = self.policy.evaluate(doc)
         except policy_mod.PolicyError as e:
             d = {"decision": "deny", "reasons": [str(e)]}
-        if approval and d["decision"] == "allow":
-            with self._lock:                          # the escalation is settled
-                self.escalations.pop(escalation, None)
         entry = rec.decision(call, tool, decision=d["decision"], policy=policy_mod.POLICY,
                              body={"reasons": d["reasons"],
                                    "policy_sha256": self.policy.sha256,
@@ -191,6 +250,9 @@ class Gateway:
                                    "entrypoint": self.policy.entrypoint,
                                    "input_json": canonical_json(doc)},
                              on_behalf_of=obo, ts=at)
+        if approval and d["decision"] == "allow":
+            with self._lock:      # settled only now: a failed write above keeps the approval
+                self.escalations.pop(escalation, None)   # usable for the retry
         if d["decision"] == "allow":
             return None
         if d["decision"] == "deny":
@@ -273,6 +335,10 @@ class Gateway:
             def log_message(self, fmt: str, *args: Any) -> None:
                 pass
 
+            def setup(self) -> None:
+                _handshake_or_refuse(self.request, self.client_address)
+                super().setup()
+
             def do_POST(self) -> None:
                 try:
                     peer, fp = identity.peer_identity(self.connection,
@@ -289,9 +355,17 @@ class Gateway:
                 if self.path != "/mcp" or not isinstance(msg, dict):
                     self._send(404, _err(None, -32600, "invalid request"), None)
                     return
-                reply, session = gw.handle(peer, fp, self.headers.get("Mcp-Session-Id"), msg,
-                                           self.headers.get("AEOS-Capability"),
-                                           self.headers.get("AEOS-Approval"))
+                try:
+                    reply, session = gw.handle(peer, fp, self.headers.get("Mcp-Session-Id"),
+                                               msg, self.headers.get("AEOS-Capability"),
+                                               self.headers.get("AEOS-Approval"))
+                except Exception:
+                    # Never a silent drop: log it, and tell the agent not to count on a record.
+                    LOG.exception("unexpected error handling a request from %s", peer)
+                    self._send(500, _err(msg.get("id"), -32603,
+                                         "internal error: the request may not have been "
+                                         "recorded in the audit trail"), None)
+                    return
                 self._send(200, reply, session)
 
             def do_DELETE(self) -> None:
@@ -316,8 +390,11 @@ class Gateway:
                 self.end_headers()
                 self.wfile.write(data)
 
-        server = ThreadingHTTPServer((host, port), Handler)
-        server.socket = self.context.wrap_socket(server.socket, server_side=True)
+        server = _MutualTlsServer((host, port), Handler)
+        # The handshake runs in the handler's own thread, not in the accept loop, so one slow
+        # or refused client cannot hold up the others.
+        server.socket = self.context.wrap_socket(server.socket, server_side=True,
+                                                 do_handshake_on_connect=False)
         self.server = server
         threading.Thread(target=server.serve_forever, daemon=True).start()
         return server.server_address[1]
@@ -326,6 +403,56 @@ class Gateway:
         if self.server:
             self.server.shutdown()
             self.server.server_close()
+
+
+class HandshakeRefused(OSError):
+    """A client's TLS handshake failed and it has been told why. Not an error of ours."""
+
+
+class _MutualTlsServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        exc = sys.exc_info()[1]
+        if isinstance(exc, HandshakeRefused):
+            return                      # already logged, with the reason, when it happened
+        if isinstance(exc, (ConnectionResetError, BrokenPipeError, ConnectionAbortedError)):
+            LOG.info("client %s went away mid-request: %s", client_address[0], type(exc).__name__)
+            return
+        # Anything else is ours to know about: an unsuppressed, structured error.
+        LOG.error("unhandled error serving %s: %s: %s", client_address[0],
+                  type(exc).__name__, exc, exc_info=exc)
+
+
+def _handshake_or_refuse(sock: ssl.SSLSocket, client_address: Any) -> None:
+    """Complete the TLS handshake, or send the refusal and close without a reset.
+
+    With TLS 1.3 the client finishes its handshake before the server checks the client
+    certificate, so the "certificate expired" alert reaches a client that may already be
+    sending its request. Closing with that request unread would reset the connection and
+    destroy the alert. So on failure the server half-closes, reads what the client sent for
+    a moment, and only then closes.
+    """
+    sock.settimeout(10)
+    try:
+        sock.do_handshake()
+    except (ssl.SSLError, OSError) as failure:
+        reason = (getattr(failure, "reason", None) or type(failure).__name__)
+        if isinstance(failure, ssl.SSLCertVerificationError) and failure.verify_message:
+            reason += f" ({failure.verify_message})"      # OpenSSL's standard wording only
+        LOG.info("refused a TLS handshake from %s: %s", client_address[0], reason)
+        try:
+            sock.shutdown(socket.SHUT_WR)
+            sock.settimeout(0.2)
+            deadline = time.monotonic() + 0.5
+            while time.monotonic() < deadline:
+                if not socket.socket.recv(sock, 65536):    # raw bytes: the TLS state is dead
+                    break
+        except OSError:
+            pass
+        finally:
+            sock.close()
+        raise HandshakeRefused(reason) from failure
 
 
 def _ok(rid: Any, result: Dict[str, Any]) -> Dict[str, Any]:
@@ -340,13 +467,24 @@ def _err(rid: Any, code: int, message: str) -> Dict[str, Any]:
     return {"jsonrpc": "2.0", "id": rid, "error": {"code": code, "message": message}}
 
 
+class CertificateExpiredError(OSError):
+    """The client's own certificate is past its end date; nothing was sent."""
+
+
 class AgentClient:
     """An agent's MCP client: connects with its SVID and checks the gateway's SPIFFE ID."""
 
     def __init__(self, port: int, svid_files: Tuple[Path, Path], bundle_file: Path, *,
                  gateway_id: str, trust_domain: str, host: str = "127.0.0.1",
-                 token: Optional[bytes] = None) -> None:
+                 token: Optional[bytes] = None, check_own_certificate: bool = True,
+                 clock: Callable[[], dt.datetime] = identity._now) -> None:
         self.host, self.port = host, port
+        self.clock = clock
+        # Refuse locally, with a plain reason, once our own certificate has expired. The
+        # gateway checks it as well; a test that wants to see the gateway do so turns this off.
+        self._own_not_after = (
+            x509.load_pem_x509_certificate(Path(svid_files[0]).read_bytes()).not_valid_after_utc
+            if check_own_certificate else None)
         self.context = identity.client_context(svid_files, bundle_file)
         self.gateway_id, self.trust_domain = gateway_id, trust_domain
         self.session: Optional[str] = None
@@ -355,6 +493,8 @@ class AgentClient:
 
     def _post(self, method: str, params: Optional[Dict[str, Any]] = None,
               http_method: str = "POST", approval: Optional[bytes] = None) -> Dict[str, Any]:
+        if self._own_not_after is not None and self.clock() > self._own_not_after:
+            raise CertificateExpiredError("your certificate has expired")
         conn = http.client.HTTPSConnection(self.host, self.port, context=self.context,
                                            timeout=10)
         try:
@@ -406,6 +546,10 @@ PLAIN_TLS_ERRORS = {
 
 def handshake_error(e: BaseException) -> str:
     """A plain description of why a TLS connection was refused."""
+    if isinstance(e, CertificateExpiredError):
+        return str(e)
+    if isinstance(e, (ConnectionResetError, BrokenPipeError)):
+        return "the gateway closed the connection; it may have refused this certificate"
     if isinstance(e, ssl.SSLCertVerificationError):
         return e.verify_message or str(e)
     if isinstance(e, ssl.SSLError):

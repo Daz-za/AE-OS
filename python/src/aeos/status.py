@@ -1,19 +1,20 @@
-"""A plain-language summary of a receipt log, for `aeos status` and the GUI."""
+"""A plain-language summary of an audit trail, for `aeos status` and the GUI."""
 from __future__ import annotations
 
 import datetime as dt
 from collections import Counter
 from typing import Any, Dict, List
 
-from .log import ReceiptLog
+from .log import MARKER_KIND, ActionLog
 
 
 # What a check's result means for the reader: (when valid, when invalid).
 MEANING = {
-    "receipt": ("This record is in the log exactly as shown, and the log's owner signed "
-                "a checkpoint that includes it.",
-                "Do not rely on this receipt. Ask the log's owner for a fresh receipt, and "
-                "check that you used their public key from a source you trust."),
+    "action-record": ("This action record is in the audit trail exactly as shown, and the "
+                      "trail's owner signed a checkpoint that includes it.",
+                      "Do not rely on this action record. Ask the trail's owner for a fresh "
+                      "one, and check that you used their public key from a source you "
+                      "trust."),
     "consistency": ("The newer checkpoint contains every record of the older one, "
                     "unchanged. Nothing was removed or rewritten in between.",
                     "The log's history differs from what you were shown before. Keep both "
@@ -22,7 +23,7 @@ MEANING = {
             "and every signed checkpoint matches the records it covers.",
             "Records were changed, removed or reordered after they were written. Keep a "
             "copy of the folder as it is now, and compare it with a backup or with "
-            "receipts issued earlier."),
+            "action records exported earlier."),
     "audit": ("Every record is unchanged; each session record names a certificate that was "
               "valid, at that time, for the identity the session was recorded under; where the "
               "gateway required capability tokens, each decision gives the recorded answer "
@@ -44,13 +45,15 @@ def _when(ms: int) -> str:
     return dt.datetime.fromtimestamp(ms / 1000, dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
 
-def summary(log: ReceiptLog) -> Dict[str, Any]:
+def summary(log: ActionLog) -> Dict[str, Any]:
     kinds: Counter = Counter()
     refused = errors = 0
     agents = set()
     last_ts = None
     for e in log.entries():
         rec = log.record(e)
+        if rec.get("kind") == MARKER_KIND:
+            continue                            # the trail's own marker, not an actor
         kinds[rec.get("kind")] += 1
         agents.add(rec.get("agent"))
         body = rec.get("body") or {}

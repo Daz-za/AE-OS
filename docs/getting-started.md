@@ -79,7 +79,7 @@ The demo follows an AI agent that pays a supplier invoice. The payment needs a p
 
 ```
 aeos status aeos-demo/log
-aeos verify-receipt aeos-demo/payment-receipt.json --public-key aeos-demo/public-key.txt
+aeos verify-action-record aeos-demo/payment-action-record.json --public-key aeos-demo/public-key.txt
 ```
 
 ## 4. Create your own log
@@ -92,7 +92,7 @@ Setup asks a few questions, each with a suggested answer you can accept by press
 
 | Question | What it is for |
 |---|---|
-| A short name for the log | Identifies the log in receipts, for example `acme-accounts-payable` |
+| A short name for the log | Identifies the audit trail in its action records, for example `acme-accounts-payable` |
 | Folder for the log | Where the records are kept |
 | Where to keep the signing key | The key that signs the log. Keep it somewhere agents cannot read, and back it up |
 | The agent's identity | The name recorded for the agent's actions, written like a web address |
@@ -110,21 +110,21 @@ The summary shows how many tool calls were recorded, how many were refused by po
 
 ## 6. Give an auditor evidence
 
-Send the auditor the public key from `public-key.txt` in the log folder, through a channel they trust. For any record, create a receipt and send it to them:
+Send the auditor the public key from `public-key.txt` in the log folder, through a channel they trust. For any record, create its action record and send it to them:
 
 ```
-aeos receipt ./acme-accounts-payable-log 12 -o receipt-12.json --key <signing key file>
+aeos action-record ./acme-accounts-payable-log 12 -o action-record-12.json --key <signing key file>
 ```
 
-Here `12` is the record number, as listed by `aeos show ./acme-accounts-payable-log`. The signing key file is the one you chose during setup, by default `~/.config/aeos/keys/acme-accounts-payable.key`. The auditor checks the receipt with:
+Here `12` is the record number, as listed by `aeos show ./acme-accounts-payable-log`. The signing key file is the one you chose during setup, by default `~/.config/aeos/keys/acme-accounts-payable.key`. The auditor verifies the action record with:
 
 ```
-aeos verify-receipt receipt-12.json --public-key public-key.txt
+aeos verify-action-record action-record-12.json --public-key public-key.txt
 ```
 
-Each check ends with a line that explains the result: what a valid result means, or what to do when a check fails.
+Each check ends with a line that explains the result: what a verified result means, or what to do when a check fails.
 
-Auditors can also check a receipt in their web browser, with nothing to install, at [ae-os.org/verify](https://ae-os.org/verify). The files stay on their device.
+Auditors can also verify an action record in their web browser, with nothing to install, at [ae-os.org/verify](https://ae-os.org/verify). The files stay on their device.
 
 ## Getting help
 

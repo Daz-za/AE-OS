@@ -3,7 +3,7 @@ import json
 import sys
 from pathlib import Path
 
-from aeos import ReceiptLog, verify_receipt
+from aeos import ActionLog, verify_action_record
 from aeos.canon import json_digest
 from aeos.mcp_proxy import run
 
@@ -12,7 +12,7 @@ AGENT = "spiffe://acme.example/agent/ap-clerk/1"
 
 
 def _session(tmp_path, messages, **kw):
-    log = ReceiptLog.create(tmp_path / "log")
+    log = ActionLog.create(tmp_path / "log")
     stdin = io.BytesIO(b"".join(json.dumps(m).encode() + b"\n" for m in messages))
     stdout = io.BytesIO()
     opts = dict(agent=AGENT, on_behalf_of="spiffe://acme.example/human/cfo",
@@ -39,7 +39,8 @@ def test_proxy_records_calls_and_results(tmp_path):
     assert [r["id"] for r in replies] == [0, 1, 2]
     recs = [log.record(e) for e in log.entries()]
     kinds = [r["kind"] for r in recs]
-    assert kinds[0] == "session.start" and kinds[-1] == "session.end"
+    assert kinds[0] == "x-issuer-signing" and kinds[1] == "session.start"
+    assert kinds[-1] == "session.end"
     assert kinds.count("tool.call") == 2 and kinds.count("tool.result") == 2
     call = next(r for r in recs if r["kind"] == "tool.call" and r["subject"] == "invoice.pay")
     assert call["body"]["args_sha256"] == json_digest({"invoice": "INV-1", "amount": 1250})
@@ -48,7 +49,7 @@ def test_proxy_records_calls_and_results(tmp_path):
     assert result["body"]["outcome"] == "ok"
     assert log.verify().ok
     for e in log.entries():
-        assert verify_receipt(log.receipt(e), log.public_key) == []
+        assert verify_action_record(log.action_record(e), log.public_key) == []
 
 
 def test_allow_list_refuses_and_records_decision(tmp_path):
@@ -67,7 +68,7 @@ def test_allow_list_refuses_and_records_decision(tmp_path):
 
 
 def test_batch_refusal_does_not_reach_server(tmp_path):
-    log = ReceiptLog.create(tmp_path / "log")
+    log = ActionLog.create(tmp_path / "log")
     batch = [_call(1, "invoice.pay", {}), _call(2, "invoice.read", {})]
     stdin = io.BytesIO(json.dumps(batch).encode() + b"\n")
     stdout = io.BytesIO()

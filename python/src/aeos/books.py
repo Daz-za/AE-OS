@@ -33,7 +33,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from . import keys
 from .canon import cid_str, dag_cbor
 from .delegation import money
-from .log import Entry, ReceiptLog, b64, make_record, now_ms, unb64
+from .log import Entry, ActionLog, b64, make_record, now_ms, unb64
 
 POLICY = "aeos-books/v0"
 TRANSITION_CONTEXT = b"aeos/period-transition/v0\n"
@@ -145,7 +145,7 @@ def check_period(date: Any, periods: Dict[str, str]) -> List[str]:
 class Books:
     """One ledger of one legal entity, recorded in the evidence log."""
 
-    def __init__(self, log: ReceiptLog, *, agent: str, entity: str, ledger: str,
+    def __init__(self, log: ActionLog, *, agent: str, entity: str, ledger: str,
                  currency: str, accounts: Dict[str, str],
                  controllers: Dict[str, bytes]) -> None:
         self.log, self.agent = log, agent

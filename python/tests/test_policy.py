@@ -4,7 +4,7 @@ import shutil
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from aeos import ReceiptLog, audit, delegation, fulldemo, identity, keys, policy
+from aeos import ActionLog, audit, delegation, fulldemo, identity, keys, policy
 from aeos.canon import json_digest
 from aeos.gateway import AgentClient, Gateway
 from aeos.log import now_ms
@@ -78,7 +78,7 @@ def gateway(tmp_path, rules):
                                     "USD", now_ms() + 3_600_000).sign(person)
     auth = delegation.Authority()
     token = auth.mint(env, keys.public_bytes(person))
-    log = ReceiptLog.create(tmp_path / "log", log_id="urn:example:pol")
+    log = ActionLog.create(tmp_path / "log", log_id="urn:example:pol")
     gw = Gateway(log, {"erp.invoice.pay": lambda a: {"paid": a["invoice"]}},
                  permissions={AGENT: ["erp.invoice.pay"]}, trust_domain=DOMAIN,
                  svid_files=files["gw"], bundle_file=bundle, authority_key=auth.public_key,
@@ -120,6 +120,33 @@ def test_gateway_escalates_and_accepts_one_valid_approval(gateway):
                                             approval=approval(CFO, k["cfo"])))
     kinds = [log.record(e)["kind"] for e in log.entries()]
     assert kinds.count("approval") == 2 and gw.escalations == {}
+
+
+def test_a_failed_allow_write_keeps_the_approval_usable_for_the_retry(gateway):
+    # The approver signed once. If the trail cannot take the allow decision, the escalation
+    # must stay open, or the retry the agent is told to make could never work.
+    gw, log, c, k = gateway
+    args = {"invoice": "I2", "amount_minor": 900}
+    esc = c.call("erp.invoice.pay", args)["result"]["structuredContent"]["escalation"]
+    approval = delegation.Approval(esc, CFO, "approve", "erp.invoice.pay", json_digest(args),
+                                   now_ms()).sign(k["cfo"])
+    real = log.append
+
+    def full_disk(record, *a, **kw):
+        if record["kind"] == "policy.decision" and "input_json" in record["body"]:
+            raise OSError(28, "No space left on device")      # the policy's allow decision
+        return real(record, *a, **kw)
+
+    log.append = full_disk
+    first = c.call("erp.invoice.pay", args, approval=approval)
+    assert first["result"]["isError"] is True
+    assert first["result"]["structuredContent"] == {"recorded": False, "ran": False}
+    assert esc in gw.escalations                               # still open
+    assert gw.budget.spent.get(next(iter(gw.intents)), 0) == 0  # the budget was given back
+    log.append = real                                          # the operator fixes the disk
+    again = c.call("erp.invoice.pay", args, approval=approval)
+    assert again["result"]["structuredContent"] == {"paid": "I2"}
+    assert gw.escalations == {}
 
 
 def test_audit_replays_policy_and_checks_approvals(tmp_path):

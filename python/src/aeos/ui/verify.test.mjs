@@ -3,14 +3,20 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
-  cidOfBytes, cidStr, decodeDagCbor, leafHash, parsePublicKey, receiptRecord, toView, unhex,
-  verifyConsistency, verifyConsistencyProof, verifyInclusion, verifyReceipt,
+  actionRecordContent, cidOfBytes, cidStr, decodeDagCbor, leafHash, parsePublicKey, receiptRecord,
+  toView, unhex, verifyActionRecord, verifyActionRecordDetail, verifyConsistency, verifyConsistencyProof, verifyInclusion,
+  verifyReceipt,
 } from "./verify.js";
 
-const url = new URL("../../../../testvectors/receipts-v0.json", import.meta.url);
 // JSON.parse rounds integers beyond 2^53; keep their exact text, as toView does.
-const V = JSON.parse(readFileSync(url, "utf8"),
+const load = (name) => JSON.parse(
+  readFileSync(new URL(`../../../../testvectors/${name}`, import.meta.url), "utf8"),
   (_, v, ctx) => (typeof v === "number" && !Number.isSafeInteger(v) ? ctx.source : v));
+const V = load("action-records-v1.json");
+// The frozen version 0 file: its documents are `aeos-receipt/v0` and must keep verifying.
+const V0 = load("receipts-v0.json");
+const OLD_WRONG_TYPE = "not an aeos-receipt/v0 document";
+const NEW_WRONG_TYPE = "not an aeos-action-record/v1 document (or aeos-receipt/v0)";
 const big = (x) => BigInt(x);
 
 test("DAG-CBOR values decode to the expected views and CIDs", async () => {
@@ -41,12 +47,58 @@ test("Merkle inclusion and consistency proofs verify", async () => {
   assert.deepEqual(await leafHash(Uint8Array.of(0)), leaves[0]);
 });
 
-test("receipts report the same problems as the reference implementation", async () => {
-  for (const c of V.receipts) {
-    assert.deepEqual(await verifyReceipt(c.receipt, parsePublicKey(c.public_key)),
-      c.expect_problems, c.name);
+test("action records report the same problems as the reference implementation", async () => {
+  for (const c of V.action_records) {
+    const key = unhex(c.public_key);    // raw bytes: the verifier itself refuses weak keys
+    const { problems, signature } = await verifyActionRecordDetail(c.action_record, key);
+    assert.deepEqual(problems, c.expect_problems, c.name);
+    assert.equal(signature, c.expect_signature, c.name);
+    assert.deepEqual(await verifyActionRecord(c.action_record, key), c.expect_problems, c.name);
   }
-  assert.equal(receiptRecord(V.receipts[0].receipt).v, 0);
+  assert.equal(actionRecordContent(V.action_records[0].action_record).v, 0);
+});
+
+test("small-order public keys are refused at load and by the verifier", async () => {
+  for (const c of V.action_records.filter((x) => /^small-order (public )?key/.test(x.name))) {
+    assert.throws(() => parsePublicKey(c.public_key), /small order/);
+    assert.ok((await verifyActionRecord(c.action_record, unhex(c.public_key))).length > 0);
+  }
+});
+
+test("the verifier deployed at ae-os.org still accepts what writers emit now", async () => {
+  // A copy of https://ae-os.org/verify/verify.js, which only knows `aeos-receipt/v0`. Writers
+  // keep that document type, with the issuer signature as an extra field, until it is updated.
+  const live = await import("../../../tests/fixtures/ae-os-org-verify.js");
+  let checked = 0;
+  for (const c of V.action_records.filter((x) => x.expect_problems.length === 0)) {
+    const doc = c.action_record;
+    if (doc.type === "aeos-receipt/v0") {
+      assert.deepEqual(await live.verifyReceipt(doc, live.parsePublicKey(c.public_key)), [],
+        c.name);
+      checked++;
+    } else {
+      // the later type name is not read there yet, which is why writers do not use it yet
+      assert.equal(doc.type, "aeos-action-record/v1");
+      assert.deepEqual(await live.verifyReceipt(doc, live.parsePublicKey(c.public_key)),
+        ["not an aeos-receipt/v0 document"]);
+    }
+  }
+  assert.ok(checked >= 4);
+  assert.ok(V.action_records.some((c) => c.action_record.statement_signature));
+});
+
+test("version 0 receipts in the frozen vectors still verify, and the old names still work", async () => {
+  assert.equal(V0.receipts[0].receipt.type, "aeos-receipt/v0");
+  for (const c of V0.receipts) {
+    const expected = c.expect_problems.map((p) => (p === OLD_WRONG_TYPE ? NEW_WRONG_TYPE : p));
+    const { problems, signature } = await verifyActionRecordDetail(c.receipt,
+      parsePublicKey(c.public_key));
+    assert.deepEqual(problems, expected, c.name);
+    assert.equal(signature, "log-signed only", c.name);
+  }
+  const first = V0.receipts[0];
+  assert.deepEqual(await verifyReceipt(first.receipt, parsePublicKey(first.public_key)), []);
+  assert.equal(receiptRecord(first.receipt).v, 0);
 });
 
 test("consistency proofs report the same problems as the reference implementation", async () => {

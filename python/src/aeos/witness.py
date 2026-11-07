@@ -24,7 +24,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from . import keys, merkle
 from .canon import dag_cbor
-from .log import Checkpoint, ReceiptLog, b64, now_ms, unb64
+from .log import Checkpoint, ActionLog, b64, now_ms, unb64
 
 COSIGNATURE_CONTEXT = b"aeos-receipts/cosignature/v0\n"
 
@@ -85,7 +85,7 @@ class Witness:
                 "log": cp.log_id, "size": cp.size, "time": time, "sig": b64(sig)}
 
 
-def request_cosignatures(log: ReceiptLog, cp: Checkpoint, witnesses: Iterable[Witness]
+def request_cosignatures(log: ActionLog, cp: Checkpoint, witnesses: Iterable[Witness]
                          ) -> List[Dict[str, Any]]:
     """Ask each witness to cosign `cp`; store the cosignatures in cosignatures.jsonl.
 

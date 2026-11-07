@@ -136,7 +136,7 @@ function renderStory(text, kind) {
   const intro = Object.assign(document.createElement("p"), {
     textContent: kind === "full"
       ? "Acme, a fictional company, lets an AI agent pay supplier invoices and book them, and an auditor checks the evidence. See who acted under Agents, what was refused and why under Decisions, the journal under Books, and run the auditor's check under Audit."
-      : "An AI agent pays a supplier invoice at Acme, a fictional company, and an auditor checks the evidence. Look through the records, or try checking payment-receipt.json under Check a receipt. It is in the aeos-demo folder, one level up from the log folder.",
+      : "An AI agent pays a supplier invoice at Acme, a fictional company, and an auditor checks the evidence. Look through the records, or try verifying payment-action-record.json under Check an action record. It is in the aeos-demo folder, one level up from the log folder.",
   });
   $("story-text").replaceChildren(intro, ol);
 }
@@ -191,10 +191,10 @@ async function loadRecords() {
         td.colSpan = 6;
         const btn = document.createElement("button");
         btn.className = "primary";
-        btn.textContent = "Download a receipt for this record";
+        btn.textContent = "Download this action record with its proof";
         const hint = Object.assign(document.createElement("p"), { className: "muted", textContent: "If no signed checkpoint covers this record yet, one is signed first." });
         btn.addEventListener("click", () => act(btn, async () => {
-          download(`receipt-${item.index}.json`, await api(`/api/receipt?index=${item.index}`));
+          download(`action-record-${item.index}.json`, await api(`/api/action-record?index=${item.index}`));
           render(await api("/api/state"));
         }));
         const cid = document.createElement("p");

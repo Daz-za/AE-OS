@@ -39,7 +39,56 @@ def key_id(public_key: bytes) -> str:
     return hashlib.sha256(public_key).hexdigest()[:16]
 
 
+# Edwards25519, for the strict checks below. Ed25519 verifiers disagree about keys and
+# signature points of small order (a forgery that verifies for every message under a
+# small-order key is possible), and about scalars that are not reduced. AE-OS refuses all of
+# them, as Rust's `verify_strict` does, so every verifier gives one answer.
+_P = 2**255 - 19
+_L = 2**252 + 27742317777372353535851937790883648493
+_D = (-121665 * pow(121666, -1, _P)) % _P
+_SQRT_M1 = pow(2, (_P - 1) // 4, _P)
+
+
+def _decode_point(enc: bytes):
+    """The affine point an encoding names, or None if it names none."""
+    if len(enc) != 32:
+        return None
+    n = int.from_bytes(enc, "little")
+    y, sign = (n & ((1 << 255) - 1)) % _P, n >> 255
+    u, v = (y * y - 1) % _P, (_D * y * y + 1) % _P
+    x2 = u * pow(v, -1, _P) % _P
+    x = pow(x2, (_P + 3) // 8, _P)
+    if (x * x - x2) % _P:
+        x = x * _SQRT_M1 % _P
+    if (x * x - x2) % _P:
+        return None
+    if x & 1 != sign:
+        x = (_P - x) % _P
+    return x, y
+
+
+def _add(a, b):
+    (x1, y1), (x2, y2) = a, b
+    t = _D * x1 * x2 * y1 * y2 % _P
+    return ((x1 * y2 + x2 * y1) * pow(1 + t, -1, _P) % _P,
+            (y1 * y2 + x1 * x2) * pow(1 - t, -1, _P) % _P)
+
+
+def is_small_order(enc: bytes) -> bool:
+    """True if the encoded point has an order dividing 8 (including the identity)."""
+    point = _decode_point(enc)
+    if point is None:
+        return False
+    for _ in range(3):
+        point = _add(point, point)
+    return point == (0, 1)
+
+
 def verify(public_key: bytes, signature: bytes, message: bytes) -> bool:
+    """Strict Ed25519 verification: small-order keys and R points, and unreduced S, fail."""
+    if (len(signature) != 64 or is_small_order(public_key) or is_small_order(signature[:32])
+            or int.from_bytes(signature[32:], "little") >= _L):
+        return False
     try:
         Ed25519PublicKey.from_public_bytes(public_key).verify(signature, message)
         return True

@@ -28,7 +28,7 @@
     <button data-view="decisions" class="tab">Decisions</button>
     <button data-view="books" class="tab">Books</button>
     <button data-view="audit" class="tab" id="tab-audit" hidden>Audit</button>
-    <button data-view="check" class="tab">Check a receipt</button>
+    <button data-view="check" class="tab">Check an action record</button>
     <button data-view="start" class="tab tab-quiet">Open another folder</button>
   </nav>
 </header>
@@ -229,13 +229,13 @@
     </div>
     <div id="verify-result" class="chk-result" aria-live="polite"></div>
     <h2>Public key for auditors</h2>
-    <p>Send this to your auditors through a channel they trust. They use it to check receipts.</p>
+    <p>Send this to your auditors through a channel they trust. They use it to verify action records.</p>
     <div class="keyline"><code id="public-key"></code><button id="copy-key">Copy</button></div>
   </section>
 
   <section id="view-records" class="view" hidden>
     <h1>Records</h1>
-    <p>Select a record to see its details and download a receipt for it.</p>
+    <p>Select a record to see its details and download an action record for it.</p>
     <div class="table-wrap">
       <table class="records">
         <thead><tr><th>#</th><th>When</th><th>What happened</th><th>Who</th><th>Tool or system</th><th>Result</th></tr></thead>
@@ -280,8 +280,8 @@
   </section>
 
   <section id="view-check" class="view" hidden>
-    <h1>Check a receipt</h1>
-    <p>Drop in a receipt or growth proof that someone gave you. The public key of the log you have open is filled in; replace it to check a file from another log.</p>
+    <h1>Check an action record</h1>
+    <p>Drop in an action record or growth proof that someone gave you. The public key of the audit trail you have open is filled in; replace it to check a file from another audit trail.</p>
     <div id="check"></div>
   </section>
 </main>
