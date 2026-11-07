@@ -11,6 +11,7 @@ from aeos import ActionLog, audit, delegation, fulldemo, identity, keys, passkey
 from aeos.canon import cid_of_bytes, cid_str, dag_cbor, decode_dag_cbor, json_digest
 from aeos.gateway import AgentClient, Gateway
 from aeos.log import now_ms
+from crash_support import die_after, fork, start_child
 from passkey_scenarios import ARGS, DEMO_CASES, TOOL, A, B, E, scenarios
 from webauthn_support import (APPROVER, SoftAuthenticator, Trail, cose_es256, nonce, pin,
                               principals, sign_in_of)
@@ -459,6 +460,9 @@ class _TornWrites:
             def flush(self):
                 self.f.flush()
 
+            def fileno(self):
+                return self.f.fileno()
+
         def torn_open(path, mode="r", *a, **k):
             f = real_open(path, mode, *a, **k)
             if not outer.fired and str(path).endswith("records.jsonl") and "a" in mode:
@@ -476,32 +480,64 @@ def _enrol_b(rec, n=7):
             CFO, IDENTITY, B.credential_id, B.cose_key, B.rp_id, B.origin)))
 
 
+def _directory_state(d):
+    """Everything a passkey directory decides with, as plain values that can be compared."""
+    creds = {k: (c.approver, c.public_key, c.rp_id, c.origin, c.identity, c.epoch,
+                 c.enrolled_at, c.root, c.pinned, c.basis, c.revoked_at, c.sign_count)
+             for k, c in d.creds.items()}
+    return (creds, {k: list(v) for k, v in d.ledger.assertions.items()}, dict(d.ledger.nonces),
+            {k: list(v) for k, v in d.epochs.items()}, {k: list(v) for k, v in d.identity.items()},
+            dict(d.basis))
+
+
+def _trail(log):
+    return [(e.index, bytes(e.cid), log.record(e)) for e in ActionLog.open(log.path).entries()]
+
+
+REBOUND_TO = "a.jones@acme.example"
+CHANGES = {
+    "enrol": (passkeys.KIND_ENROLLED, lambda rec: _enrol_b(rec, 7)),
+    "revoke": (passkeys.KIND_REVOKED, lambda rec: rec.passkey_revoked(
+        CFO, credential_id=B.credential_id, confirmation=A.evidence(
+            nonce(8), passkeys.REVOKE_TOOL, passkeys.revoke_args_sha256(CFO, B.credential_id)))),
+    "rebind": (passkeys.KIND_REBOUND, lambda rec: rec.approver_rebound(
+        CFO, identity=REBOUND_TO, identity_evidence=sign_in_of(REBOUND_TO),
+        confirmation=A.evidence(nonce(9), passkeys.REBIND_TOOL, passkeys.rebind_args_sha256(
+            CFO, REBOUND_TO, sign_in_of(REBOUND_TO))))),
+}
+
+
+@pytest.mark.parametrize("change", sorted(CHANGES))
 @pytest.mark.parametrize("keep", [0, 1], ids=["the record write fails",
                                               "the confirming assertion write fails"])
 def test_a_failed_registry_write_leaves_the_directory_and_the_trail_agreeing(gateway, keep,
-                                                                           monkeypatch):
+                                                                           change, monkeypatch):
     gw, log, c, rec, _ = gateway
     d = gw.passkey_directory
-    before = (len(log), (log.path / "records.jsonl").read_bytes(), dict(d.creds),
-              dict(d.ledger.nonces), list(d.notes))
-    torn = _TornWrites(monkeypatch, keep, passkeys.KIND_ENROLLED)
+    kind, make = CHANGES[change]
+    if change == "revoke":
+        _enrol_b(rec, 6)
+    before = (len(log), (log.path / "records.jsonl").read_bytes(), _directory_state(d),
+              list(d.notes))
+    torn = _TornWrites(monkeypatch, keep, kind)
     with pytest.raises(OSError):
-        _enrol_b(rec)
+        make(rec)
     assert torn.fired
     monkeypatch.undo()
     # the live directory holds nothing the trail does not, and the trail holds nothing partial
-    assert (len(log), (log.path / "records.jsonl").read_bytes(), dict(d.creds),
-            dict(d.ledger.nonces), list(d.notes)) == before
-    recs = [(e.index, bytes(e.cid), log.record(e)) for e in ActionLog.open(log.path).entries()]
-    assert audit.check_approvals(recs, principals())[1] == []
+    assert (len(log), (log.path / "records.jsonl").read_bytes(), _directory_state(d),
+            list(d.notes)) == before
+    assert audit.check_approvals(_trail(log), principals())[1] == []
     assert ActionLog.open(log.path).verify().ok
     # the same change, with the same assertion, goes through once the disk recovers
-    entry = _enrol_b(rec)
-    assert B.credential_id in d.creds and d.creds[B.credential_id].enrolled_at == entry.index
-    recs = [(e.index, bytes(e.cid), log.record(e)) for e in ActionLog.open(log.path).entries()]
-    assert [r["kind"] for _, _, r in recs][-2:] == ["x-passkey-enrolled", "x-approval-evidence"]
+    entry = make(rec)
+    recs = _trail(log)
+    assert [r["kind"] for _, _, r in recs][-2:] == [kind, "x-approval-evidence"]
+    assert recs[-2][0] == entry.index
     assert audit.check_approvals(recs, principals())[1] == []
     assert ActionLog.open(log.path).verify().ok
+    assert _directory_state(d) == _directory_state(passkeys.Directory.build(
+        recs, passkeys.load_principals(principals())[1]))
 
 
 def test_a_failed_approval_write_uses_nothing_up_and_the_retry_is_recorded_whole(gateway,
@@ -797,13 +833,196 @@ def test_malformed_nested_evidence_is_reported_never_raised():
             passkeys.load_principals(bad)
 
 
+# ---- writers that die, writers in other processes, and many writers at once ----------------
+
+
+def _fresh(path):
+    """A trail with the root passkey A, written through a recorder with a live directory."""
+    from aeos import Recorder
+    log = ActionLog.create(path, log_id="urn:example:writers")
+    d = passkeys.Directory(passkeys.load_principals(principals())[1])
+    rec = Recorder(log, agent=CFO, passkeys=d)
+    sign_in = sign_in_of(IDENTITY)
+    rec.passkey_enrolled(CFO, identity=IDENTITY, credential_id=A.credential_id,
+                         public_key=A.cose_key, rp_id=A.rp_id, origin=A.origin,
+                         identity_evidence=sign_in,
+                         registration=A.registration(webauthn.enrol_challenge(CFO, sign_in.sha256)))
+    return log, d, rec
+
+
+def _reopened(path):
+    """What a restarted writer holds: the trail, a directory rebuilt from it, a recorder."""
+    from aeos import Recorder
+    log = ActionLog.open(path)
+    d = passkeys.Directory.build(_trail(log), passkeys.load_principals(principals())[1])
+    return log, d, Recorder(log, agent=CFO, passkeys=d)
+
+
+def _enrol(rec, k, n):
+    return rec.passkey_enrolled(
+        CFO, identity=IDENTITY, credential_id=k.credential_id, public_key=k.cose_key,
+        rp_id=k.rp_id, origin=k.origin,
+        confirmation=A.evidence(nonce(n), passkeys.ENROL_TOOL, passkeys.enrol_args_sha256(
+            CFO, IDENTITY, k.credential_id, k.cose_key, k.rp_id, k.origin)))
+
+
+def _revoke(rec, k, n, ts=None):
+    return rec.passkey_revoked(CFO, credential_id=k.credential_id, ts=ts, confirmation=A.evidence(
+        nonce(n), passkeys.REVOKE_TOOL, passkeys.revoke_args_sha256(CFO, k.credential_id)))
+
+
+def _escalate(rec, call_id, args=ARGS):
+    """An agent's call and the escalation an approval answers, as (call entry, escalation)."""
+    call, _ = rec.call(TOOL, call_id=call_id, arguments=args)
+    return call, cid_str(rec.decision(call, TOOL, decision="escalate", policy="p").cid)
+
+
+def _yes(esc, auth, n, args=ARGS):
+    ev = auth.evidence(nonce(n), TOOL, json_digest(args), passkeys.escalation_cid(esc))
+    return delegation.Approval(esc, CFO, "approve", TOOL, json_digest(args), now_ms(),
+                               evidence=ev)
+
+
+def _clean(path, unfinished=False):
+    """The trail audits with no problem and verifies (but for the unfinished write a dead
+    writer left, when there is one), and a directory rebuilt from it."""
+    log = ActionLog.open(path, read_only=True)
+    recs = [(e.index, bytes(e.cid), log.record(e)) for e in log.entries()]
+    assert audit.check_approvals(recs, principals())[1] == []
+    problems = log.verify().problems
+    if unfinished:
+        assert len(problems) == 1 and "an unfinished write, not yet recovered" in problems[0]
+    else:
+        assert problems == []
+    return passkeys.Directory.build(recs, passkeys.load_principals(principals())[1])
+
+
+def test_a_registry_change_cut_short_by_a_dying_writer_is_cut_off_whole(tmp_path, monkeypatch):
+    log, d, rec = _fresh(tmp_path / "log")
+
+    def child():
+        die_after(monkeypatch, 1, passkeys.KIND_EVIDENCE)      # the record, not its assertion
+        _enrol(rec, B, 7)
+
+    assert fork(child) == 9
+    rebuilt = _clean(log.path, unfinished=True)      # readers ignore the unfinished batch
+    assert B.credential_id not in rebuilt.creds
+    log2, d2, rec2 = _reopened(log.path)
+    entry = _enrol(rec2, B, 7)                       # the retry lands whole
+    assert [r["kind"] for _, _, r in _trail(log2)][entry.index:] == [
+        passkeys.KIND_ENROLLED, passkeys.KIND_EVIDENCE]
+    assert any((log.path / "torn").iterdir())
+    assert _directory_state(d2) == _directory_state(_clean(log.path))
+
+
+def test_an_approval_cut_short_by_a_dying_writer_is_cut_off_with_its_assertion(tmp_path,
+                                                                            monkeypatch):
+    log, d, rec = _fresh(tmp_path / "log")
+    call, esc = _escalate(rec, "c1")
+    answer = _yes(esc, A, 2)
+
+    def child():
+        die_after(monkeypatch, 1, passkeys.KIND_EVIDENCE)   # the approval, not its assertion
+        rec.approval(call, answer)
+
+    assert fork(child) == 9
+    assert "approval" not in [r["kind"] for _, _, r in _trail(log)]
+    _clean(log.path, unfinished=True)
+    log2, d2, rec2 = _reopened(log.path)
+    entry = rec2.approval(call, answer)              # the same answer, recorded whole
+    kinds = [r["kind"] for _, _, r in _trail(log2)]
+    assert kinds[entry.index:] == ["approval", passkeys.KIND_EVIDENCE]
+    assert _directory_state(d2) == _directory_state(_clean(log.path))
+
+
+def test_a_retried_revocation_after_a_crash_is_judged_and_applied(tmp_path, monkeypatch):
+    """The revocation's batch is cut short; after a restart the operator sends the identical
+    revocation again. It is written whole, the live directory applies it, and B can no longer
+    approve."""
+    log, d, rec = _fresh(tmp_path / "log")
+    _enrol(rec, B, 7)
+    stamp = 1_900_000_000_000
+
+    def child():
+        die_after(monkeypatch, 1, passkeys.KIND_REVOKED)
+        _revoke(rec, B, 8, ts=stamp)
+
+    assert fork(child) == 9
+    log2, d2, rec2 = _reopened(log.path)
+    assert d2.creds[B.credential_id].revoked_at is None
+    entry = _revoke(rec2, B, 8, ts=stamp)
+    assert d2.creds[B.credential_id].revoked_at == entry.index
+    assert _directory_state(d2) == _directory_state(_clean(log.path))
+    call, esc = _escalate(rec2, "c1")
+    with pytest.raises(webauthn.WebAuthnError, match="revoked"):
+        rec2.approval(call, _yes(esc, B, 50))
+
+
+def test_a_revocation_another_process_wrote_is_seen_before_the_next_approval(tmp_path):
+    """Two writers on one trail, each with its own directory (two gateway processes, or a
+    gateway and an admin tool). One revokes B; the other, loaded before that, must refuse an
+    approval by B."""
+    log1, d1, rec1 = _fresh(tmp_path / "log")
+    _enrol(rec1, B, 7)
+    log2, d2, rec2 = _reopened(log1.path)
+    call, esc = _escalate(rec2, "c1")
+    _revoke(rec1, B, 8)                                          # the first writer
+    with pytest.raises(webauthn.WebAuthnError, match="revoked"):
+        rec2.approval(call, _yes(esc, B, 50))                    # the second writer
+    assert d2.creds[B.credential_id].revoked_at is not None
+    rec2.approval(call, _yes(esc, A, 51))                        # A still may
+    assert _directory_state(d1) != _directory_state(d2)          # d1 has not seen A's use yet
+    with d1.lock:
+        d1.sync(_trail(log1))
+    assert _directory_state(d1) == _directory_state(d2) == _directory_state(_clean(log1.path))
+
+
+def test_of_two_judgements_only_the_one_committed_first_applies(gateway):
+    gw, log, c, rec, _ = gateway
+    _enrol_b(rec, 7)
+    d = gw.passkey_directory
+
+    def revocation(n):
+        ev = A.evidence(nonce(n), passkeys.REVOKE_TOOL,
+                        passkeys.revoke_args_sha256(CFO, B.credential_id))
+        r = {"v": 0, "kind": passkeys.KIND_REVOKED, "agent": CFO, "obo": None, "subject": None,
+             "body": {"approver": CFO, "credential_id": B.credential_id,
+                      "evidence": ev.summary()}, "parents": [], "ts": n}
+        return d.prepare(len(log), b"r%d" % n, r, [ev])
+
+    with d.lock:
+        first, second = revocation(20), revocation(21)
+        second()
+        after = _directory_state(d)
+        with pytest.raises(RuntimeError, match="changed"):
+            first()
+        assert _directory_state(d) == after
+
+
+def _while_racing(test):
+    """Run `test` with the interpreter switching threads as often as it can."""
+    import sys
+    interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        test()
+    finally:
+        sys.setswitchinterval(interval)
+
+
 def test_approvals_and_registry_changes_from_many_threads_leave_a_clean_trail(gateway):
-    """Six agents each ask for and approve payments while six other threads each enrol a
-    passkey and revoke it, all on one trail and one directory."""
+    """Three agents ask for and approve payments, each approver with a passkey of its own,
+    while other threads revoke each of those passkeys and enrol a new one in its place, all on
+    one trail and one directory. Every approval accepted is one the audit accepts, and the
+    live directory ends as the trail says it must."""
     import threading
     gw, log, c, rec, ctx = gateway
     args = {"invoice": "I2", "amount_minor": 900}
-    extra = [SoftAuthenticator(f"stress-{i}") for i in range(6)]
+    first = [SoftAuthenticator(f"stress-first-{k}") for k in range(3)]
+    second = [SoftAuthenticator(f"stress-second-{k}") for k in range(3)]
+    for k, key in enumerate(first):
+        _enrol(rec, key, 4000 + k)
+    current = list(first)
     errors, replies = [], []
 
     def approver(k):
@@ -811,45 +1030,130 @@ def test_approvals_and_registry_changes_from_many_threads_leave_a_clean_trail(ga
             cl = AgentClient(gw.server.server_address[1], ctx["files"]["ap"], ctx["bundle"],
                              gateway_id=GATEWAY, trust_domain=DOMAIN, token=c.token)
             cl.initialize()
-            for j in range(2):
+            for j in range(4):
                 asked = cl.call(TOOL, args)
                 esc = asked["result"].get("structuredContent", {}).get("escalation")
-                replies.append(asked if esc is None else
-                               cl.call(TOOL, args, approval=_approval(esc, A, 1000 + 10 * k + j,
-                                                                      args)))
+                replies.append(asked if esc is None else cl.call(
+                    TOOL, args, approval=_approval(esc, current[k], 1000 + 10 * k + j, args)))
         except Exception as e:                  # noqa: BLE001 - reported by the assertion
             errors.append(repr(e))
 
-    def registrar(i, k):
+    def registrar(k):
         try:
-            rec.passkey_enrolled(CFO, identity=IDENTITY, credential_id=k.credential_id,
-                                 public_key=k.cose_key, rp_id=k.rp_id, origin=k.origin,
-                                 confirmation=A.evidence(nonce(5000 + 2 * i), passkeys.ENROL_TOOL,
-                                                         passkeys.enrol_args_sha256(
-                                                             CFO, IDENTITY, k.credential_id,
-                                                             k.cose_key, k.rp_id, k.origin)))
-            rec.passkey_revoked(CFO, credential_id=k.credential_id,
-                                confirmation=A.evidence(nonce(5001 + 2 * i), passkeys.REVOKE_TOOL,
-                                                        passkeys.revoke_args_sha256(
-                                                            CFO, k.credential_id)))
+            _revoke(rec, first[k], 5000 + 2 * k)
+            _enrol(rec, second[k], 5001 + 2 * k)
+            current[k] = second[k]
         except Exception as e:                  # noqa: BLE001 - reported by the assertion
             errors.append(repr(e))
 
-    threads = [threading.Thread(target=approver, args=(k,), daemon=True) for k in range(6)]
-    threads += [threading.Thread(target=registrar, args=(i, k), daemon=True)
-                for i, k in enumerate(extra)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join(30)
-    assert not any(t.is_alive() for t in threads), "deadlock: threads still running"
+    def race():
+        threads = [threading.Thread(target=approver, args=(k,), daemon=True) for k in range(3)]
+        threads += [threading.Thread(target=registrar, args=(k,), daemon=True)
+                    for k in range(3)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(60)
+        assert not any(t.is_alive() for t in threads), "deadlock: threads still running"
+
+    _while_racing(race)
     assert errors == []
     paid = [r for r in replies if r["result"].get("structuredContent") == {"paid": "I2"}]
-    assert len(replies) == 12 and len(paid) == 11      # the intent's budget allows 11 of 900
-    assert all("above its budget" in _text(r) for r in replies if r not in paid)
-    recs = [(e.index, bytes(e.cid), log.record(e)) for e in log.entries()]
+    assert len(replies) == 12 and paid
+    for r in replies:
+        if r not in paid:
+            assert "above its budget" in _text(r) or "had been revoked" in _text(r), _text(r)
+    recs = _trail(log)
+    approvals = [r for _, _, r in recs if r["kind"] == "approval"]
+    assert len(approvals) >= len(paid)          # every payment rests on an approval on record
     assert audit.check_approvals(recs, principals())[1] == []
     reopened = ActionLog.open(log.path)
     assert reopened.verify().ok and len(reopened) == len(recs)
-    assert all(k.credential_id in gw.passkey_directory.creds and
-               gw.passkey_directory.creds[k.credential_id].revoked_at is not None for k in extra)
+    assert _directory_state(gw.passkey_directory) == _directory_state(_clean(log.path))
+    assert all(gw.passkey_directory.creds[k.credential_id].revoked_at is not None for k in first)
+
+
+def test_writers_in_several_processes_leave_a_clean_trail_and_agreeing_directories(tmp_path):
+    """Three processes approve with passkeys of their own while a fourth revokes each of those
+    passkeys and enrols a new one, each process with its own directory, on one trail."""
+    path = tmp_path / "log"
+    log, d, rec = _fresh(path)
+    first = [SoftAuthenticator(f"proc-first-{k}") for k in range(3)]
+    second = [SoftAuthenticator(f"proc-second-{k}") for k in range(3)]
+    for k, key in enumerate(first):
+        _enrol(rec, key, 4000 + k)
+
+    def agrees(d, log):
+        """This process's directory, brought up to the trail, is the one the trail gives, with
+        the other writers held off while the two are compared."""
+        with d.lock, log._locked():
+            d.sync(log._records_from(d.seen))
+            built = passkeys.Directory.build(log._records_from(0),
+                                             passkeys.load_principals(principals())[1])
+        return _directory_state(d) == _directory_state(built)
+
+    def approving(k):
+        log, d, rec = _reopened(path)
+        accepted = 0
+        for j in range(6):
+            call, esc = _escalate(rec, f"p{k}-{j}")
+            for key in (first[k], second[k]):     # the old passkey, or else its replacement
+                try:
+                    rec.approval(call, _yes(esc, key, 1000 + 20 * k + 2 * j
+                                            + (key is second[k])))
+                    accepted += 1
+                    break
+                except webauthn.WebAuthnError as e:
+                    assert "revoked" in str(e) or "not in the registry" in str(e), str(e)
+        (tmp_path / f"accepted-{k}").write_text(str(accepted))
+        assert agrees(d, log)
+
+    def registering():
+        log, d, rec = _reopened(path)
+        for k in range(3):
+            _revoke(rec, first[k], 5000 + 2 * k)
+            _enrol(rec, second[k], 5001 + 2 * k)
+        assert agrees(d, log)
+
+    import os
+    pids = []
+    for work in [lambda k=k: approving(k) for k in range(3)] + [registering]:
+        pid = start_child()
+        if pid == 0:                                     # pragma: no cover - the child
+            code = 1
+            try:
+                _while_racing(work)
+                code = 0
+            except BaseException:
+                import traceback
+                traceback.print_exc()
+            finally:
+                os._exit(code)
+        pids.append(pid)
+    assert [os.waitstatus_to_exitcode(os.waitpid(p, 0)[1]) for p in pids] == [0] * 4
+    rebuilt = _clean(path)
+    assert all(rebuilt.creds[k.credential_id].revoked_at is not None for k in first)
+    accepted = sum(int((tmp_path / f"accepted-{k}").read_text()) for k in range(3))
+    assert accepted and [r["kind"] for _, _, r in _trail(log)].count("approval") == accepted
+
+
+@pytest.mark.parametrize("what", ["enrolment", "approval"])
+def test_a_change_on_the_disk_is_applied_even_if_the_checkpoint_after_it_fails(tmp_path,
+                                                                              monkeypatch,
+                                                                              what):
+    from aeos import Recorder
+    log, d, _ = _fresh(tmp_path / "log")
+    rec = Recorder(log, agent=CFO, passkeys=d, checkpoint_every=1)
+    call, esc = _escalate(rec, "c1")
+
+    def no_room(*a, **k):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(log, "checkpoint", no_room)
+    with pytest.raises(OSError):
+        _enrol(rec, B, 7) if what == "enrolment" else rec.approval(call, _yes(esc, A, 8))
+    if what == "enrolment":
+        assert B.credential_id in d.creds             # written, so applied
+    else:
+        assert d.ledger.nonces.get(nonce(8)) is not None
+    assert _directory_state(d) == _directory_state(_clean(log.path))

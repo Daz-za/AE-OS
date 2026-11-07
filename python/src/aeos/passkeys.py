@@ -328,6 +328,7 @@ class Directory:
         self.demo = demo                   # accept http://localhost, and say so in a note
         self.lock = OwnedLock()
         self._version = 0                  # moves on with every change applied
+        self.seen = 0                      # trail positions already brought in by sync()
         self.creds: Dict[bytes, Credential] = {}
         self.identity: Dict[str, List[Tuple[int, str]]] = {}      # approver -> (position, identity)
         self.epochs: Dict[str, List[int]] = {}                    # approver -> positions that began one
@@ -495,22 +496,76 @@ class Directory:
                 except WebAuthnError:
                     pass                       # reported where the parent looks for it
 
-    def step(self, index: int, cid: bytes, rec: Dict[str, Any]) -> None:
-        """Apply a registry record at its position, collecting a problem if it is refused."""
+    def step(self, index: int, cid: bytes, rec: Dict[str, Any],
+             found: Optional[List[Evidence]] = None) -> None:
+        """Apply a registry record at its position, collecting a problem if it is refused.
+        `found` are its confirming assertions (by default, those indexed by `begin`)."""
         try:
             with self.lock:
-                self.apply(index, cid, rec, self.children.get(cid, []))
+                self.apply(index, cid, rec, self.children.get(cid, []) if found is None
+                           else found)
         except (WebAuthnError, KeyError, TypeError, ValueError, AttributeError) as e:
             self.problems.append(f"record {index}: {e}")
 
-    @classmethod
-    def build(cls, records: List[Record], principals: Dict[str, Principal]) -> "Directory":
-        """The registry alone, from a trail's registry records (the approvals are not checked)."""
-        d = cls(principals)
-        d.begin(records)
+    def sync(self, records: List[Tuple[int, bytes, Any]]) -> None:
+        """Bring the directory up to the trail: every registry record and every passkey
+        approval at a position not yet seen, whichever process wrote it, applied in trail
+        order as the audit applies it (a refused change is a problem, not applied; an approval
+        whose assertion does not stand uses nothing). Records are (position, CID, decoded
+        record or None), the whole batches since `seen`.
+
+        The calling thread must hold the directory lock (lock order: directory, gateway,
+        recorder, file); the trail calls this with its file lock held, before a judgement."""
+        self._require_lock("bringing the passkey directory up to the trail")
+        children: Dict[bytes, List[Evidence]] = {}
+        for parent, recs in evidence_children(
+                [t for t in records if isinstance(t[2], dict)]).items():
+            for rec in recs:
+                try:
+                    children.setdefault(parent, []).append(Evidence.parse(rec["body"]))
+                except WebAuthnError:
+                    pass                       # the audit reports it where the parent looks
         for index, cid, rec in records:
-            if isinstance(rec, dict) and rec.get("kind") in REGISTRY_KINDS:
-                d.step(index, cid, rec)
+            if index < self.seen:
+                continue
+            kind = rec.get("kind") if isinstance(rec, dict) else None
+            if kind in REGISTRY_KINDS:
+                self.step(index, cid, rec, children.get(cid, []))
+            elif kind == "approval":
+                self._take_approval(index, cid, rec, children.get(cid, []))
+            self.seen = index + 1
+
+    def _take_approval(self, index: int, cid: bytes, rec: Dict[str, Any],
+                       found: List[Evidence]) -> None:
+        """Record the assertion use of a passkey approval written to the trail, if its
+        assertion stands at its position, as the audit does."""
+        try:
+            b = rec["body"]
+            if b.get("approver") not in self.principals or b.get("decision") != "approve":
+                return
+            summary = b.get("evidence")
+            if not isinstance(summary, dict) or summary.get("kind") != EVIDENCE_KIND:
+                return
+            mine = [e for e in found if e.assertion_sha256 == summary.get("assertion_sha256")]
+            if not mine:
+                return
+            effects: List[Commit] = []
+            errs = self._check(b["approver"], index, b["escalation"], b["tool"],
+                               b["args_sha256"], escalation_cid(b["escalation"]), mine[0],
+                               effects)
+        except (WebAuthnError, KeyError, TypeError, ValueError, AttributeError):
+            return                             # the audit reports what is wrong with it
+        if not errs:
+            self._committer(effects)()
+
+    @classmethod
+    def build(cls, records: List[Tuple[int, bytes, Any]], principals: Dict[str, Principal],
+              demo: bool = False) -> "Directory":
+        """The directory a live writer holds after these records: the registry, and the uses
+        of every assertion an approval recorded, applied in trail order."""
+        d = cls(principals, demo=demo)
+        with d.lock:
+            d.sync(records)
         return d
 
     def _declared(self, who: Any) -> str:

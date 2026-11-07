@@ -4,6 +4,7 @@ import pytest
 
 from aeos import ActionLog, make_record, verify_consistency_doc, verify_action_record
 from aeos.canon import json_digest
+from crash_support import die_after, fork, start_child
 
 AGENT = "spiffe://acme.example/agent/ap-clerk/1"
 CFO = "spiffe://acme.example/human/cfo"
@@ -132,9 +133,9 @@ def test_records_appended_together_land_in_one_write_and_may_cite_each_other(tmp
     from aeos.canon import cid_of_bytes, dag_cbor
     child = make_record("note", AGENT, body={"n": 2}, parents=[cid_of_bytes(dag_cbor(parent))],
                         ts=1)
-    a, b = log.append_all([parent, child])
+    a, b = log._append_all([parent, child])
     assert (a.index, b.index) == (1, 2)            # the marker is record 0
-    assert log.append_all([parent, child]) == [a, b]           # already there: not written again
+    assert log._append_all([parent, child]) == [a, b]           # already there: not written again
     assert len(log) == 3 and ActionLog.open(log.path).verify().ok
 
 
@@ -177,16 +178,188 @@ def test_a_failed_write_leaves_nothing_behind_and_the_next_write_lands_clean(tmp
     assert len(reopened) == 4 and reopened.verify().ok
 
 
-def test_a_line_left_half_written_by_a_dead_writer_is_skipped_then_cut(tmp_path):
+def test_a_line_left_half_written_by_a_dead_writer_is_reported_skipped_then_cut_and_kept(
+        tmp_path):
     log = ActionLog.create(tmp_path / "log")
     _fill(log, 2)
+    size = (log.path / "records.jsonl").stat().st_size
     with open(log.path / "records.jsonl", "ab") as f:
         f.write(b'{"i":3,"cid":"bafy')                   # a writer died mid-line
-    other = ActionLog.open(log.path)
-    assert len(other) == 3                               # readers skip it
-    other.append(make_record("note", AGENT, body={"after": 1}))
+    reader = ActionLog.open(log.path, read_only=True)
+    assert len(reader) == 3                              # readers skip it
+    assert reader.verify().problems == ["line 4: an unfinished write, not yet recovered"]
+    ActionLog.open(log.path).append(make_record("note", AGENT, body={"after": 1}))
     rep = ActionLog.open(log.path).verify()
     assert rep.ok and rep.records == 4
+    assert (log.path / "torn" / f"{size}.bin").read_bytes() == b'{"i":3,"cid":"bafy'
+
+
+@pytest.mark.parametrize("whole_lines", [0, 1, 2], ids=["nothing", "one line", "every line"])
+def test_a_batch_cut_short_by_a_dying_writer_is_cut_off_whole(tmp_path, monkeypatch,
+                                                            whole_lines):
+    """Two records written together: the process dies part way (or after the last byte but
+    before the write is finished). No reader ever sees part of the batch, and the next writer
+    cuts all of it off, keeping the bytes."""
+    from aeos.canon import cid_of_bytes, dag_cbor
+    log = ActionLog.create(tmp_path / "log")
+    _fill(log, 2)
+    size = (log.path / "records.jsonl").stat().st_size
+    a = make_record("note", AGENT, body={"n": "a"}, ts=1)
+    b = make_record("note", AGENT, body={"n": "b"}, parents=[cid_of_bytes(dag_cbor(a))], ts=1)
+
+    def child():
+        die_after(monkeypatch, whole_lines)
+        log._append_all([a, b])
+
+    assert fork(child) == 9
+    if whole_lines == 2:                 # every byte down, but never declared finished
+        assert (log.path / "records.jsonl").read_bytes().count(b"\n") == 5
+    reader = ActionLog.open(log.path, read_only=True)
+    assert len(reader) == 3 and len(log.entries()) == 3
+    assert reader.verify().problems[-1].endswith("an unfinished write, not yet recovered "
+                                                 "(.pending is present)")
+    after = ActionLog.open(log.path)
+    after.append(make_record("note", AGENT, body={"after": "restart"}))
+    assert not (log.path / ".pending").exists() and (log.path / "torn" / f"{size}.bin").exists()
+    rep = ActionLog.open(log.path).verify()
+    assert rep.ok and rep.records == 4
+    assert [e.index for e in after._append_all([a, b])] == [4, 5]     # the retry lands whole
+    assert ActionLog.open(log.path).verify().ok
+
+
+def test_a_batch_already_partly_in_the_trail_is_refused(tmp_path):
+    from aeos.canon import cid_of_bytes, dag_cbor
+    log = ActionLog.create(tmp_path / "log")
+    a = make_record("note", AGENT, body={"n": "a"}, ts=1)
+    b = make_record("note", AGENT, body={"n": "b"}, parents=[cid_of_bytes(dag_cbor(a))], ts=1)
+    log.append(a)
+    with pytest.raises(ValueError, match="cut short"):
+        log._append_all([a, b])
+    assert len(log) == 2
+
+
+def test_passkey_records_are_refused_by_the_plain_append_and_the_command_line(tmp_path,
+                                                                             capsys):
+    from aeos.cli import main
+    from aeos.log import PASSKEY_KINDS
+    log = ActionLog.create(tmp_path / "log")
+    for kind in sorted(PASSKEY_KINDS):
+        with pytest.raises(ValueError, match="only through Recorder with a passkey directory"):
+            log.append(make_record(kind, CFO, body={"approver": CFO}))
+    assert main(["append", str(log.path), "--agent", CFO, "--kind", "x-passkey-revoked",
+                 "--body", "{}"]) == 2
+    assert "only through Recorder" in capsys.readouterr().err
+    assert len(ActionLog.open(log.path)) == 0
+
+
+def test_without_file_locking_nothing_is_ever_cut(tmp_path, monkeypatch):
+    """Where the platform has no file locks, a second process takes no lock, so nothing may
+    cut what another process wrote between its read and its write."""
+    import aeos.log as log_module
+    monkeypatch.setattr(log_module, "fcntl", None)
+    writer = ActionLog.create(tmp_path / "log")
+    writer.append(make_record("note", AGENT, body={"n": 0}))
+    other = ActionLog.open(writer.path)               # say, `aeos log checkpoint`
+    real = other._load_new_locked
+
+    def load_then_the_writer_writes():
+        real()
+        writer.append(make_record("note", AGENT, body={"n": "acknowledged"}))
+
+    other._load_new_locked = load_then_the_writer_writes
+    other.checkpoint()
+    assert len(ActionLog.open(writer.path, read_only=True)) == 3   # nothing was cut
+    with open(writer.path / "records.jsonl", "ab") as f:
+        f.write(b'{"i":3,"cid')                        # a line a dead writer left unended
+    writer.append(make_record("note", AGENT, body={"n": 2}))
+    problems = ActionLog.open(writer.path, read_only=True).verify().problems
+    assert problems and all("unreadable record" in p for p in problems[:1])
+    assert (writer.path / "records.jsonl").read_bytes().count(b'{"i":3,"cid\n') == 1
+
+
+def test_a_record_and_its_checkpoint_are_flushed_to_the_disk(tmp_path, monkeypatch):
+    import os
+    import aeos.log as log_module
+    synced = []
+    real = os.fsync
+
+    def fsync(fd):
+        synced.append(os.path.basename(os.readlink(f"/proc/self/fd/{fd}")))
+        real(fd)
+
+    if not os.path.exists("/proc/self/fd"):
+        pytest.skip("needs /proc to name a file descriptor")
+    monkeypatch.setattr(log_module.os, "fsync", fsync)
+    log = ActionLog.create(tmp_path / "log")
+    assert {"records.jsonl", "checkpoints.jsonl", "log.json", "log"} <= set(synced)
+    synced.clear()
+    log.append(make_record("note", AGENT, body={"n": 1}))
+    assert "records.jsonl" in synced and ".pending" in synced
+    synced.clear()
+    log.checkpoint()
+    assert synced == ["checkpoints.jsonl"]
+
+
+def test_an_action_record_is_proved_against_records_another_process_wrote(tmp_path):
+    from aeos.log import verify_action_record
+    one = ActionLog.create(tmp_path / "log")
+    e = one.append(make_record("note", AGENT, body={"n": 0}))
+    other = ActionLog.open(one.path)
+    for n in range(1, 4):
+        other.append(make_record("note", AGENT, body={"n": n}))
+    newer = other.checkpoint()
+    assert verify_action_record(one.action_record(e), one.public_key) == []
+    old = other.checkpoint()                           # the same size: no proof needed
+    assert one.consistency(newer, old)["proof"] == []
+
+
+def test_processes_and_threads_writing_batches_together_leave_a_whole_trail(tmp_path):
+    """Four processes, three threads each, append pairs, sign checkpoints and read at once:
+    every record lands once, in sequence, every pair side by side, and the trail verifies."""
+    import threading
+    from aeos.canon import cid_of_bytes, dag_cbor
+    ActionLog.create(tmp_path / "log")
+    procs, threads, n = 4, 3, 15
+
+    def work(p):
+        log = ActionLog.open(tmp_path / "log")
+
+        def thread(t):
+            for i in range(n):
+                a = make_record("note", AGENT, body={"p": p, "t": t, "n": i}, ts=1)
+                b = make_record("note", AGENT, body={"child": True, "p": p, "t": t, "n": i},
+                                parents=[cid_of_bytes(dag_cbor(a))], ts=1)
+                log._append_all([a, b])
+                if i % 5 == 0:
+                    log.checkpoint()
+                log.entries()
+
+        ts = [threading.Thread(target=thread, args=(t,)) for t in range(threads)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+
+    import os
+    pids = []
+    for p in range(procs):
+        pid = start_child()
+        if pid == 0:                                     # pragma: no cover - the child
+            code = 1
+            try:
+                work(p)
+                code = 0
+            finally:
+                os._exit(code)
+        pids.append(pid)
+    assert [os.waitstatus_to_exitcode(os.waitpid(x, 0)[1]) for x in pids] == [0] * procs
+    rep = ActionLog.open(tmp_path / "log", read_only=True).verify()
+    assert rep.ok and rep.records == 1 + procs * threads * n * 2
+    lines = [json.loads(x) for x in (tmp_path / "log" / "records.jsonl").read_text().splitlines()]
+    views = [x["view"]["body"] for x in lines[1:]]
+    for first, second in zip(views[::2], views[1::2]):
+        assert "child" not in first and second["child"]
+        assert (first["p"], first["t"], first["n"]) == (second["p"], second["t"], second["n"])
 
 
 def test_a_judge_runs_before_anything_is_written_and_a_refusal_writes_nothing(tmp_path):
@@ -232,37 +405,28 @@ def test_writing_to_the_trail_from_inside_its_own_write_raises_instead_of_hangin
 
 def test_a_read_between_a_write_and_its_indexing_does_not_count_the_line_twice(tmp_path,
                                                                                monkeypatch):
-    """A reader in another thread runs at the worst moment: the writer's line is on disk and
-    not yet in its index. It must wait, not index the line itself."""
+    """A reader in another thread runs at the worst moment: the writer's line is on the disk
+    and declared finished (.pending removed), and not yet in its index. It must wait, not
+    index the line itself."""
     import threading
     import aeos.log as log_module
     log = ActionLog.create(tmp_path / "log")
     log.append(make_record("note", AGENT, body={"n": 0}))
-    real_open = open
+    real_fsync_dir = log_module._fsync_dir
     readers = []
 
-    class ReadAfterWrite:
-        def __init__(self, f):
-            self.f = f
-
-        def __enter__(self):
-            return self.f.__enter__()
-
-        def __exit__(self, *exc):
-            done = self.f.__exit__(*exc)
+    def read_after_finishing(path):
+        real_fsync_dir(path)
+        if log._holder is not None and not (log.path / ".pending").exists() and not readers:
             reader = threading.Thread(target=log.entries)
             reader.start()
             readers.append(reader)
             reader.join(0.3)          # blocks on the index lock; without it, it reads now
-            return done
 
-    def hooked(path, mode="r", *a, **k):
-        f = real_open(path, mode, *a, **k)
-        return ReadAfterWrite(f) if str(path).endswith("records.jsonl") and "a" in mode else f
-
-    monkeypatch.setattr(log_module, "open", hooked, raising=False)
+    monkeypatch.setattr(log_module, "_fsync_dir", read_after_finishing)
     log.append(make_record("note", AGENT, body={"n": 1}))
     monkeypatch.undo()
+    assert readers
     for r in readers:
         r.join(5)
     log.append(make_record("note", AGENT, body={"n": 2}))

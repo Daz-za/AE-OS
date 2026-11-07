@@ -67,9 +67,8 @@ class Gateway:
     policy_facts    tool name, arguments -> facts the policy needs, such as the invoice
     passkey_directory  the registry of passkey approvers (passkeys.Directory); an approval by
                     one of them needs a valid assertion, and each nonce and assertion is
-                    accepted once. Recorders that share the directory keep it current as they
-                    record changes; a change another process writes to the trail is seen only
-                    after a restart
+                    accepted once. Every write brings it up to the trail first, so a change
+                    or an approval any process wrote is seen
     """
 
     def __init__(self, log: ActionLog, tools: Dict[str, Tool], *,
@@ -284,16 +283,16 @@ class Gateway:
         except (ValueError, KeyError, TypeError):
             return {}, "the approval could not be read"
         pk = self.passkey_directory and self.passkey_directory.principals.get(a.approver)
-        # A passkey approval is judged, recorded and only then counted as used, with the
-        # directory held throughout, so a revocation recorded meanwhile lands before the check
-        # or after the approval, never between, and a failed write uses nothing up.
+        # The directory is held from the checks here until the approval is on the disk. The
+        # assertion itself is judged inside the trail's write, at the approval's position and
+        # after every earlier record (whichever process wrote it), so a revocation lands before
+        # the judgement or after the approval, never between, and a refusal writes nothing.
         # Lock order: directory, gateway, recorder, file.
         with (self.passkey_directory.lock if pk is not None else contextlib.nullcontext()):
             return self._approval_locked(rec, call, a, pk, peer, tool, args, at)
 
     def _approval_locked(self, rec: Recorder, call: Any, a: Any, pk: Any, peer: str, tool: str,
                          args: Dict[str, Any], at: int) -> Tuple[Dict[str, Any], Optional[str]]:
-        commit = None
         with self._lock:
             asked = self.escalations.get(a.escalation)
             if asked is None:
@@ -302,41 +301,35 @@ class Gateway:
                     a.args_sha256 != asked[2]:
                 return {}, "the approval is for a different call"
             if pk is not None:
-                problem, commit = self._passkey_problem(a, args)
+                problem = self._passkey_problem(a, args)
                 if problem:
                     return {}, problem
             elif not a.verify(self.principal_keys.get(a.approver, b"")):
                 return {}, "the approval's signature does not verify"
-        rec.approval(call, a, ts=at)
-        if commit is not None:
-            commit()
+        try:
+            rec.approval(call, a, ts=at)
+        except passkeys.WebAuthnError as e:
+            return {}, str(e)
         return {"approver": a.approver, "decision": a.decision, "escalation": a.escalation}, \
             None
 
-    def _passkey_problem(self, a: Any, args: Dict[str, Any]
-                         ) -> Tuple[Optional[str], Optional[passkeys.Commit]]:
-        """A passkey approver's answer: an approval needs a valid assertion for this exact
-        call and escalation; a rejection carries the sign-in it rests on, never an assertion.
-        The problem, or None and what records the assertion's use once the approval is on
-        disk. Called with the directory lock and then the gateway's lock held."""
-        assert self.passkey_directory is not None
+    def _passkey_problem(self, a: Any, args: Dict[str, Any]) -> Optional[str]:
+        """What is wrong with a passkey approver's answer before its assertion is judged: an
+        approval needs an assertion that names this escalation and signs the document the call
+        acts on; a rejection carries the sign-in it rests on, never an assertion. The
+        assertion is judged when the approval is written (`Recorder.approval`). Called with the
+        directory lock and then the gateway's lock held."""
         if a.decision == "reject":
             if isinstance(a.evidence, passkeys.SignIn):
-                return None, None
-            return "a rejection by a passkey approver carries no identity evidence", None
+                return None
+            return "a rejection by a passkey approver carries no identity evidence"
         if a.decision != "approve" or not isinstance(a.evidence, passkeys.Evidence):
-            return "the approval carries no passkey assertion", None
+            return "the approval carries no passkey assertion"
         try:
-            escalation = passkeys.escalation_cid(a.escalation)
+            passkeys.escalation_cid(a.escalation)
         except passkeys.WebAuthnError as e:
-            return str(e), None
-        errs, commit = self.passkey_directory.judge(
-            approver=a.approver, position=sys.maxsize, key=a.escalation, tool=a.tool,
-            args_sha256=a.args_sha256, escalation=escalation, ev=a.evidence)
-        if errs:
-            return "the passkey's assertion was refused: " + errs[0], None
-        problem = passkeys.document_problem(a.evidence, args)
-        return (problem, None) if problem else (None, commit)
+            return str(e)
+        return passkeys.document_problem(a.evidence, args)
 
     def _authorize(self, peer: str, tool: str, args: Dict[str, Any], token: Optional[str],
                    at: int) -> Dict[str, Any]:

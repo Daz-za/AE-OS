@@ -418,7 +418,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         body = json.loads(a.body)
         rec = make_record(a.kind, a.agent, on_behalf_of=a.on_behalf_of, subject=a.subject,
                           body=body, parents=[cid_parse(c) for c in a.parent])
-        e = log.append(rec)
+        try:
+            e = log.append(rec)
+        except ValueError as err:             # a kind only the recorder may write
+            print(f"aeos append: {err}", file=sys.stderr)
+            return 2
         print(json.dumps({"index": e.index, "cid": cid_str(e.cid)}))
         return 0
     if a.cmd == "checkpoint":
