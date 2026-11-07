@@ -205,7 +205,8 @@ def test_audit_replays_decisions_and_catches_missing_evidence(tmp_path):
     stranger = {fulldemo.CONTROLLER: "00" * 32}
     (tmp_path / "p.json").write_text(json.dumps(stranger))
     problems = audit.run(folder, principals=tmp_path / "p.json")[1]
-    # Unsigned period changes leave the books' periods unopened, so their entries fail too.
+    # Unsigned period changes leave the books' periods unopened, so their entries fail too, and
+    # a decision that rests on an approval that does not verify fails with it.
     assert problems and all("is not signed by" in p or "has not been opened" in p
-                            for p in problems)
+                            or "verified approval of this call" in p for p in problems)
     assert audit.run(folder, authority_key=delegation.Authority().public_key.hex())[1]

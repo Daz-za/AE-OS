@@ -539,19 +539,30 @@ def passkey_vectors():
         return b.hex()
 
     args = json_digest(ps.ARGS)
-    items = [(ps.TOOL, json_digest(a)) for _, a in ps._batch_items(4)]
+    esc = cid_of_bytes(dag_cbor({"example": "an escalation"}))
+    items = [(ps.TOOL, json_digest(a), esc) for _, a in ps._batch_items(4)]
+    doc_items = [(webauthn.DOCUMENT_TOOL, hashlib.sha256(b"a document").digest(), b"")] + items
     n = ws.nonce(1)
+    rd = webauthn.request_digest(ps.TOOL, args, esc)
     cons = {
         "contexts": {"challenge": webauthn.CHALLENGE_CONTEXT.decode(),
-                     "request": webauthn.REQUEST_CONTEXT.decode(),
-                     "batch": webauthn.BATCH_CONTEXT.decode()},
-        "tool": ps.TOOL, "args_sha256": hx(args), "nonce": hx(n),
-        "request_digest": hx(webauthn.request_digest(ps.TOOL, args)),
-        "challenge": hx(webauthn.challenge_for(n, webauthn.request_digest(ps.TOOL, args))),
-        "batch_items": [{"tool": t, "args_sha256": hx(a)} for t, a in items],
+                     "request_without_escalation": webauthn.REQUEST_CONTEXT.decode(),
+                     "request_for_an_escalation": webauthn.ESCALATED_CONTEXT.decode(),
+                     "batch": webauthn.BATCH_CONTEXT.decode(),
+                     "enrol": webauthn.ENROL_CONTEXT.decode()},
+        "tool": ps.TOOL, "args_sha256": hx(args), "escalation": hx(esc), "nonce": hx(n),
+        "request_digest": hx(rd),
+        "request_digest_without_escalation": hx(webauthn.request_digest(ps.TOOL, args)),
+        "challenge": hx(webauthn.challenge_for(n, rd)),
+        "batch_items": [{"tool": t, "args_sha256": hx(a), "escalation": hx(e)}
+                        for t, a, e in items],
         "batch_digest": hx(webauthn.batch_digest(items)),
         "batch_challenge": hx(webauthn.challenge_for(n, webauthn.batch_digest(items))),
+        "batch_with_document_digest": hx(webauthn.batch_digest(doc_items)),
+        "enrol": {"approver": ws.APPROVER, "identity_evidence_sha256": hx(doc_items[0][1]),
+                  "challenge": hx(webauthn.enrol_challenge(ws.APPROVER, doc_items[0][1]))},
     }
+
     def cose_case(name, key):
         try:
             webauthn.parse_cose_key(key)
@@ -565,8 +576,7 @@ def passkey_vectors():
     keys_ += [cose_case(c["name"], bytes.fromhex(c["key"])) for c in _key_cases(ps, ws)]
 
     def assertion_case(name, auth, ev_fn=None, **wrong):
-        digest = webauthn.request_digest(ps.TOOL, args)
-        ch = webauthn.challenge_for(n, digest)
+        ch = webauthn.challenge_for(n, rd)
         ad, cdj, sig = auth.assertion(ch, **wrong)
         if ev_fn:
             ad, cdj, sig = ev_fn(ad, cdj, sig)
@@ -580,7 +590,7 @@ def passkey_vectors():
                 "origin": auth.origin, "challenge": hx(ch), "authenticator_data": hx(ad),
                 "client_data_json": hx(cdj), "signature": hx(sig), "expect_error": err}
 
-    flip = ps._flip
+    flip = ps.flip
     assertions = [
         assertion_case("valid ES256 assertion", ps.A),
         assertion_case("valid EdDSA assertion", ps.E),
@@ -593,16 +603,23 @@ def passkey_vectors():
         assertion_case("no user verification", ps.A, uv=False),
         assertion_case("no user presence", ps.A, up=False),
         assertion_case("sign counter that never moves (a synced passkey) is accepted", ps.A),
+        assertion_case("extension data that is one canonical map", ps.A,
+                       extensions=b"\xa1\x69credProps\xa1\x62rk\xf5"),
+        assertion_case("extension data that is not exactly one map", ps.A, extensions=b"\xa0\x00"),
+        assertion_case("extension flag with no extension data", ps.A, ed_flag=True),
+        assertion_case("client data with a repeated key", ps.A,
+                       client_raw=b'{"type":"webauthn.get","type":"webauthn.get"}'),
+        assertion_case("cross-origin client data", ps.A, extra_client={"crossOrigin": True}),
     ]
     cases = []
     for name, trail, pr, expect in ps.scenarios():
-        findings, problems = audit.check_approvals(trail.triples(), pr)
+        findings, problems, notes = audit.check_approvals(trail.triples(), pr)
         assert len(problems) == len(expect) and all(x in y for x, y in zip(expect, problems)), \
             (name, expect, problems)
         cases.append({"name": name, "principals": pr,
                       "records": [{"cid": cid_str(c), "cbor": hx(dag_cbor(r))}
                                   for _, c, r in trail.triples()],
-                      "expect_problems": problems})
+                      "expect_problems": problems, "expect_notes": notes})
     return {
         "format": "aeos-passkey-approvals/test-vectors/v1",
         "about": "Test vectors for passkey approvals (spec/action-records-v1.md, section 10). "
@@ -610,7 +627,7 @@ def passkey_vectors():
                  "with a deterministic software authenticator; every key is derived from a "
                  "public seed, never use one for real. A case is a trail (records in order, "
                  "each with its CID), the principals file the auditor trusts, and the problems "
-                 "a verifier must report, in order; none means the approvals verify.",
+                 "a verifier must report, in order (none means the approvals verify), and the notes it makes.",
         "constructions": cons, "cose_keys": keys_, "assertions": assertions, "cases": cases,
     }
 
