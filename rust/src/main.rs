@@ -2,8 +2,7 @@
 
 use aeos_verify::canon::{hex, json_digest, unhex};
 use aeos_verify::{
-    before_pending, verify_action_record_detail, verify_consistency_doc, verify_log, LogFiles,
-    SignatureState,
+    verify_action_record_detail, verify_consistency_doc, verify_log, LogFiles, SignatureState,
 };
 use serde_json::Value as Json;
 use std::path::Path;
@@ -138,18 +137,15 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
                 file("checkpoints.jsonl")?,
             );
             let pending = std::fs::read_to_string(dir.join(".pending")).ok();
-            let (records, unfinished) = before_pending(&records, pending.as_deref());
-            let mut rep = verify_log(
+            let rep = verify_log(
                 &LogFiles {
                     log_json: &log_json,
-                    records,
+                    records: &records,
                     checkpoints: &checkpoints,
+                    pending: pending.as_deref(),
                 },
                 &key,
             );
-            if let Some(problem) = unfinished {
-                rep.problems.insert(0, problem);
-            }
             let unsigned = rep.records - rep.issuer_signed.min(rep.records);
             let note = if unsigned > 0 && rep.issuer_signed != rep.records {
                 format!(", {unsigned} of them log-signed only (no issuer signature)")

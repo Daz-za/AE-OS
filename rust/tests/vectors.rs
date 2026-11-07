@@ -9,8 +9,8 @@ use aeos_verify::canon::{
 use aeos_verify::merkle::{self, Hash};
 use aeos_verify::verify::key_id;
 use aeos_verify::{
-    before_pending, verify_action_record, verify_action_record_detail, verify_consistency_doc,
-    verify_log, LogFiles,
+    judge_pending, verify_action_record, verify_action_record_detail, verify_consistency_doc,
+    verify_log, LogFiles, Pending,
 };
 use serde_json::Value as Json;
 use std::sync::OnceLock;
@@ -246,6 +246,7 @@ fn version_0_logs_and_consistency_proofs_in_the_frozen_vectors_still_verify() {
                 log_json: s(&logs["log_json"]),
                 records: s(&c["records"]),
                 checkpoints: s(&c["checkpoints"]),
+                pending: None,
             },
             &key,
         );
@@ -285,6 +286,7 @@ fn logs_match_reference_report() {
                 log_json: s(&logs["log_json"]),
                 records: s(&c["records"]),
                 checkpoints: s(&c["checkpoints"]),
+                pending: None,
             },
             &key,
         );
@@ -322,6 +324,7 @@ fn log_with_untrusted_key_is_reported() {
             log_json: s(&logs["log_json"]),
             records: s(&untouched["records"]),
             checkpoints: s(&untouched["checkpoints"]),
+            pending: None,
         },
         &other,
     );
@@ -399,6 +402,7 @@ fn a_tampered_trail_is_reported_and_never_crashes_the_verifier() {
                     log_json,
                     records: &(lines.join("\n") + "\n"),
                     checkpoints,
+                    pending: None,
                 },
                 &key,
             );
@@ -421,6 +425,7 @@ fn a_tampered_trail_is_reported_and_never_crashes_the_verifier() {
                     log_json,
                     records: &(lines.join("\n") + "\n"),
                     checkpoints,
+                    pending: None,
                 },
                 &key,
             );
@@ -480,6 +485,7 @@ fn an_unfinished_write_is_reported_as_one_not_as_a_damaged_record() {
         log_json: s(&logs["log_json"]),
         records,
         checkpoints: s(&clean["checkpoints"]),
+        pending: None,
     };
     let rep = verify_log(&files(&torn), &key);
     assert_eq!(
@@ -492,13 +498,72 @@ fn an_unfinished_write_is_reported_as_one_not_as_a_damaged_record() {
     assert_eq!(rep.records, n);
     // A batch announced in .pending is unfinished even when every byte of it is there.
     let first_line = records.find('\n').unwrap() + 1;
-    let pending = format!("{{\"offset\":{first_line},\"length\":1}}");
-    let (kept, problem) = before_pending(records, Some(&pending));
-    assert_eq!(kept, &records[..first_line]);
-    assert_eq!(
-        problem.as_deref(),
-        Some("line 2 on: an unfinished write, not yet recovered (.pending is present)")
+    let second: Json = serde_json::from_str(records[first_line..].lines().next().unwrap()).unwrap();
+    let rest = records.len() - first_line;
+    let pending = format!(
+        "{{\"offset\":{first_line},\"length\":{rest},\"first_cid\":{}}}",
+        second["cid"]
     );
-    assert_eq!(before_pending(records, None), (records, None));
-    assert_eq!(before_pending(records, Some("not json")), (records, None));
+    let with = |pending: &str| {
+        verify_log(
+            &LogFiles {
+                pending: Some(pending),
+                checkpoints: "", // no checkpoint covers the batch
+                ..files(records)
+            },
+            &key,
+        )
+    };
+    assert_eq!(
+        with(&pending).problems,
+        vec!["line 2 on: an unfinished write, not yet recovered (.pending is present)"]
+    );
+    assert_eq!(with(&pending).records, 1);
+    // One that cannot describe the batch at its offset is stale: it hides nothing.
+    let too_short = pending.replace(&format!("\"length\":{rest}"), "\"length\":1");
+    let rep = with(&too_short);
+    assert_eq!(rep.records, n);
+    assert_eq!(
+        rep.problems,
+        vec![".pending is stale and was ignored: the trail goes on past the batch it names"]
+    );
+    let other_first = pending.replace(s(&second["cid"]), "bafyother");
+    assert_eq!(
+        judge_pending(&other_first, records, 0),
+        Pending::Stale("the record at its offset is not the first of its batch".into())
+    );
+    assert_eq!(
+        judge_pending(&pending, records, n as u64),
+        Pending::Stale("a signed checkpoint covers records past its offset".into())
+    );
+    assert_eq!(
+        judge_pending(
+            &pending.replace(&format!(":{first_line},"), ":3,"),
+            records,
+            0
+        ),
+        Pending::Stale("it names an offset inside a record".into())
+    );
+    assert_eq!(judge_pending("not json", records, 0), Pending::Unreadable);
+    assert_eq!(
+        judge_pending(&pending, records, 0),
+        Pending::Unfinished(first_line)
+    );
+    // A checkpoint cut short is reported the same way.
+    let cps = format!("{}{{\"log\":\"x\",\"si", s(&clean["checkpoints"]));
+    let cp_lines = cps.matches('\n').count();
+    let rep = verify_log(
+        &LogFiles {
+            checkpoints: &cps,
+            ..files(records)
+        },
+        &key,
+    );
+    assert_eq!(
+        rep.problems,
+        vec![format!(
+            "checkpoints line {}: an unfinished write, not yet recovered",
+            cp_lines + 1
+        )]
+    );
 }

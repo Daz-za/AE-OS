@@ -232,14 +232,18 @@ records.jsonl       {"i", "cid", "cbor" (base64), "key_id" and "sig" (issuer sig
 checkpoints.jsonl   {"log", "size", "root" (hex), "ts", "key_id", "sig" (base64)}
 signing.key         Ed25519 private key, PKCS#8 PEM (keep elsewhere in production)
 content/<cid>.json  optional full arguments and results
-.lock               the writers' file lock
-.pending            {"offset", "length"}: a batch of records being written to records.jsonl
-torn/<offset>.bin   bytes cut from records.jsonl at that offset, kept for inspection
+.lock               the file lock: writers hold it exclusive, readers shared
+.pending            {"offset", "length", "first_cid"}: a batch of records being written
+torn/               bytes taken out of the trail: <offset>.bin (records), checkpoints-<offset>.bin, pending.json
 ```
 
 `format` keeps its original text so that older audit trails and older tools keep opening each other's directories.
 
-Writers append whole batches of lines under the file lock. A batch is written as a unit: the writer writes `.pending`, naming the byte offset where the batch starts, and flushes it to the disk; then it writes the batch's lines and flushes them; then it removes `.pending`. While `.pending` is present the batch is unfinished, even if every byte of it is there: a reader ignores records.jsonl from that offset on, and the next writer cuts the file back to it (keeping the cut bytes under `torn/`) before writing. The next writer also cuts a last line with no newline. A verifier reports either as an unfinished write rather than as a damaged record. Where the platform has no file locks (one writer process), nothing is cut: a writer ends an unfinished last line with a newline, and the verifier reports that line as unreadable.
+Writers append whole batches of lines holding `.lock` exclusive; readers hold it shared, so no read sees a write in progress (a reader of a copy without `.lock` reads without it). A batch is written as a unit: the writer writes `.pending` and flushes it to the disk, writes the batch's lines and flushes them, then removes `.pending`. In `.pending`, `offset` is the byte offset in records.jsonl where the batch starts, `length` the number of bytes it adds, and `first_cid` the `cid` of its first line.
+
+While `.pending` is present the batch is unfinished, even if every byte of it is there: a reader ignores records.jsonl from `offset` on, and the next writer cuts the file back to `offset` (keeping the cut bytes under `torn/`) before writing. It does so only if `.pending` still describes the batch at its offset: `offset` is the start of a line no further than the end of the file, the file is no longer than `offset + length`, the line at `offset` (if one is whole) has `first_cid` as its `cid`, and no checkpoint that verifies covers a record from `offset` on. A `.pending` that fails any of these is stale (a copy of a trail taken mid-write, restored beside later records, say): it cuts nothing, a reader and a verifier ignore it and report it as stale, and the next writer moves it under `torn/` and refuses that one write. A `.pending` that cannot be read was cut short before any record was written; it holds nothing back, and the next writer moves it aside.
+
+The next writer also cuts a last line of records.jsonl with no newline, and moves a last line of checkpoints.jsonl with no newline under `torn/` before signing a checkpoint. A verifier reports each of these as an unfinished write rather than as damage. Where the platform has no file locks (one writer process), nothing is cut: a writer ends an unfinished last line with a newline, and the verifier reports that line as unreadable.
 
 ## 7. Compatibility with version 0
 
