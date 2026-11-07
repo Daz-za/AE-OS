@@ -136,11 +136,13 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
                 file("records.jsonl")?,
                 file("checkpoints.jsonl")?,
             );
+            let pending = std::fs::read_to_string(dir.join(".pending")).ok();
             let rep = verify_log(
                 &LogFiles {
                     log_json: &log_json,
                     records: &records,
                     checkpoints: &checkpoints,
+                    pending: pending.as_deref(),
                 },
                 &key,
             );

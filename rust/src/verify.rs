@@ -268,6 +268,8 @@ pub struct LogFiles<'a> {
     pub log_json: &'a str,
     pub records: &'a str,
     pub checkpoints: &'a str,
+    /// The text of `.pending`, when the log directory holds one (spec section 6).
+    pub pending: Option<&'a str>,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -284,6 +286,71 @@ impl VerifyReport {
     pub fn ok(&self) -> bool {
         self.problems.is_empty()
     }
+}
+
+/// What a `.pending` says about records.jsonl (spec section 6).
+#[derive(Debug, PartialEq, Eq)]
+pub enum Pending {
+    /// An unfinished batch starts at this byte offset: a reader stops there.
+    Unfinished(usize),
+    /// It cannot describe the batch at its offset, so it is ignored; why.
+    Stale(String),
+    /// Cut short before any record was written; nothing to do.
+    Unreadable,
+}
+
+/// Judge a `.pending` (its text) against records.jsonl (its text), where `covered` is the
+/// size of the largest checkpoint that verifies. The same checks, in the same order, as the
+/// Python reader.
+pub fn judge_pending(raw: &str, records: &str, covered: u64) -> Pending {
+    let doc = match serde_json::from_str::<Json>(raw) {
+        Ok(d) => d,
+        Err(_) => return Pending::Unreadable,
+    };
+    let (offset, length, first) = match (
+        doc.get("offset").and_then(Json::as_u64),
+        doc.get("length").and_then(Json::as_u64),
+        doc.get("first_cid").and_then(Json::as_str),
+    ) {
+        (Some(o), Some(l), Some(f)) => (o, l, f),
+        _ => return Pending::Unreadable,
+    };
+    let bytes = records.as_bytes();
+    let stale = |why: &str| Pending::Stale(why.to_string());
+    if offset > bytes.len() as u64 {
+        return stale("it names an offset past the end of the trail");
+    }
+    let o = offset as usize;
+    if o > 0 && bytes[o - 1] != b'\n' {
+        return stale("it names an offset inside a record");
+    }
+    if bytes.len() as u64 > offset.saturating_add(length) {
+        return stale("the trail goes on past the batch it names");
+    }
+    if let Some(end) = records[o..].find('\n') {
+        let cid = serde_json::from_str::<Json>(&records[o..o + end + 1])
+            .ok()
+            .and_then(|d| d.get("cid").and_then(Json::as_str).map(str::to_string));
+        if cid.as_deref() != Some(first) {
+            return stale("the record at its offset is not the first of its batch");
+        }
+    }
+    if covered > records[..o].matches('\n').count() as u64 {
+        return stale("a signed checkpoint covers records past its offset");
+    }
+    Pending::Unfinished(o)
+}
+
+/// The size of the largest checkpoint of this log that verifies with `public_key`.
+fn covered_size(checkpoints: &str, log_id: &str, public_key: &[u8]) -> u64 {
+    lines(checkpoints)
+        .filter(|l| l.ends_with('\n') && !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str::<Json>(l).ok())
+        .filter_map(|d| Checkpoint::from_json(&d).ok())
+        .filter(|cp| cp.log_id == log_id && cp.verify(public_key))
+        .map(|cp| cp.size)
+        .max()
+        .unwrap_or(0)
 }
 
 fn lines(s: &str) -> impl Iterator<Item = &str> {
@@ -326,7 +393,30 @@ pub fn verify_log(files: &LogFiles, public_key: &[u8]) -> VerifyReport {
     let mut leaves: Vec<Hash> = Vec::new();
     let mut seen: HashSet<Vec<u8>> = HashSet::new();
     let mut marker_at: Option<usize> = None;
-    for (n, line) in lines(files.records).enumerate() {
+    let mut records = files.records;
+    let covered = covered_size(files.checkpoints, &rep.log_id, public_key);
+    match files.pending.map(|p| judge_pending(p, records, covered)) {
+        Some(Pending::Unfinished(o)) if o < records.len() => {
+            records = &records[..o];
+            rep.problems.push(format!(
+                "line {} on: an unfinished write, not yet recovered (.pending is present)",
+                records.matches('\n').count() + 1
+            ));
+        }
+        Some(Pending::Stale(why)) => rep
+            .problems
+            .push(format!(".pending is stale and was ignored: {why}")),
+        _ => {}
+    }
+    for (n, line) in lines(records).enumerate() {
+        if !line.ends_with('\n') {
+            // a writer died part way through this line; the next writer cuts it off
+            rep.problems.push(format!(
+                "line {}: an unfinished write, not yet recovered",
+                n + 1
+            ));
+            break;
+        }
         rep.records += 1;
         let parsed = (|| -> Result<_, String> {
             let d: Json = serde_json::from_str(line).map_err(|e| e.to_string())?;
@@ -419,10 +509,20 @@ pub fn verify_log(files: &LogFiles, public_key: &[u8]) -> VerifyReport {
     }
 
     let mut prev: Option<u64> = None;
-    for (n, line) in lines(files.checkpoints).enumerate() {
-        if line.trim().is_empty() {
-            continue;
+    let mut checkpoint_lines: Vec<(usize, &str)> = lines(files.checkpoints)
+        .enumerate()
+        .filter(|(_, l)| !l.trim().is_empty())
+        .collect();
+    if let Some(&(n, last)) = checkpoint_lines.last() {
+        if !last.ends_with('\n') {
+            checkpoint_lines.pop();
+            rep.problems.push(format!(
+                "checkpoints line {}: an unfinished write, not yet recovered",
+                n + 1
+            ));
         }
+    }
+    for (n, line) in checkpoint_lines {
         rep.checkpoints += 1;
         let cp = match serde_json::from_str::<Json>(line)
             .map_err(|e| e.to_string())

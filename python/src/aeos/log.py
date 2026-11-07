@@ -16,12 +16,15 @@ from __future__ import annotations
 import base64
 import contextlib
 import json
+import logging
+import os
+import threading
 import time
 import uuid
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple, TypeVar
 
 from . import keys, merkle
 from .canon import (Link, cid_of_bytes, cid_parse, cid_str, dag_cbor, decode_dag_cbor)
@@ -52,6 +55,21 @@ STATEMENT_CONTEXT = b"aeos-action-record/statement/v1\n"
 MARKER_KIND = "x-issuer-signing"
 ISSUER_SIGNED = "issuer-signed"
 LOG_SIGNED_ONLY = "log-signed only"
+
+_T = TypeVar("_T")
+
+# Passkey registry records and confirming assertions. Each is written together with what it
+# belongs to, judged against the live passkey directory, so only `Recorder` writes them
+# (spec/action-records-v1.md section 10.4); `ActionLog.append` refuses them.
+PASSKEY_KINDS = frozenset({"x-passkey-enrolled", "x-passkey-revoked", "x-approver-rebound",
+                           "x-approval-evidence"})
+# Beside records.jsonl while a batch of records is being written: {"offset", "length"}. Its
+# presence means the batch is unfinished; the next writer cuts the file back to `offset`, and
+# readers ignore everything from there on (section 6).
+PENDING = ".pending"
+TORN = "torn"                      # bytes cut from an unfinished write, kept as <offset>.bin
+
+LOG = logging.getLogger(__name__)
 
 RECORD_KINDS = {"session.start", "session.end", "tool.call", "tool.result",
                 "policy.decision", "approval", "journal.entry", "period.transition", "note"}
@@ -270,6 +288,67 @@ def verify_consistency_doc(doc: Dict[str, Any], public_key: bytes) -> List[str]:
     return problems
 
 
+def _lines(data: bytes) -> List[bytes]:
+    """records.jsonl lines, each with its newline, and a last one without if it is unended."""
+    parts = data.split(b"\n")
+    return [p + b"\n" for p in parts[:-1]] + ([parts[-1]] if parts[-1] else [])
+
+
+UNFINISHED, STALE, UNREADABLE = "unfinished", "stale", "unreadable"
+
+
+def judge_pending(raw: bytes, records: bytes, covered: int) -> Tuple[str, int, str]:
+    """What a `.pending` (its bytes) says about records.jsonl (its bytes), where `covered` is
+    the size of the largest checkpoint that verifies (spec section 6). Returns (state,
+    offset, why): UNFINISHED with the offset where the unfinished batch starts; STALE, with
+    why, when it cannot describe the batch now at its offset (a copy restored beside later
+    records, say), so it must cut nothing; or UNREADABLE (cut short before any record)."""
+    try:
+        doc = json.loads(raw)
+        offset, length, first = doc["offset"], doc["length"], doc["first_cid"]
+    except (ValueError, KeyError, TypeError, RecursionError):
+        return UNREADABLE, 0, ""
+    if not all(isinstance(v, int) and not isinstance(v, bool) and v >= 0
+               for v in (offset, length)) or not isinstance(first, str):
+        return UNREADABLE, 0, ""
+    if offset > len(records):
+        return STALE, offset, "it names an offset past the end of the trail"
+    if offset and records[offset - 1:offset] != b"\n":
+        return STALE, offset, "it names an offset inside a record"
+    if len(records) > offset + length:
+        return STALE, offset, "the trail goes on past the batch it names"
+    end = records.find(b"\n", offset)
+    if end >= 0:
+        try:
+            cid = json.loads(records[offset:end + 1]).get("cid")
+        except (ValueError, AttributeError, RecursionError):
+            cid = None
+        if cid != first:
+            return STALE, offset, "the record at its offset is not the first of its batch"
+    if covered > records.count(b"\n", 0, offset):
+        return STALE, offset, "a signed checkpoint covers records past its offset"
+    return UNFINISHED, offset, ""
+
+
+def _fsync_dir(path: Path) -> None:
+    """Make a file's creation, renaming or removal in `path` durable (POSIX only)."""
+    if not hasattr(os, "O_DIRECTORY"):
+        return                                   # pragma: no cover - Windows has no such call
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _write_durably(path: Path, data: bytes) -> None:
+    """Write a whole file and flush it to the disk."""
+    with open(path, "wb") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+
+
 # --------------------------------------------------------------------------------------
 # The log
 # --------------------------------------------------------------------------------------
@@ -296,7 +375,24 @@ class VerifyReport:
         return not self.problems
 
 
+class StalePendingError(RuntimeError):
+    """A `.pending` that cannot describe the batch at its offset: nothing was cut."""
+
+
 class ActionLog:
+    """An audit trail on disk, safe to share between threads and between processes.
+
+    Lock order, across AE-OS: the passkey directory, then the gateway, then the recorder,
+    then this trail's file lock. A thread takes them in that order and never the other way
+    round. Writers hold the file lock (.lock) exclusive and readers hold it shared, each
+    taking the in-memory index lock inside it.
+
+    A write is durable when it returns: each batch of records is announced in `.pending`,
+    written and flushed to the disk, and only then is `.pending` removed. A batch whose
+    `.pending` is still there was cut short (the writer died, or the power failed); readers
+    ignore it, and the next writer cuts it off, keeping the cut bytes under torn/.
+    """
+
     def __init__(self, path: Path, meta: Dict[str, Any],
                  key: Optional[keys.Ed25519PrivateKey]) -> None:
         self.path = Path(path)
@@ -311,6 +407,11 @@ class ActionLog:
         self._leaves: List[bytes] = []
         self._by_cid: Dict[bytes, int] = {}
         self._offset = 0
+        # Guards the in-memory index (_entries, _leaves, _by_cid, _offset) so a reader in one
+        # thread never loads a line a writer in another has written but not yet indexed.
+        self._index_lock = threading.RLock()
+        self._holder: Optional[int] = None         # thread holding the file lock, if any
+        self._readers = threading.local()          # .shared: this thread holds it shared
 
     # ---- creation and opening ---------------------------------------------------------
 
@@ -326,9 +427,12 @@ class ActionLog:
         pub = keys.public_bytes(key)
         meta = {"format": FORMAT, "log_id": log_id or f"urn:uuid:{uuid.uuid4()}",
                 "public_key": pub.hex(), "key_id": keys.key_id(pub), "created": now_ms()}
-        (path / "log.json").write_text(json.dumps(meta, indent=2) + "\n")
-        (path / "records.jsonl").touch()
-        (path / "checkpoints.jsonl").touch()
+        _write_durably(path / "records.jsonl", b"")
+        _write_durably(path / "checkpoints.jsonl", b"")
+        _write_durably(path / "log.json", (json.dumps(meta, indent=2) + "\n").encode())
+        _fsync_dir(path)
+        if key_path.parent != path:
+            _fsync_dir(key_path.parent)
         return cls(path, meta, key)
 
     @classmethod
@@ -355,45 +459,197 @@ class ActionLog:
 
     @contextlib.contextmanager
     def _locked(self) -> Iterator[None]:
+        """Hold the trail's file lock exclusive, then its index lock, with any unfinished
+        write cut off and the index brought up to date.
+
+        Lock order: directory, gateway, recorder, file (see the class). A thread that already
+        holds the file lock and asks for it again, for example by writing from inside the
+        judge of a write or while reading, would wait for itself forever, so it is refused at
+        once instead."""
+        if self._holder == threading.get_ident() or getattr(self._readers, "shared", False):
+            raise RuntimeError("this thread already holds the audit trail's lock: a write "
+                               "from inside another write or a read would deadlock")
         with open(self.path / ".lock", "a") as lf:
             if fcntl:
                 fcntl.flock(lf, fcntl.LOCK_EX)
             try:
-                self._load_new()
-                yield
+                with self._index_lock:
+                    self._holder = threading.get_ident()
+                    try:
+                        if fcntl:                   # no writer is mid-write: safe to cut
+                            self._recover_pending()
+                        self._load_new_locked()
+                        if fcntl:
+                            self._cut(self._offset, "an unterminated last line")
+                        yield
+                    finally:
+                        self._holder = None
             finally:
                 if fcntl:
                     fcntl.flock(lf, fcntl.LOCK_UN)
 
+    @contextlib.contextmanager
+    def _shared(self) -> Iterator[None]:
+        """Hold the trail's file lock shared, then its index lock, for a read: no writer of
+        any process is mid-write meanwhile. The same order as writers take them (the reverse
+        would deadlock). A thread that already holds the file lock reads under it. Without
+        .lock (a read-only copy) or file locking, it reads without one."""
+        if not fcntl or self._holder == threading.get_ident() or \
+                getattr(self._readers, "shared", False):
+            with self._index_lock:
+                yield
+            return
+        try:
+            fd: Optional[int] = os.open(self.path / ".lock", os.O_RDONLY)
+        except OSError:                                  # missing or not permitted
+            fd = None
+        try:
+            if fd is not None:
+                fcntl.flock(fd, fcntl.LOCK_SH)
+            self._readers.shared = True
+            with self._index_lock:
+                yield
+        finally:
+            self._readers.shared = False
+            if fd is not None:
+                os.close(fd)                             # lets the lock go
+
+    def _covered(self) -> int:
+        """The size of the largest checkpoint of this trail that verifies."""
+        best = 0
+        for line in self._checkpoint_lines():
+            try:
+                cp = Checkpoint.from_json(json.loads(line))
+            except (KeyError, ValueError, TypeError, RecursionError):
+                continue
+            if cp.size > best and cp.log_id == self.log_id and cp.verify(self.public_key):
+                best = cp.size
+        return best
+
+    def _checkpoint_lines(self) -> List[bytes]:
+        """checkpoints.jsonl's whole lines, without an unended last one."""
+        lines = _lines((self.path / "checkpoints.jsonl").read_bytes())
+        return [x for x in lines if x.endswith(b"\n") and x.strip()]
+
+    def _pending(self) -> Tuple[str, int, str]:
+        """What `.pending` says, as `judge_pending`; ("", 0, "") when there is none."""
+        try:
+            raw = (self.path / PENDING).read_bytes()
+        except FileNotFoundError:
+            return "", 0, ""
+        return judge_pending(raw, (self.path / "records.jsonl").read_bytes(), self._covered())
+
+    def _recover_pending(self) -> None:
+        """Cut off a batch that `.pending` says was never finished, then remove `.pending`.
+        Called with the file lock held exclusive, so its writer is gone. A `.pending` that
+        cannot be read is moved aside under torn/; one that is stale is moved aside too, with
+        nothing cut, and StalePendingError raised. Raises if it cannot cut."""
+        state, offset, why = self._pending()
+        if not state:
+            return
+        if state != UNFINISHED:
+            kept = self._keep("pending", (self.path / PENDING).read_bytes(), ".json")
+            (self.path / PENDING).unlink()
+            _fsync_dir(self.path)
+            if state == STALE:
+                LOG.error("audit trail %s: %s is stale (%s); nothing was cut; moved to %s",
+                          self.log_id, PENDING, why, kept)
+                raise StalePendingError(
+                    f"audit trail {self.log_id}: {PENDING} is stale ({why}), so nothing was "
+                    f"cut; it was moved to {kept}. Check the trail, then write again.")
+            return
+        if offset < self._offset:              # indexed past it: start the index again
+            self._entries, self._leaves, self._by_cid = [], [], {}
+            self._offset, self._marker_index, self._first_signed_seen = 0, None, False
+        self._cut(offset, "an unfinished write")
+        (self.path / PENDING).unlink()
+        _fsync_dir(self.path)
+
+    def _keep(self, stem: str, data: bytes, suffix: str = ".bin") -> Path:
+        """Store bytes taken out of the trail under torn/, durably, under a new name."""
+        torn = self.path / TORN
+        if not torn.exists():
+            torn.mkdir()
+            _fsync_dir(self.path)
+        keep, n = torn / f"{stem}{suffix}", 1
+        while keep.exists():
+            keep, n = torn / f"{stem}.{n}{suffix}", n + 1
+        _write_durably(keep, data)
+        _fsync_dir(torn)
+        return keep
+
+    def _cut(self, offset: int, what: str) -> None:
+        """Cut records.jsonl back to `offset`, keeping the bytes cut under torn/. Called with
+        the file lock held exclusive; never without (a write in progress would be cut)."""
+        path = self.path / "records.jsonl"
+        if path.stat().st_size <= offset:
+            return
+        with open(path, "rb") as f:
+            f.seek(offset)
+            cut = f.read()
+        keep = self._keep(str(offset), cut)
+        os.truncate(path, offset)
+        with open(path, "rb+") as f:
+            os.fsync(f.fileno())
+        LOG.warning("audit trail %s: cut %s of %d bytes at offset %d, kept in %s",
+                    self.log_id, what, len(cut), offset, keep)
+
+    def _cut_checkpoint_tail(self) -> None:
+        """Move an unended last line of checkpoints.jsonl (a checkpoint cut short) under torn/,
+        so the next checkpoint starts on a line of its own. Called with the file lock held
+        exclusive."""
+        path = self.path / "checkpoints.jsonl"
+        data = path.read_bytes()
+        if not data or data.endswith(b"\n"):
+            return
+        offset = data.rfind(b"\n") + 1
+        keep = self._keep(f"checkpoints-{offset}", data[offset:])
+        os.truncate(path, offset)
+        with open(path, "rb+") as f:
+            os.fsync(f.fileno())
+        LOG.warning("audit trail %s: moved a checkpoint cut short at offset %d to %s",
+                    self.log_id, offset, keep)
+
     def _load_new(self) -> None:
-        """Read records appended since the last read (possibly by another process)."""
+        """Read records appended since the last read (possibly by another process), holding
+        the file lock shared, then the index lock."""
+        with self._shared():
+            self._load_new_locked()
+
+    def _load_new_locked(self) -> None:
+        """Index the whole new lines, stopping before an unfinished write: a line not yet
+        ended, or the batch a `.pending` announces."""
+        state, offset, _ = self._pending()
         with open(self.path / "records.jsonl", "rb") as f:
             f.seek(self._offset)
-            for line in f:
-                if not line.endswith(b"\n"):
-                    break                      # partial write in progress
-                self._offset += len(line)
-                position = len(self._entries)
+            data = f.read()
+        if state == UNFINISHED:
+            data = data[:max(0, offset - self._offset)]
+        for line in _lines(data):
+            if not line.endswith(b"\n"):
+                break                          # partial write in progress
+            self._offset += len(line)
+            position = len(self._entries)
+            try:
+                d, raw = _read_line(line)
+            except ValueError:
+                d, raw = {}, b""               # reported by verify(); the trail still opens
+            cid = cid_of_bytes(raw)
+            try:
+                sig = unb64(d["sig"]) if _present(d.get("sig")) else None
+            except (ValueError, TypeError):
+                sig = None                 # reported by verify(); the record itself still loads
+            if sig is not None and not self._first_signed_seen:
+                # the marker, when there is one, is the first signed record
+                self._first_signed_seen = True
                 try:
-                    d, raw = _read_line(line)
+                    first = decode_dag_cbor(raw)
+                    is_marker = isinstance(first, dict) and first.get("kind") == MARKER_KIND
                 except ValueError:
-                    d, raw = {}, b""           # reported by verify(); the trail still opens
-                cid = cid_of_bytes(raw)
-                try:
-                    sig = unb64(d["sig"]) if _present(d.get("sig")) else None
-                except (ValueError, TypeError):
-                    sig = None             # reported by verify(); the record itself still loads
-                if sig is not None and not self._first_signed_seen:
-                    # the marker, when there is one, is the first signed record
-                    self._first_signed_seen = True
-                    try:
-                        first = decode_dag_cbor(raw)
-                        is_marker = isinstance(first, dict) and first.get("kind") == MARKER_KIND
-                    except ValueError:
-                        is_marker = False        # verify() reports the unreadable record
-                    if is_marker:
-                        self._marker_index = position
-                self._add(Entry(position, cid, raw, sig, d.get("key_id") if sig else None))
+                    is_marker = False            # verify() reports the unreadable record
+                if is_marker:
+                    self._marker_index = position
+            self._add(Entry(position, cid, raw, sig, d.get("key_id") if sig else None))
 
     def _add(self, e: Entry) -> None:
         self._entries.append(e)
@@ -420,7 +676,8 @@ class ActionLog:
 
     def append(self, record: Dict[str, Any], content: Optional[Dict[str, Any]] = None, *,
                allow_unsigned: bool = False) -> Entry:
-        """Append a record, signed with the issuer key, and return its index and CID.
+        """Append a record, signed with the issuer key, and return its index and CID. It is on
+        the disk when this returns.
 
         The first signed append to a trail first appends an issuer-signing marker record
         (kind `x-issuer-signing`, carrying the key id), itself signed; from it on, every
@@ -431,84 +688,244 @@ class ActionLog:
         data, which has no issuer signatures; a trail that holds signed records then reports
         the unsigned ones that follow as problems (see `verify`).
 
+        Passkey registry records and confirming assertions (PASSKEY_KINDS) are refused: they
+        are written only through `Recorder` with a passkey directory, which writes each with
+        what it belongs to and judges it first.
+
         `content` (optional) is stored beside the log under content/<cid>.json, for
         operators who keep full arguments and results. The record itself holds digests.
+
+        Takes the trail's file lock (lock order: directory, gateway, recorder, file).
+        """
+        kind = record.get("kind") if isinstance(record, dict) else None
+        if kind in PASSKEY_KINDS:
+            raise ValueError(f"a {kind} record is written only through Recorder with a passkey "
+                             "directory")
+        return self._append_all([record], [content], allow_unsigned=allow_unsigned)[0]
+
+    def _append_all(self, records: Sequence[Dict[str, Any]],
+                    contents: Optional[Sequence[Optional[Dict[str, Any]]]] = None, *,
+                    allow_unsigned: bool = False) -> List[Entry]:
+        """Append several records together, as `append` does each, in one write under one
+        lock: a reader sees all of them or none, and a write cut short leaves none behind once
+        the next writer takes the lock. A record may name an earlier one of the same call as
+        its parent. A batch already in the trail is returned as it is, not written again; one
+        only partly there is refused.
+
+        Takes the trail's file lock (lock order: directory, gateway, recorder, file).
+        """
+        return self._append_judged(records, contents, allow_unsigned=allow_unsigned)[0]
+
+    def _append_judged(self, records: Sequence[Dict[str, Any]],
+                       contents: Optional[Sequence[Optional[Dict[str, Any]]]] = None, *,
+                       allow_unsigned: bool = False,
+                       judge: Optional[Callable[[int], Optional[Callable[[], None]]]] = None,
+                       directory: Any = None
+                       ) -> Tuple[List[Entry], Optional[Callable[[], None]]]:
+        """`_append_all` for the recorder, ordered against the passkey directory.
+
+        With the file lock held and the index current, `directory` (a passkeys.Directory) is
+        first brought up to the trail, so it holds every registry change and every assertion
+        used by any process. Then `judge(position)` runs, with the position the first record
+        will take, before anything is written: it raises to refuse, writing nothing, and
+        otherwise returns what applies its judgement (or None). That is handed back with the
+        entries, for the caller to run once the batch is on the disk; it also marks the batch
+        as seen by the directory. The judge must not change anything or write to this trail.
+
+        Lock order: directory, gateway, recorder, file. The caller holds the directory lock
+        throughout; the judge runs with the file lock held, so it may only use a lock earlier
+        in that order that its thread already holds, never wait for one, and a write to this
+        trail from inside it raises at once.
         """
         if not allow_unsigned:
             self.require_signing()
-        raw = dag_cbor(record)
-        cid = cid_of_bytes(raw)
+        contents = list(contents) if contents is not None else [None] * len(records)
+        if len(contents) != len(records):
+            raise ValueError("one content (or None) per record")
         with self._locked():
-            if cid in self._by_cid:            # same bytes, same record: idempotent
-                return self._entries[self._by_cid[cid]]
-            for p in record.get("parents", []):
-                if bytes(p) not in self._by_cid:
-                    raise KeyError(f"parent {cid_str(bytes(p))} is not in this log")
+            if directory is not None:
+                directory.sync(self._records_from(directory.seen))
+            cids = [cid_of_bytes(dag_cbor(r)) for r in records]
+            present = [c in self._by_cid for c in cids]
+            if all(present):                   # the same batch again: idempotent
+                return [self._entries[self._by_cid[c]] for c in cids], None
+            if any(present):
+                there = sorted(self._by_cid[c] for c in cids if c in self._by_cid)
+                raise ValueError(
+                    f"audit trail {self.log_id}: records {there} of this batch are already in "
+                    "the trail and the rest are not; a batch is written whole, so the trail "
+                    "holds a write that was cut short")
+            slots: List[int] = []               # each record's place among those to write
+            todo: List[Tuple[Dict[str, Any], Optional[Dict[str, Any]]]] = []
+            batch_slot: Dict[bytes, int] = {}
+            parents_ok = set(self._by_cid)
+            for record, content, cid in zip(records, contents, cids):
+                if cid in batch_slot:
+                    slots.append(batch_slot[cid])
+                    continue
+                for p in record.get("parents", []):
+                    if bytes(p) not in parents_ok:
+                        raise KeyError(f"parent {cid_str(bytes(p))} is not in this log")
+                parents_ok.add(cid)
+                batch_slot[cid] = len(todo)
+                slots.append(len(todo))
+                todo.append((record, content))
+            marker = None
             if not allow_unsigned and self._marker_index is None:
                 marker = make_record(MARKER_KIND, self.log_id,
                                      body={"key_id": self.meta["key_id"]},
-                                     ts=record.get("ts"))
-                self._marker_index = self._write(marker, None).index
+                                     ts=todo[0][0].get("ts"))
+                if cid_of_bytes(dag_cbor(marker)) in batch_slot:
+                    marker = None              # the record being written is the marker itself
+            verdict = None
+            if judge is not None:
+                verdict = judge(len(self._entries) + (1 if marker is not None else 0))
+            written = self._write_all(([(marker, None)] if marker is not None else []) + todo,
+                                      signed=not allow_unsigned)
+            if not allow_unsigned and self._marker_index is None:
+                self._marker_index = written[0].index
                 self._first_signed_seen = True
-                if cid in self._by_cid:        # the record was the marker itself
-                    return self._entries[self._by_cid[cid]]
-            return self._write(record, content, signed=not allow_unsigned)
+            mine = written[1:] if marker is not None else written
+            if directory is None or verdict is None:
+                return [mine[k] for k in slots], verdict
+            end, applies = written[-1].index + 1, verdict
+
+            def commit() -> None:
+                applies()
+                directory.seen = max(directory.seen, end)
+
+            return [mine[k] for k in slots], commit
+
+    def _records_from(self, start: int) -> List[Tuple[int, bytes, Any]]:
+        """(position, CID, decoded record or None) for each entry from `start` on."""
+        out: List[Tuple[int, bytes, Any]] = []
+        for e in self._entries[start:]:
+            try:
+                rec: Any = decode_dag_cbor(e.raw)
+            except ValueError:
+                rec = None
+            out.append((e.index, e.cid, rec))
+        return out
 
     def _write(self, record: Dict[str, Any], content: Optional[Dict[str, Any]],
                signed: bool = True) -> Entry:
         """Write one record to the file, under the lock; signed unless importing version 0."""
-        raw = dag_cbor(record)
-        cid = cid_of_bytes(raw)
-        sig = (self._key.sign(statement_message(cid))
-               if signed and self._key is not None else None)
-        e = Entry(len(self._entries), cid, raw, sig,
-                  self.meta["key_id"] if sig else None)
-        if content is not None:
+        return self._write_all([(record, content)], signed)[0]
+
+    def _write_all(self, batch: Sequence[Tuple[Dict[str, Any], Optional[Dict[str, Any]]]],
+                   signed: bool = True) -> List[Entry]:
+        """Write records to the file in one write, with the file and index locks held, flush
+        them to the disk, and only then index them and store their content.
+
+        With file locking, the batch is first announced in `.pending` (flushed to the disk)
+        and `.pending` is removed once the records are; if the write fails here, the batch is
+        cut off at once, and if the process dies, the next writer cuts it off. Without file
+        locking (one writer process only), nothing is ever cut: a line left unfinished is
+        ended with a newline first, and verify() reports it."""
+        path = self.path / "records.jsonl"
+        if not fcntl and path.stat().st_size > self._offset:
+            with open(path, "ab") as f:            # end the stranded line, never cut it
+                f.write(b"\n")
+                f.flush()
+                os.fsync(f.fileno())
+            self._load_new_locked()
+        entries: List[Entry] = []
+        data = b""
+        for record, _ in batch:
+            raw = dag_cbor(record)
+            cid = cid_of_bytes(raw)
+            sig = (self._key.sign(statement_message(cid))
+                   if signed and self._key is not None else None)
+            e = Entry(len(self._entries) + len(entries), cid, raw, sig,
+                      self.meta["key_id"] if sig else None)
+            fields: Dict[str, Any] = {"i": e.index, "cid": cid_str(cid), "cbor": b64(raw)}
+            if sig:
+                fields.update(key_id=e.signer, sig=b64(sig))
+            fields["view"] = to_view(decode_dag_cbor(raw))
+            data += (json.dumps(fields, separators=(",", ":")) + "\n").encode()
+            entries.append(e)
+        offset = self._offset
+        pending = self.path / PENDING
+        if fcntl:
+            _write_durably(pending, json.dumps({"offset": offset, "length": len(data),
+                                                "first_cid": cid_str(entries[0].cid)}).encode())
+            _fsync_dir(self.path)
+        try:
+            with open(path, "ab") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+        except BaseException:
+            if fcntl:
+                self._cut(offset, "a failed write")     # raises if it cannot
+                pending.unlink()
+                _fsync_dir(self.path)
+            raise
+        if fcntl:
+            pending.unlink()
+            _fsync_dir(self.path)
+        self._offset += len(data)
+        for e in entries:
+            self._add(e)
+        for e, (_, content) in zip(entries, batch):
+            if content is not None:
+                self._store_content(e, content)
+        return entries
+
+    def _store_content(self, e: Entry, content: Dict[str, Any]) -> None:
+        """Keep a record's full content beside it. The record is already on the disk and is
+        the truth, so a failure here is logged, by trail and record, and not raised."""
+        try:
             cdir = self.path / "content"
-            cdir.mkdir(exist_ok=True)
-            (cdir / f"{cid_str(cid)}.json").write_text(json.dumps(content, indent=2))
-        fields: Dict[str, Any] = {"i": e.index, "cid": cid_str(cid), "cbor": b64(raw)}
-        if sig:
-            fields.update(key_id=e.signer, sig=b64(sig))
-        fields["view"] = to_view(decode_dag_cbor(raw))
-        line = json.dumps(fields, separators=(",", ":")) + "\n"
-        with open(self.path / "records.jsonl", "ab") as f:
-            f.write(line.encode())
-            f.flush()
-        self._offset += len(line.encode())
-        self._add(e)
-        return e
+            if not cdir.exists():
+                cdir.mkdir()
+                _fsync_dir(self.path)
+            _write_durably(cdir / f"{cid_str(e.cid)}.json",
+                           json.dumps(content, indent=2).encode())
+            _fsync_dir(cdir)
+        except OSError as err:
+            LOG.error("audit trail %s: record %d (%s) is written, but its content could not "
+                      "be stored: %s", self.log_id, e.index, cid_str(e.cid), err)
 
     def checkpoint(self, ts: Optional[int] = None) -> Checkpoint:
-        """Sign the current tree head and record it in checkpoints.jsonl."""
+        """Sign the current tree head and record it in checkpoints.jsonl, on the disk when
+        this returns."""
         self.require_signing()
         with self._locked():
             cp = Checkpoint(self.log_id, len(self._leaves), merkle.root(self._leaves),
                             now_ms() if ts is None else ts, self.meta["key_id"])
             cp = Checkpoint(**{**cp.__dict__, "sig": self._key.sign(cp.message())})
+            if fcntl:
+                self._cut_checkpoint_tail()
             with open(self.path / "checkpoints.jsonl", "a") as f:
                 f.write(json.dumps(cp.to_json(), separators=(",", ":")) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
             return cp
 
     # ---- reading ----------------------------------------------------------------------
 
     def checkpoints(self) -> List[Checkpoint]:
-        with open(self.path / "checkpoints.jsonl") as f:
-            return [Checkpoint.from_json(json.loads(line)) for line in f if line.strip()]
+        """The signed checkpoints, without a last one cut short (verify() reports it)."""
+        with self._shared():
+            lines = self._checkpoint_lines()
+        return [Checkpoint.from_json(json.loads(line)) for line in lines]
 
     def entry(self, ref: str) -> Entry:
         """Look up a record by index or CID string."""
-        self._load_new()
-        if ref.isdigit():
-            return self._entries[int(ref)]
-        return self._entries[self._by_cid[cid_parse(ref)]]
+        with self._shared():
+            self._load_new_locked()
+            if ref.isdigit():
+                return self._entries[int(ref)]
+            return self._entries[self._by_cid[cid_parse(ref)]]
 
     def record(self, e: Entry) -> Dict[str, Any]:
         return decode_dag_cbor(e.raw)
 
     def entries(self) -> List[Entry]:
-        self._load_new()
-        return list(self._entries)
+        with self._shared():
+            self._load_new_locked()
+            return list(self._entries)
 
     def readable(self) -> List[Tuple[Entry, Dict[str, Any]]]:
         """The records that decode and have the shape of a record. A trail someone has
@@ -533,7 +950,12 @@ class ActionLog:
             checkpoint = covering[-1] if covering else self.checkpoint()
         if checkpoint.size <= e.index:
             raise ValueError("checkpoint does not cover this record")
-        proof = merkle.inclusion_proof(e.index, self._leaves[:checkpoint.size])
+        with self._shared():                   # another process may have written more since
+            self._load_new_locked()
+            leaves = list(self._leaves)
+        if checkpoint.size > len(leaves):
+            raise ValueError("the checkpoint covers records this trail does not hold")
+        proof = merkle.inclusion_proof(e.index, leaves[:checkpoint.size])
         doc = {"type": WRITTEN_TYPE, "log_id": self.log_id, "index": e.index,
                "cid": cid_str(e.cid), "record": b64(e.raw),
                "inclusion_proof": [h.hex() for h in proof],
@@ -550,17 +972,22 @@ class ActionLog:
 
     def consistency_proof(self, old_size: int, new_size: int) -> List[bytes]:
         """Hashes proving the tree of new_size extends the tree of old_size (RFC 9162)."""
-        self._load_new()
-        if not 0 <= old_size <= new_size <= len(self._leaves):
+        with self._shared():
+            self._load_new_locked()
+            leaves = list(self._leaves)
+        if not 0 <= old_size <= new_size <= len(leaves):
             raise ValueError("checkpoint sizes are out of range for this log")
         if old_size in (0, new_size):
             return []
-        return merkle.consistency_proof(old_size, self._leaves[:new_size])
+        return merkle.consistency_proof(old_size, leaves[:new_size])
 
     def consistency(self, old: Checkpoint, new: Checkpoint) -> Dict[str, Any]:
-        if not old.size <= new.size <= len(self._leaves):
+        with self._shared():                   # another process may have written more since
+            self._load_new_locked()
+            leaves = list(self._leaves)
+        if not old.size <= new.size <= len(leaves):
             raise ValueError("checkpoint sizes are out of range for this log")
-        proof = merkle.consistency_proof(old.size, self._leaves[:new.size]) if old.size else []
+        proof = merkle.consistency_proof(old.size, leaves[:new.size]) if old.size else []
         return {"type": "aeos-consistency/v0", "old": old.to_json(), "new": new.to_json(),
                 "proof": [h.hex() for h in proof]}
 
@@ -573,60 +1000,78 @@ class ActionLog:
         leaves: List[bytes] = []
         seen: Dict[bytes, int] = {}
         marker_at: Optional[int] = None
-        with open(self.path / "records.jsonl", "rb") as f:
-            for n, line in enumerate(f):
-                rep.records += 1
+        with self._shared():
+            state, offset, why = self._pending()
+            data = (self.path / "records.jsonl").read_bytes()
+            checkpoint_data = (self.path / "checkpoints.jsonl").read_bytes()
+        if state == UNFINISHED and offset < len(data):
+            data = data[:offset]
+            first = data.count(b"\n") + 1
+            rep.problems.append(f"line {first} on: an unfinished write, not yet recovered "
+                                "(.pending is present)")
+        elif state == STALE:
+            rep.problems.append(f".pending is stale and was ignored: {why}")
+        lines = _lines(data)
+        if lines and not lines[-1].endswith(b"\n"):
+            rep.problems.append(f"line {len(lines)}: an unfinished write, not yet recovered")
+            lines.pop()
+        for n, line in enumerate(lines):
+            rep.records += 1
+            try:
+                d, raw = _read_line(line)
+                rec = decode_dag_cbor(raw)
+                if not isinstance(rec, dict):
+                    raise ValueError("not a map")
+            except ValueError as ex:
+                rep.problems.append(f"line {n + 1}: unreadable record ({ex})")
+                leaves.append(b"")
+                continue
+            cid = cid_of_bytes(raw)
+            i = d.get("i")
+            if not (isinstance(i, int) and not isinstance(i, bool) and i == n):
+                rep.problems.append(f"line {n + 1}: index {d.get('i')} out of sequence")
+            if d.get("cid") != cid_str(cid):
+                rep.problems.append(f"record {n}: stored CID does not match its bytes")
+            if d.get("view") != to_view(rec):
+                rep.problems.append(f"record {n}: readable view differs from signed bytes")
+            parents = rec.get("parents")
+            for p in parents if isinstance(parents, list) else []:
+                if not (isinstance(p, Link) and bytes(p) in seen):
+                    rep.problems.append(f"record {n}: parent is missing or later in the log")
+            if marker_at is None and rec.get("kind") == MARKER_KIND:
+                # From the marker on, every record must carry a valid issuer signature.
+                marker_at = n
+                body = rec.get("body")
+                if not isinstance(body, dict) or body.get("key_id") != self.meta["key_id"]:
+                    rep.problems.append(f"record {n}: the issuer-signing marker names a "
+                                        "different key than the trail's")
+            if _present(d.get("sig")):
                 try:
-                    d, raw = _read_line(line)
-                    rec = decode_dag_cbor(raw)
-                    if not isinstance(rec, dict):
-                        raise ValueError("not a map")
-                except ValueError as ex:
-                    rep.problems.append(f"line {n + 1}: unreadable record ({ex})")
-                    leaves.append(b"")
-                    continue
-                cid = cid_of_bytes(raw)
-                i = d.get("i")
-                if not (isinstance(i, int) and not isinstance(i, bool) and i == n):
-                    rep.problems.append(f"line {n + 1}: index {d.get('i')} out of sequence")
-                if d.get("cid") != cid_str(cid):
-                    rep.problems.append(f"record {n}: stored CID does not match its bytes")
-                if d.get("view") != to_view(rec):
-                    rep.problems.append(f"record {n}: readable view differs from signed bytes")
-                parents = rec.get("parents")
-                for p in parents if isinstance(parents, list) else []:
-                    if not (isinstance(p, Link) and bytes(p) in seen):
-                        rep.problems.append(f"record {n}: parent is missing or later in the log")
-                if marker_at is None and rec.get("kind") == MARKER_KIND:
-                    # From the marker on, every record must carry a valid issuer signature.
-                    marker_at = n
-                    body = rec.get("body")
-                    if not isinstance(body, dict) or body.get("key_id") != self.meta["key_id"]:
-                        rep.problems.append(f"record {n}: the issuer-signing marker names a "
-                                            "different key than the trail's")
-                if _present(d.get("sig")):
-                    try:
-                        good = (d.get("key_id") == self.meta["key_id"]
-                                and keys.verify(self.public_key, unb64(d["sig"]),
-                                                statement_message(cid)))
-                    except (ValueError, TypeError):
-                        good = False
-                    if good:
-                        rep.issuer_signed += 1
-                    else:
-                        rep.problems.append(f"record {n}: issuer signature does not verify")
+                    good = (d.get("key_id") == self.meta["key_id"]
+                            and keys.verify(self.public_key, unb64(d["sig"]),
+                                            statement_message(cid)))
+                except (ValueError, TypeError):
+                    good = False
+                if good:
+                    rep.issuer_signed += 1
                 else:
-                    if _present(d.get("key_id")):
-                        rep.problems.append(f"record {n}: issuer key id present without a "
-                                            "signature")
-                    if marker_at is not None:
-                        rep.problems.append(f"record {n}: issuer signature missing (the "
-                                            f"issuer-signing marker is record {marker_at})")
-                seen[cid] = n
-                leaves.append(merkle.leaf_hash(cid))
+                    rep.problems.append(f"record {n}: issuer signature does not verify")
+            else:
+                if _present(d.get("key_id")):
+                    rep.problems.append(f"record {n}: issuer key id present without a "
+                                        "signature")
+                if marker_at is not None:
+                    rep.problems.append(f"record {n}: issuer signature missing (the "
+                                        f"issuer-signing marker is record {marker_at})")
+            seen[cid] = n
+            leaves.append(merkle.leaf_hash(cid))
         prev: Optional[Checkpoint] = None
-        with open(self.path / "checkpoints.jsonl", "rb") as f:
-            checkpoint_lines = [(n, line) for n, line in enumerate(f) if line.strip()]
+        checkpoint_lines = [(n, line) for n, line in enumerate(_lines(checkpoint_data))
+                            if line.strip()]
+        if checkpoint_lines and not checkpoint_lines[-1][1].endswith(b"\n"):
+            n, _ = checkpoint_lines.pop()
+            rep.problems.append(f"checkpoints line {n + 1}: an unfinished write, not yet "
+                                "recovered")
         for n, line in checkpoint_lines:
             rep.checkpoints += 1
             try:

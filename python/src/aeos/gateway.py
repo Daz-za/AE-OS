@@ -26,6 +26,7 @@ gateway records the approval before asking the policy again.
 from __future__ import annotations
 
 import base64
+import contextlib
 import http.client
 import json
 import secrets
@@ -43,7 +44,7 @@ import logging
 
 from cryptography import x509
 
-from . import books, delegation, identity, policy as policy_mod
+from . import books, delegation, identity, passkeys, policy as policy_mod
 from .canon import canonical_json, cid_str, json_digest
 from .log import ActionLog, now_ms
 from .recorder import Recorder
@@ -64,6 +65,10 @@ class Gateway:
                     and approvals
     policy          a compiled policy to run on every call that passes the other checks
     policy_facts    tool name, arguments -> facts the policy needs, such as the invoice
+    passkey_directory  the registry of passkey approvers (passkeys.Directory); an approval by
+                    one of them needs a valid assertion, and each nonce and assertion is
+                    accepted once. Every approval and registry change is judged after the
+                    directory is brought up to the trail
     """
 
     def __init__(self, log: ActionLog, tools: Dict[str, Tool], *,
@@ -74,7 +79,8 @@ class Gateway:
                  intents: Optional[Dict[str, delegation.IntentEnvelope]] = None,
                  principal_keys: Optional[Dict[str, bytes]] = None,
                  policy: Optional[policy_mod.Policy] = None,
-                 policy_facts: Optional[Callable[[str, Dict[str, Any]], Dict[str, Any]]] = None
+                 policy_facts: Optional[Callable[[str, Dict[str, Any]], Dict[str, Any]]] = None,
+                 passkey_directory: Optional[passkeys.Directory] = None
                  ) -> None:
         log.require_signing()
         self.log, self.tools, self.trust_domain = log, tools, trust_domain
@@ -89,6 +95,7 @@ class Gateway:
         self.budget = delegation.Budget()
         self.tokens: Dict[str, bytes] = {}                 # SHA-256 hex -> token presented
         self.policy, self.policy_facts = policy, policy_facts
+        self.passkey_directory = passkey_directory
         self.escalations: Dict[str, Tuple[str, str, bytes]] = {}  # CID -> agent, tool, args
         self._lock = threading.Lock()
         self.server: Optional[ThreadingHTTPServer] = None
@@ -98,7 +105,8 @@ class Gateway:
             if spiffe_id not in self._recorders:
                 self._recorders[spiffe_id] = Recorder(
                     self.log, agent=spiffe_id, on_behalf_of=self.obo.get(spiffe_id),
-                    allow_tools=sorted(self.permissions.get(spiffe_id, ())))
+                    allow_tools=sorted(self.permissions.get(spiffe_id, ())),
+                    passkeys=self.passkey_directory)
             return self._recorders[spiffe_id]
 
     def handle(self, peer: str, svid_sha256: str, session: Optional[str],
@@ -274,6 +282,17 @@ class Gateway:
                 text + "=" * (-len(text) % 4))))
         except (ValueError, KeyError, TypeError):
             return {}, "the approval could not be read"
+        pk = self.passkey_directory and self.passkey_directory.principals.get(a.approver)
+        # The directory is held from the checks here until the approval is on the disk. The
+        # assertion itself is judged inside the trail's write, at the approval's position and
+        # after every earlier record (whichever process wrote it), so a revocation lands before
+        # the judgement or after the approval, never between, and a refusal writes nothing.
+        # Lock order: directory, gateway, recorder, file.
+        with (self.passkey_directory.lock if pk is not None else contextlib.nullcontext()):
+            return self._approval_locked(rec, call, a, pk, peer, tool, args, at)
+
+    def _approval_locked(self, rec: Recorder, call: Any, a: Any, pk: Any, peer: str, tool: str,
+                         args: Dict[str, Any], at: int) -> Tuple[Dict[str, Any], Optional[str]]:
         with self._lock:
             asked = self.escalations.get(a.escalation)
             if asked is None:
@@ -281,11 +300,36 @@ class Gateway:
             if asked != (peer, tool, json_digest(args)) or a.tool != tool or \
                     a.args_sha256 != asked[2]:
                 return {}, "the approval is for a different call"
-            if not a.verify(self.principal_keys.get(a.approver, b"")):
+            if pk is not None:
+                problem = self._passkey_problem(a, args)
+                if problem:
+                    return {}, problem
+            elif not a.verify(self.principal_keys.get(a.approver, b"")):
                 return {}, "the approval's signature does not verify"
-        rec.approval(call, a, ts=at)
+        try:
+            rec.approval(call, a, ts=at)
+        except passkeys.WebAuthnError as e:
+            return {}, str(e)
         return {"approver": a.approver, "decision": a.decision, "escalation": a.escalation}, \
             None
+
+    def _passkey_problem(self, a: Any, args: Dict[str, Any]) -> Optional[str]:
+        """What is wrong with a passkey approver's answer before its assertion is judged: an
+        approval needs an assertion that names this escalation and signs the document the call
+        acts on; a rejection carries the sign-in it rests on, never an assertion. The
+        assertion is judged when the approval is written (`Recorder.approval`). Called with the
+        directory lock and then the gateway's lock held."""
+        if a.decision == "reject":
+            if isinstance(a.evidence, passkeys.SignIn):
+                return None
+            return "a rejection by a passkey approver carries no identity evidence"
+        if a.decision != "approve" or not isinstance(a.evidence, passkeys.Evidence):
+            return "the approval carries no passkey assertion"
+        try:
+            passkeys.escalation_cid(a.escalation)
+        except passkeys.WebAuthnError as e:
+            return str(e)
+        return passkeys.document_problem(a.evidence, args)
 
     def _authorize(self, peer: str, tool: str, args: Dict[str, Any], token: Optional[str],
                    at: int) -> Dict[str, Any]:

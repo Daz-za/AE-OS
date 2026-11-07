@@ -62,6 +62,7 @@ AE-OS follows the IETF SCITT standards (RFC 9943 and RFC 9942) in its vocabulary
 
 - **Document type.** Writers emit `aeos-action-record/v1` instead of `aeos-receipt/v0` once the verifier deployed at ae-os.org/verify reads it (it reads only `aeos-receipt/v0` today; every verifier in this repository reads both).
 - **Separate issuer key.** A gateway issuer key distinct from the audit trail's checkpoint key, so the issuer and the Transparency Service are different signing parties (today they share one key).
+- **Passkey approvals in every verifier.** `aeos audit` checks an approval made with a passkey from the evidence in the trail alone (spec section 10). The Rust and browser verifiers do not check approvals of any kind yet; they read the records but do not rebuild the passkey registry or verify the assertions. RS256 passkeys (some Windows Hello hardware) are refused until a verifier supports them.
 - **COSE wire format.** The gateway's issuer signature on each action record, today in JSON form, as COSE_Sign1 with CWT Claims; Receipts as COSE Receipts (RFC 9942); Transparent Statements carrying them in the `receipts` header, so a generic SCITT verifier can check AE-OS evidence. The JSON formats stay readable.
 
 ## License

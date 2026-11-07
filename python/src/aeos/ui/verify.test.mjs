@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
-  actionRecordContent, cidOfBytes, cidStr, decodeDagCbor, leafHash, parsePublicKey, receiptRecord,
+  actionRecordContent, cidOfBytes, cidStr, dagCbor, decodeDagCbor, leafHash, parsePublicKey, receiptRecord,
   toView, unhex, verifyActionRecord, verifyActionRecordDetail, verifyConsistency, verifyConsistencyProof, verifyInclusion,
   verifyReceipt,
 } from "./verify.js";
@@ -113,4 +113,20 @@ test("a public key can be given as hex or as log.json", () => {
   assert.equal(k.length, 32);
   assert.deepEqual(parsePublicKey(` ${V.logs.public_key}\n`), k);
   assert.throws(() => parsePublicKey("abcd"));
+});
+
+// The browser verifier does not check approvals; it must read the passkey approval records
+// (byte strings, nested batches) as the same canonical DAG-CBOR with the same CIDs.
+test("passkey approval records decode canonically with the same CIDs", async () => {
+  const P = load("passkey-approvals-v1.json");
+  let n = 0;
+  for (const c of P.cases) {
+    for (const r of c.records) {
+      const raw = unhex(r.cbor);
+      assert.deepEqual(dagCbor(decodeDagCbor(raw)), raw, c.name);
+      assert.equal(cidStr(await cidOfBytes(raw)), r.cid, c.name);
+      n += 1;
+    }
+  }
+  assert.ok(n > 400);
 });

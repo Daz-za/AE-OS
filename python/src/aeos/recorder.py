@@ -14,11 +14,14 @@ reported twice (for example, an exporter retrying a batch) is recorded once.
 """
 from __future__ import annotations
 
+import contextlib
 import threading
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
-from .canon import cid_parse, json_digest
-from .log import Entry, ActionLog, make_record
+from .canon import cid_of_bytes, cid_parse, dag_cbor, json_digest
+from .log import Entry, ActionLog, make_record, now_ms
+from .passkeys import Commit, Evidence, escalation_cid
+from .webauthn import WebAuthnError
 
 _MISSING: Any = object()
 ALLOW_LIST_POLICY = "aeos-allow-list/v0"
@@ -27,9 +30,10 @@ ALLOW_LIST_POLICY = "aeos-allow-list/v0"
 class Recorder:
     def __init__(self, log: ActionLog, *, agent: str, on_behalf_of: Optional[str] = None,
                  allow_tools: Optional[Iterable[str]] = None, store_content: bool = False,
-                 checkpoint_every: int = 0) -> None:
+                 checkpoint_every: int = 0, passkeys: Any = None) -> None:
         log.require_signing()
         self.log = log
+        self.passkeys = passkeys       # a passkeys.Directory, kept up to the trail on each write
         self.agent = agent
         self.obo = on_behalf_of
         self.allow = set(allow_tools) if allow_tools is not None else None
@@ -147,12 +151,133 @@ class Recorder:
                                 parents=[call.cid], ts=ts)
 
     def approval(self, call: Entry, approval: Any, ts: Optional[int] = None) -> Entry:
-        """Record a person's signed approval, linked to the escalation and the call."""
-        with self._lock:
-            body = {**approval.fields(), "signature": approval.signature}
-            return self._append("approval", agent=approval.approver, obo=None,
-                                subject=approval.tool, body=body,
-                                parents=[cid_parse(approval.escalation), call.cid], ts=ts)
+        """Record a person's signed approval, linked to the escalation and the call. A passkey
+        approver's assertion goes in a child record, written in the same batch as the approval
+        so neither is ever in the trail without the other; a rejection's sign-in is in the
+        summary.
+
+        A passkey assertion is judged by the passkey directory at the position the approval
+        takes, with the directory brought up to the trail under the trail's lock, so a change
+        any process wrote first is seen; a refusal raises WebAuthnError and writes nothing.
+        Its use is recorded in the directory as soon as the batch is on the disk.
+
+        Takes the directory's lock, then the recorder's, then the trail's (lock order:
+        directory, gateway, recorder, file)."""
+        assertion = isinstance(approval.evidence, Evidence)
+        if assertion and self.passkeys is None:
+            raise ValueError("a passkey approval is written only through Recorder with a "
+                             "passkey directory")
+        guard = self.passkeys.lock if self.passkeys is not None else contextlib.nullcontext()
+        with guard, self._lock:
+            body = dict(approval.fields())
+            if approval.signature:
+                body["signature"] = approval.signature
+            if approval.evidence is not None:
+                body["evidence"] = approval.evidence.summary()
+            rec = make_record("approval", approval.approver, on_behalf_of=self.obo,
+                              subject=approval.tool, body=body,
+                              parents=[cid_parse(approval.escalation), call.cid],
+                              ts=now_ms() if ts is None else ts)
+            records = [rec]
+            judge = None
+            if assertion:
+                records.append(self._evidence_record(rec, approval.approver, approval.tool,
+                                                     approval.evidence))
+                judge = self._approval_judge(approval)
+            entries, commit = self.log._append_judged(records, judge=judge,
+                                                      directory=self.passkeys)
+            if commit is not None:
+                commit()
+            self._maybe_checkpoint()
+            return entries[0]
+
+    def _approval_judge(self, approval: Any) -> Callable[[int], Commit]:
+        """The passkey directory's judgement of an approval's assertion at a trail position."""
+        directory = self.passkeys
+        escalation = escalation_cid(approval.escalation)
+
+        def judge(position: int) -> Commit:
+            errs, commit = directory.judge(
+                approver=approval.approver, position=position, key=approval.escalation,
+                tool=approval.tool, args_sha256=approval.args_sha256, escalation=escalation,
+                ev=approval.evidence)
+            if errs or commit is None:
+                raise WebAuthnError("the passkey's assertion was refused: " + errs[0])
+            return commit
+
+        return judge
+
+    def _evidence_record(self, parent: Dict[str, Any], approver: str, subject: Optional[str],
+                         evidence: Any) -> Dict[str, Any]:
+        """The `x-approval-evidence` child that carries a passkey assertion."""
+        return make_record("x-approval-evidence", approver, on_behalf_of=self.obo,
+                           subject=subject, body=evidence.body(),
+                           parents=[cid_of_bytes(dag_cbor(parent))], ts=parent["ts"])
+
+    def passkey_enrolled(self, approver: str, *, identity: str, credential_id: bytes,
+                         public_key: bytes, rp_id: str, origin: str,
+                         identity_evidence: Any = None, registration: Optional[Dict[str, bytes]] = None,
+                         confirmation: Any = None, ts: Optional[int] = None) -> Entry:
+        """A passkey joins an approver's registry. The approver's first passkey cites the
+        sign-in that identified the person (`passkeys.SignIn`) and its registration response
+        (`client_data_json` and `attestation_object`); every later one is confirmed by an
+        assertion (`passkeys.Evidence`) from a registered passkey."""
+        body: Dict[str, Any] = {"approver": approver, "identity": identity,
+                                "credential_id": credential_id, "public_key": public_key,
+                                "rp_id": rp_id, "origin": origin}
+        if registration is not None:
+            body["registration"] = dict(registration)
+        return self._registry("x-passkey-enrolled", approver, body, identity_evidence,
+                              confirmation, ts)
+
+    def passkey_revoked(self, approver: str, *, credential_id: bytes, confirmation: Any,
+                        ts: Optional[int] = None) -> Entry:
+        """A passkey leaves the registry, confirmed by an assertion from a registered one."""
+        return self._registry("x-passkey-revoked", approver,
+                              {"approver": approver, "credential_id": credential_id}, None,
+                              confirmation, ts)
+
+    def approver_rebound(self, approver: str, *, identity: str, identity_evidence: Any,
+                         confirmation: Any = None, ts: Optional[int] = None) -> Entry:
+        """The approver's identity changed; every earlier passkey ends here. While a passkey
+        stands, one of them confirms the change."""
+        return self._registry("x-approver-rebound", approver,
+                              {"approver": approver, "identity": identity}, identity_evidence,
+                              confirmation, ts)
+
+    def _registry(self, kind: str, approver: str, body: Dict[str, Any], identity_evidence: Any,
+                  confirmation: Any, ts: Optional[int]) -> Entry:
+        """Judge a registry record, write it, then apply it, in that order. With the passkey
+        directory locked throughout and brought up to the trail under the trail's lock, the
+        directory judges the record at the position the trail will give it and changes
+        nothing; the record and its confirming assertion are then written together, in one
+        batch; only once both are on the disk does the directory apply the change. A refusal
+        raises and writes nothing, and a write cut short leaves the directory as it was and
+        is cut off by the next writer, so a retry starts clean.
+
+        Lock order: directory, gateway, recorder, file; this takes the directory's first."""
+        if self.passkeys is None:
+            raise ValueError(f"a {kind} record is written only through Recorder with a passkey "
+                             "directory")
+        with self.passkeys.lock, self._lock:
+            if identity_evidence is not None:
+                body["identity_evidence"] = identity_evidence.summary()
+            if confirmation is not None:
+                body["evidence"] = confirmation.summary()
+            rec = make_record(kind, approver, on_behalf_of=self.obo, subject=None, body=body,
+                              parents=[], ts=now_ms() if ts is None else ts)
+            cid = cid_of_bytes(dag_cbor(rec))
+            records = [rec]
+            if confirmation is not None:
+                records.append(self._evidence_record(rec, approver, None, confirmation))
+            found = [confirmation] if confirmation is not None else []
+            entries, commit = self.log._append_judged(
+                records, directory=self.passkeys,
+                judge=lambda index: self.passkeys.prepare(index, cid, rec, found))
+            if commit is not None:
+                commit()
+            self._maybe_checkpoint()
+            return entries[0]
 
     def _refusal(self, tool: str) -> Optional[str]:
         if self.allow is not None and tool not in self.allow:
