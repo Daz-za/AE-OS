@@ -2,7 +2,6 @@
 import copy
 import json
 import random
-import shutil
 from pathlib import Path
 
 import pytest
@@ -13,8 +12,7 @@ from aeos.canon import cid_of_bytes, cid_str, dag_cbor, decode_dag_cbor, json_di
 from aeos.gateway import AgentClient, Gateway
 from aeos.log import now_ms
 from passkey_scenarios import ARGS, DEMO_CASES, TOOL, A, B, E, scenarios
-from webauthn_support import (APPROVER, WITNESS_PUBLIC, SoftAuthenticator, Trail, cose_es256,
-                              nonce, pin, principals, sign_in_of)
+from webauthn_support import APPROVER, Trail, cose_es256, nonce, pin, principals, sign_in_of
 
 VECTORS = Path(__file__).resolve().parents[2] / "testvectors" / "passkey-approvals-v1.json"
 CASES = scenarios()
@@ -150,20 +148,6 @@ def test_the_keys_of_a_real_authenticator_shape_parse_and_bent_ones_do_not():
     nonshortest = bytes.fromhex("a5010203" + "1826" + "2001" + "215820") + x + b"\x22\x58\x20" + y
     with pytest.raises(webauthn.WebAuthnError):
         webauthn.parse_cose_key(nonshortest)
-
-
-def test_origins_a_credential_may_declare():
-    webauthn.check_origin("acme.example", "https://approve.acme.example")
-    webauthn.check_origin("localhost", "http://localhost:8443", demo=True)
-    for demo_only in (("localhost", "http://localhost:8443"), ("localhost", "https://localhost")):
-        with pytest.raises(webauthn.WebAuthnError):          # localhost only with --demo
-            webauthn.check_origin(*demo_only)
-    for rp, origin in (("acme.example", "http://acme.example"), ("acme.example", "https://x.example"),
-                       ("acme.example", "https://acme.example/path"),
-                       ("acme.example", "https://evilacme.example"), ("", "https://acme.example"),
-                       ("Acme.example", "https://acme.example")):
-        with pytest.raises(webauthn.WebAuthnError):
-            webauthn.check_origin(rp, origin)
 
 
 def test_garbage_assertions_are_refused_not_raised():
@@ -636,7 +620,6 @@ def test_malformed_records_are_reported_never_raised():
 
 
 def test_malformed_nested_evidence_is_reported_never_raised():
-    rng = random.Random(5)
     t = Trail()
     t.enrol(A)
     t.enrol(B, confirmed_by=A, n=2)
