@@ -1,20 +1,20 @@
 """Passkey approvals an auditor can check without trusting the writer of the trail.
 
-Three kinds of records carry it (spec/action-records-v1.md, "Passkey approvals"):
+Records that carry it (spec/action-records-v1.md, section 10):
 
     approval              a person's answer to an escalated call; for a passkey approver its
-                          `evidence` summary names the assertion that proves the answer
+                          `evidence` summary names the assertion that proves a yes, or the
+                          sign-in a no rests on
     x-approval-evidence   child of the approval: the WebAuthn assertion itself
     x-passkey-enrolled    a passkey joins an approver's registry
     x-passkey-revoked     a passkey leaves it
-    x-approver-rebound    the approver's identity changed, which ends passkeys enrolled under
-                          the old one
+    x-approver-rebound    the approver's identity changed, which ends every earlier passkey
 
-The registry is rebuilt from those records in trail order, so "was this passkey the
-approver's when the approval was recorded" is answered by position in the trail, which the
-checkpoints commit to, not by a timestamp the writer chose. The relying party id and origin
-an assertion is checked against are the ones enrolled for the passkey, never the ones the
-evidence claims.
+The registry is rebuilt from those records in trail order, in the same pass that checks the
+approvals, so "was this passkey the approver's when the approval was recorded" is answered by
+position in the trail, which the checkpoints commit to, not by a timestamp the writer chose. The
+relying party id and origin an assertion is checked against are the ones enrolled for the
+passkey, never the ones the evidence claims.
 """
 from __future__ import annotations
 
@@ -22,21 +22,24 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from .canon import cid_str, json_digest
-from .webauthn import (BATCH_CONTEXT_NAME, DOCUMENT_TOOL, MAX_BATCH, WebAuthnError,
-                       assertion_sha256, b64url, batch_digest, challenge_for, check_origin,
-                       parse_cose_key, request_digest, unb64url, verify_assertion)
+from .canon import cid_parse, cid_str, json_digest
+from .webauthn import (BATCH_CONTEXT_NAME, CID_LEN, DOCUMENT_TOOL, MAX_BATCH, RESERVED,
+                       WebAuthnError, assertion_sha256, b64url, batch_digest, challenge_for,
+                       check_origin, enrol_challenge, parse_cose_key, request_digest, unb64url,
+                       verify_assertion, verify_registration)
 
 KIND_ENROLLED = "x-passkey-enrolled"
 KIND_REVOKED = "x-passkey-revoked"
 KIND_REBOUND = "x-approver-rebound"
 KIND_EVIDENCE = "x-approval-evidence"
 EVIDENCE_KIND = "passkey-assertion"
-ENROL_TOOL = "aeos/passkey-enrol"          # the "tool" a confirmation of an enrolment signs
+ENROL_TOOL = "aeos/passkey-enrol"          # the "tool" a confirmation of a registry change signs
 REVOKE_TOOL = "aeos/passkey-revoke"
+REBIND_TOOL = "aeos/approver-rebind"
 REGISTRY_KINDS = (KIND_ENROLLED, KIND_REVOKED, KIND_REBOUND)
 
 Record = Tuple[int, bytes, Dict[str, Any]]      # (index in the trail, binary CID, record)
+Item = Tuple[str, bytes, bytes]                 # (tool, args_sha256, escalation CID; b"" for a document)
 
 
 def first_parent(rec: Any) -> Optional[bytes]:
@@ -88,7 +91,7 @@ class Evidence:
     rp_id: str
     origin: str
     request_digest: bytes
-    batch: Optional[Tuple[Tuple[str, bytes], ...]] = None
+    batch: Optional[Tuple[Item, ...]] = None
 
     @property
     def assertion_sha256(self) -> bytes:
@@ -106,8 +109,9 @@ class Evidence:
             "nonce": self.nonce, "rp_id": self.rp_id, "origin": self.origin,
             "request_digest": self.request_digest, "assertion_sha256": self.assertion_sha256}
         if self.batch is not None:
-            out["batch"] = {"context": BATCH_CONTEXT_NAME,
-                            "items": [{"tool": t, "args_sha256": a} for t, a in self.batch]}
+            out["batch"] = {"context": BATCH_CONTEXT_NAME, "items": [
+                {"tool": t, "args_sha256": a, **({"escalation": e} if e else {})}
+                for t, a, e in self.batch]}
         return out
 
     @classmethod
@@ -124,10 +128,12 @@ class Evidence:
                 raise WebAuthnError("the evidence's batch is malformed")
             parsed = []
             for it in items:
-                if not isinstance(it, dict) or not isinstance(it.get("tool"), str) or \
-                        not isinstance(it.get("args_sha256"), bytes) or len(it["args_sha256"]) != 32:
+                esc = it.get("escalation", b"") if isinstance(it, dict) else None
+                if (not isinstance(it, dict) or not isinstance(it.get("tool"), str)
+                        or not isinstance(it.get("args_sha256"), bytes)
+                        or len(it["args_sha256"]) != 32 or not isinstance(esc, bytes)):
                     raise WebAuthnError("a batch item is malformed")
-                parsed.append((it["tool"], it["args_sha256"]))
+                parsed.append((it["tool"], it["args_sha256"], esc))
             batch = tuple(parsed)
         ev = cls(_bytes(body, "credential_id"), _bytes(body, "authenticator_data"),
                  _bytes(body, "client_data_json"), _bytes(body, "signature"),
@@ -153,7 +159,7 @@ class Evidence:
     def from_json(cls, d: Any) -> "Evidence":
         def dec(k: str, v: Any) -> Any:
             if k in ("credential_id", "authenticator_data", "client_data_json", "signature",
-                     "nonce", "request_digest", "assertion_sha256", "args_sha256"):
+                     "nonce", "request_digest", "assertion_sha256", "args_sha256", "escalation"):
                 return unb64url(v)
             if isinstance(v, list):
                 return [{kk: dec(kk, vv) for kk, vv in x.items()} for x in v]
@@ -163,6 +169,40 @@ class Evidence:
         if not isinstance(d, dict):
             raise WebAuthnError("the evidence is not an object")
         return cls.parse({k: dec(k, v) for k, v in d.items()})
+
+
+@dataclass(frozen=True)
+class SignIn:
+    """What identified a person: a sign-in, as a kind, a reference and the SHA-256 of the
+    evidence. It is the evidence of a rejection, a root passkey and a rebinding. This audit
+    cannot check it; it reports it."""
+
+    kind: str
+    ref: str
+    sha256: bytes
+
+    def summary(self) -> Dict[str, Any]:
+        return {"kind": self.kind, "ref": self.ref, "sha256": self.sha256}
+
+    @classmethod
+    def parse(cls, v: Any) -> "SignIn":
+        if not (isinstance(v, dict) and isinstance(v.get("kind"), str) and v["kind"]
+                and v["kind"] != EVIDENCE_KIND and isinstance(v.get("ref"), str)
+                and isinstance(v.get("sha256"), bytes) and len(v["sha256"]) == 32):
+            raise WebAuthnError("identity evidence needs a kind, a ref and a 32-byte sha256")
+        return cls(v["kind"], v["ref"], v["sha256"])
+
+    def to_json(self) -> Dict[str, Any]:
+        return {"kind": self.kind, "ref": self.ref, "sha256": b64url(self.sha256)}
+
+    @classmethod
+    def from_json(cls, d: Any) -> "SignIn":
+        if not isinstance(d, dict):
+            raise WebAuthnError("the identity evidence is not an object")
+        return cls.parse({**d, "sha256": unb64url(d.get("sha256"))})   # type: ignore[arg-type]
+
+    def describe(self) -> str:
+        return f"{self.kind} {self.ref} (sha256 {self.sha256.hex()[:16]}…)"
 
 
 def enrol_args_sha256(approver: str, identity: str, credential_id: bytes, public_key: bytes,
@@ -177,6 +217,11 @@ def revoke_args_sha256(approver: str, credential_id: bytes) -> bytes:
     return json_digest({"approver": approver, "credential_id": b64url(credential_id)})
 
 
+def rebind_args_sha256(approver: str, identity: str, evidence: SignIn) -> bytes:
+    return json_digest({"approver": approver, "identity": identity,
+                        "identity_evidence": evidence.to_json()})
+
+
 # ---- the registry ---------------------------------------------------------------------------
 
 
@@ -189,9 +234,13 @@ class Credential:
     rp_id: str
     origin: str
     identity: str
+    epoch: int                         # the approver's epoch it was enrolled in
     enrolled_at: int                   # trail position of the enrolment
     root: bool
+    pinned: bool                       # its epoch's root passkey is pinned in the principals
+    basis: str                         # the identity evidence its epoch rests on
     revoked_at: Optional[int] = None
+    sign_count: int = 0                # the highest counter seen
 
 
 @dataclass
@@ -228,11 +277,17 @@ class Directory:
         self.principals = principals
         self.creds: Dict[bytes, Credential] = {}
         self.identity: Dict[str, List[Tuple[int, str]]] = {}      # approver -> (position, identity)
+        self.epochs: Dict[str, List[int]] = {}                    # approver -> positions that began one
+        self.basis: Dict[str, Tuple[bool, str]] = {}              # approver -> (pinned, evidence) now
         self.problems: List[str] = []
-        self.notes: List[str] = []
+        self.notes: List[Tuple[str, str]] = []      # (kind, text): binding, clone or reject
         self.ledger = UseLedger()
-        self.verified: Dict[bytes, int] = {}        # assertion -> approvals it was verified for
-        self.witnessed = 0                          # verified approvals that also carry a witness signature
+        self.children: Dict[bytes, List[Evidence]] = {}
+        # (assertion, was a batch, pinned, approver, basis) for each approval verified
+        self.verified: List[Tuple[bytes, bool, bool, str, str]] = []
+        self.witness_checked = 0           # verified approvals whose gateway signature verified
+        self.witness_unchecked = 0         # ... that carry one and no witness key was given
+        self.rejections = 0
 
     # -- queries --
 
@@ -242,6 +297,9 @@ class Directory:
             if at < position:
                 current = who
         return current
+
+    def epoch_at(self, approver: str, position: int) -> int:
+        return sum(1 for at in self.epochs.get(approver, []) if at < position)
 
     def has_valid(self, approver: str, position: int) -> bool:
         return any(self.refusal(c, approver, position) is None for c in self.creds.values()
@@ -255,7 +313,8 @@ class Directory:
             return "the passkey was not yet enrolled at this record"
         if c.revoked_at is not None and c.revoked_at < position:
             return "the passkey had been revoked at this record"
-        if c.identity != self.identity_at(approver, position):
+        if c.epoch != self.epoch_at(approver, position) or \
+                c.identity != self.identity_at(approver, position):
             return ("the passkey was enrolled for a different identity from the approver's "
                     "current one at this record")
         return None
@@ -263,9 +322,11 @@ class Directory:
     # -- the checks --
 
     def check(self, *, approver: str, position: int, key: str, tool: str, args_sha256: bytes,
-              ev: Evidence, label: str) -> List[str]:
+              escalation: Optional[bytes], ev: Evidence, label: str) -> List[str]:
         """Check one assertion for one request, as the person at `approver` at `position`.
-        `key` names what the assertion answers, so a retry of the same answer is not a replay."""
+        `escalation` is the escalation an approval answers, or None for a confirmation of a
+        registry change, which must be a single request. `key` names what the assertion
+        answers, so a retry of the same answer is not a replay."""
         c = self.creds.get(ev.credential_id)
         if c is None:
             return ["the passkey is not in the registry"]
@@ -275,53 +336,73 @@ class Directory:
         if (ev.rp_id, ev.origin) != (c.rp_id, c.origin):
             return [f"the evidence names {ev.rp_id} at {ev.origin}, but the passkey was "
                     f"enrolled for {c.rp_id} at {c.origin}"]
-        item = (tool, args_sha256)
-        if ev.batch is None:
-            expected = request_digest(tool, args_sha256)
-        else:
-            if item not in ev.batch:
-                return [f"the {label} is not one of the items the passkey signed"]
-            if len(set(ev.batch)) != len(ev.batch):
-                return ["the batch repeats an item"]
-            tools = [t for t, _ in ev.batch]
-            if DOCUMENT_TOOL in tools and (tools[0] != DOCUMENT_TOOL or
-                                           tools.count(DOCUMENT_TOOL) != 1):
-                return ["a batch's document must be its single leading item"]
-            try:
+        item = (tool, args_sha256, escalation or b"")
+        try:
+            if escalation is None:
+                if ev.batch is not None:
+                    return ["a confirmation of a registry change must be a single request, "
+                            "not a batch"]
+                expected = request_digest(tool, args_sha256)
+            elif tool.startswith(RESERVED):
+                return [f"the tool {tool} is reserved: no approval may be for it"]
+            elif ev.batch is None:
+                expected = request_digest(tool, args_sha256, escalation)
+            else:
+                if item not in ev.batch:
+                    return [f"the {label} is not one of the items the passkey signed"]
+                if len(set(ev.batch)) != len(ev.batch):
+                    return ["the batch repeats an item"]
+                reserved = [t for i, (t, _, _) in enumerate(ev.batch)
+                            if t.startswith(RESERVED) and not (i == 0 and t == DOCUMENT_TOOL)]
+                if reserved:
+                    return [f"the batch holds the reserved tool {reserved[0]}"]
                 expected = batch_digest(ev.batch)
-            except WebAuthnError as e:
-                return [str(e)]
+        except WebAuthnError as e:
+            return [str(e)]
         if ev.request_digest != expected:
             return ["the passkey signed a different request from the one " + label]
         try:
-            verify_assertion(c.key, ev.authenticator_data, ev.client_data_json, ev.signature,
-                             rp_id=c.rp_id, origin=c.origin,
-                             challenge=challenge_for(ev.nonce, expected))
+            got = verify_assertion(c.key, ev.authenticator_data, ev.client_data_json,
+                                   ev.signature, rp_id=c.rp_id, origin=c.origin,
+                                   challenge=challenge_for(ev.nonce, expected))
         except WebAuthnError as e:
             return [f"the passkey's assertion does not stand: {e}"]
         used = self.ledger.use(position, ev, key, item)
-        return [used] if used else []
+        if used:
+            return [used]
+        if (got.sign_count or c.sign_count) and got.sign_count <= c.sign_count:
+            self.notes.append(("clone", f"record {position}: the passkey's signature counter did "
+                               f"not rise ({c.sign_count}, then {got.sign_count}): it may have "
+                               "been cloned"))
+        c.sign_count = max(c.sign_count, got.sign_count)
+        return []
 
-    # -- building --
+    # -- building: one pass over the trail, in order --
 
-    @classmethod
-    def build(cls, records: List[Record], principals: Dict[str, Principal]) -> "Directory":
-        d = cls(principals)
-        children: Dict[bytes, List[Evidence]] = {}
+    def begin(self, records: List[Record]) -> None:
+        """Index the evidence children of a trail before stepping through it."""
         for parent, recs in evidence_children(records).items():
             for rec in recs:
                 try:
-                    children.setdefault(parent, []).append(Evidence.parse(rec["body"]))
+                    self.children.setdefault(parent, []).append(Evidence.parse(rec["body"]))
                 except WebAuthnError:
                     pass                       # reported where the parent looks for it
+
+    def step(self, index: int, cid: bytes, rec: Dict[str, Any]) -> None:
+        """Apply a registry record at its position, collecting a problem if it is refused."""
+        try:
+            self.apply(index, cid, rec, self.children.get(cid, []))
+        except (WebAuthnError, KeyError, TypeError, ValueError, AttributeError) as e:
+            self.problems.append(f"record {index}: {e}")
+
+    @classmethod
+    def build(cls, records: List[Record], principals: Dict[str, Principal]) -> "Directory":
+        """The registry alone, from a trail's registry records (the approvals are not checked)."""
+        d = cls(principals)
+        d.begin(records)
         for index, cid, rec in records:
-            kind = rec.get("kind")
-            if kind not in REGISTRY_KINDS:
-                continue
-            try:
-                d._apply(index, cid, rec, kind, children.get(cid, []))
-            except (WebAuthnError, KeyError, TypeError, ValueError, AttributeError) as e:
-                d.problems.append(f"record {index}: {e}")
+            if isinstance(rec, dict) and rec.get("kind") in REGISTRY_KINDS:
+                d.step(index, cid, rec)
         return d
 
     def _declared(self, who: Any) -> str:
@@ -331,28 +412,37 @@ class Directory:
 
     def _confirm(self, index: int, cid: bytes, who: str, tool: str, args: bytes,
                  found: List[Evidence], summary: Any) -> None:
-        """The enrolment or revocation at `index` is asserted by a registered passkey."""
+        """The change at `index` is asserted by a registered passkey, as a single request."""
         if not isinstance(summary, dict) or summary.get("kind") != EVIDENCE_KIND:
             raise WebAuthnError("no confirmation by a registered passkey")
         mine = [e for e in found if e.assertion_sha256 == summary.get("assertion_sha256")]
         if not mine:
             raise WebAuthnError("the confirming assertion is not in the trail")
         errs = self.check(approver=who, position=index, key=cid_str(cid), tool=tool,
-                          args_sha256=args, ev=mine[0], label="change confirmed")
+                          args_sha256=args, escalation=None, ev=mine[0],
+                          label="change confirmed")
         if errs:
             raise WebAuthnError("the change is not confirmed by a registered passkey: "
                                 + errs[0])
 
-    def _apply(self, index: int, cid: bytes, rec: Dict[str, Any], kind: str,
-               found: List[Evidence]) -> None:
+    def apply(self, index: int, cid: bytes, rec: Dict[str, Any], found: List[Evidence]) -> None:
+        """Apply one registry record at `index`; raises WebAuthnError if it is refused.
+        `found` are the confirming assertions that follow it."""
         b = rec["body"]
+        kind = rec["kind"]
         who = self._declared(b.get("approver"))
         identity = b.get("identity")
         if kind != KIND_REVOKED and (not isinstance(identity, str) or not identity):
             raise WebAuthnError("the record names no identity")
         if kind == KIND_REBOUND:
-            self._evidence_of_identity(index, who, identity, b)
-            self.identity.setdefault(who, []).append((index, identity))
+            sign_in = SignIn.parse(b.get("identity_evidence"))
+            if self.has_valid(who, index):          # a passkey stands: it must say yes
+                self._confirm(index, cid, who, REBIND_TOOL,
+                              rebind_args_sha256(who, identity, sign_in), found,
+                              b.get("evidence"))
+            self._begin_epoch(index, who, identity, sign_in, pinned=False)
+            self.notes.append(("binding", f"record {index}: {who} is bound to {identity} on "
+                               f"{sign_in.describe()}, which this audit cannot check"))
             return
         cred_id = b.get("credential_id")
         if not isinstance(cred_id, bytes) or not cred_id:
@@ -376,10 +466,20 @@ class Directory:
         check_origin(rp_id, origin)
         root = not self.has_valid(who, index)
         if root:
-            self._evidence_of_identity(index, who, identity, b)
-            self._pinned(who, cred_id, public_key, rp_id, origin, identity)
-            if self.identity_at(who, index) != identity:
-                self.identity.setdefault(who, []).append((index, identity))
+            sign_in = SignIn.parse(b.get("identity_evidence"))
+            reg = b.get("registration")
+            if not isinstance(reg, dict):
+                raise WebAuthnError("a first passkey needs its registration response")
+            verify_registration(reg.get("client_data_json"), reg.get("attestation_object"),
+                                rp_id=rp_id, origin=origin,
+                                challenge=enrol_challenge(who, sign_in.sha256),
+                                credential_id=cred_id, public_key=public_key)
+            pinned = self._pinned(who, cred_id, public_key, rp_id, origin, identity)
+            self._begin_epoch(index, who, identity, sign_in, pinned)
+            self.notes.append(("binding", f"record {index}: the first passkey of {who} rests on "
+                               f"{sign_in.describe()}, which this audit cannot check"
+                               + (" (pinned in your principals)" if pinned else
+                                  " (not pinned in your principals)")))
         else:
             if identity != self.identity_at(who, index):
                 raise WebAuthnError("the new passkey is enrolled for an identity other than "
@@ -387,47 +487,42 @@ class Directory:
             self._confirm(index, cid, who, ENROL_TOOL,
                           enrol_args_sha256(who, identity, cred_id, public_key, rp_id, origin),
                           found, b.get("evidence"))
+        pinned, basis = self.basis[who]
         self.creds[cred_id] = Credential(who, cred_id, public_key, key, rp_id, origin, identity,
-                                         index, root)
+                                         self.epoch_at(who, index + 1), index, root, pinned,
+                                         basis)
 
-    def _evidence_of_identity(self, index: int, who: str, identity: str,
-                              b: Dict[str, Any]) -> None:
-        ev = b.get("identity_evidence")
-        if not (isinstance(ev, dict) and isinstance(ev.get("kind"), str) and ev["kind"]
-                and isinstance(ev.get("ref"), str) and isinstance(ev.get("sha256"), bytes)
-                and len(ev["sha256"]) == 32):
-            raise WebAuthnError("a first passkey, or a new identity, needs identity evidence "
-                                "(kind, ref, sha256)")
-        self.notes.append(f"record {index}: {who} is bound to {identity} on {ev['kind']} "
-                          f"{ev['ref']} (sha256 {ev['sha256'].hex()[:16]}…), which this audit "
-                          "cannot check")
+    def _begin_epoch(self, index: int, who: str, identity: str, sign_in: SignIn,
+                     pinned: bool) -> None:
+        """A root passkey or a rebinding starts a new epoch: no earlier passkey is valid in it."""
+        self.epochs.setdefault(who, []).append(index)
+        self.identity.setdefault(who, []).append((index, identity))
+        self.basis[who] = (pinned, sign_in.describe())
 
     def _pinned(self, who: str, cred_id: bytes, public_key: bytes, rp_id: str, origin: str,
-                identity: str) -> None:
+                identity: str) -> bool:
+        """Whether the principals pin this root passkey; refused if they pin others only."""
         pins = self.principals[who].pins
         if not pins:
-            self.notes.append(f"{who}: the first passkey is taken from the trail's identity "
-                              "evidence; list it under the principal to pin it")
-            return
+            return False
         for p in pins:
             if p.get("credential_id") == b64url(cred_id):
                 if (p.get("public_key") != b64url(public_key) or p.get("rp_id") != rp_id
-                        or p.get("origin") != origin
-                        or p.get("identity", identity) != identity):
+                        or p.get("origin") != origin or p.get("identity") != identity):
                     raise WebAuthnError("the first passkey differs from the one you pinned")
-                return
+                return True
         raise WebAuthnError("the first passkey is not one you pinned for this approver")
 
 
 class UseLedger:
     """Each nonce and each assertion is used once, except an assertion shared by the approvals
-    of its own batch, and a retried answer to the same escalation."""
+    of its own batch, and a retried answer to the same escalation. Filled in trail order."""
 
     def __init__(self) -> None:
-        self.assertions: Dict[bytes, List[Tuple[int, str, Tuple[str, bytes]]]] = {}
+        self.assertions: Dict[bytes, List[Tuple[int, str, Item]]] = {}
         self.nonces: Dict[bytes, Tuple[bytes, int]] = {}
 
-    def use(self, position: int, ev: Evidence, key: str, item: Tuple[str, bytes]) -> Optional[str]:
+    def use(self, position: int, ev: Evidence, key: str, item: Item) -> Optional[str]:
         a = ev.assertion_sha256
         prior = self.assertions.get(a)
         if prior:
@@ -467,18 +562,40 @@ def document_problem(ev: Evidence, arguments: Optional[Dict[str, Any]]) -> Optio
     return None
 
 
+def escalation_cid(text: Any) -> bytes:
+    """The binary CID an approval's `escalation` text names."""
+    if not isinstance(text, str):
+        raise WebAuthnError("the approval names no escalation")
+    try:
+        raw = cid_parse(text)
+    except ValueError:
+        raise WebAuthnError("the approval's escalation is not a CID") from None
+    if len(raw) != CID_LEN:
+        raise WebAuthnError("the approval's escalation is not a 36-byte CID")
+    return raw
+
+
 def check_approval(d: Directory, index: int, cid: bytes, rec: Dict[str, Any],
                    escalation: Dict[str, Any], evidence_children: List[Dict[str, Any]]
                    ) -> List[str]:
     """Problems with a passkey approver's approval. An approval only ever authorises: a
-    rejection verifies nothing, and one that carries an assertion is refused as contradictory."""
+    rejection verifies nothing, rests on the sign-in that identified the person, and is
+    reported; one that carries an assertion is refused as contradictory."""
     b = rec["body"]
     decision, summary = b.get("decision"), b.get("evidence")
     if decision == "reject":
-        if summary is not None or evidence_children:
+        if (isinstance(summary, dict) and summary.get("kind") == EVIDENCE_KIND) or \
+                evidence_children:
             return ["a rejection carries a passkey assertion, which can only approve"]
-        d.notes.append(f"record {index}: a rejection by {b.get('approver')}; it authorises "
-                       "nothing and needs no assertion")
+        try:
+            sign_in = SignIn.parse(summary)
+        except WebAuthnError:
+            return ["a rejection by a passkey approver carries no identity evidence (the "
+                    "sign-in it rests on)"]
+        d.rejections += 1
+        d.notes.append(("reject", f"record {index}: a rejection by {b.get('approver')} on "
+                        f"{sign_in.describe()}, which this audit cannot check; it authorises "
+                        "nothing"))
         return []
     if decision != "approve":
         return [f"the decision {decision!r} is neither approve nor reject"]
@@ -492,14 +609,18 @@ def check_approval(d: Directory, index: int, cid: bytes, rec: Dict[str, Any],
         return ["the approval's passkey assertion is not in the trail"]
     try:
         ev = Evidence.parse(mine[0]["body"])
+        esc = escalation_cid(b["escalation"])
     except WebAuthnError as e:
         return [str(e)]
     errs = d.check(approver=b["approver"], position=index, key=b["escalation"],
-                   tool=b["tool"], args_sha256=b["args_sha256"], ev=ev, label="approved")
+                   tool=b["tool"], args_sha256=b["args_sha256"], escalation=esc, ev=ev,
+                   label="approved")
     if errs:
         return errs
     why = document_problem(ev, arguments_of(escalation, b["args_sha256"]))
     if why:
         return [why]
-    d.verified[ev.assertion_sha256] = d.verified.get(ev.assertion_sha256, 0) + 1
+    c = d.creds[ev.credential_id]
+    d.verified.append((ev.assertion_sha256, ev.batch is not None, c.pinned, b["approver"],
+                       c.basis))
     return []

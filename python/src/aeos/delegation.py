@@ -121,7 +121,8 @@ class Approval:
     # A passkey approver's proof: the WebAuthn assertion. The approval record holds only its
     # summary and the assertion goes in a child record (see `passkeys`). For a passkey approver
     # the signature is optional; a gateway's witness signature is a convenience, never the proof.
-    evidence: Optional[passkeys.Evidence] = field(default=None, repr=False)
+    # A rejection by a passkey approver carries the sign-in it rests on (`passkeys.SignIn`).
+    evidence: Optional[Any] = field(default=None, repr=False)
 
     def fields(self) -> Dict[str, Any]:
         return {"escalation": self.escalation, "approver": self.approver,
@@ -149,8 +150,11 @@ class Approval:
     @classmethod
     def from_json(cls, d: Dict[str, Any]) -> "Approval":
         try:
-            evidence = passkeys.Evidence.from_json(d["evidence"]) if d.get("evidence") else None
-        except passkeys.WebAuthnError as e:
+            raw = d.get("evidence")
+            evidence = None if not raw else (
+                passkeys.Evidence.from_json(raw) if raw.get("kind") == passkeys.EVIDENCE_KIND
+                else passkeys.SignIn.from_json(raw))
+        except (passkeys.WebAuthnError, AttributeError) as e:
             raise ValueError(str(e)) from None
         return cls(escalation=d["escalation"], approver=d["approver"], decision=d["decision"],
                    tool=d["tool"], args_sha256=bytes.fromhex(d["args_sha256"]),

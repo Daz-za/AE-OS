@@ -103,7 +103,8 @@ class Gateway:
             if spiffe_id not in self._recorders:
                 self._recorders[spiffe_id] = Recorder(
                     self.log, agent=spiffe_id, on_behalf_of=self.obo.get(spiffe_id),
-                    allow_tools=sorted(self.permissions.get(spiffe_id, ())))
+                    allow_tools=sorted(self.permissions.get(spiffe_id, ())),
+                    passkeys=self.passkey_directory)
             return self._recorders[spiffe_id]
 
     def handle(self, peer: str, svid_sha256: str, session: Optional[str],
@@ -299,16 +300,23 @@ class Gateway:
 
     def _passkey_problem(self, a: Any, args: Dict[str, Any]) -> Optional[str]:
         """A passkey approver's answer: an approval needs a valid assertion for this exact
-        call; a rejection carries none. Called with the gateway's lock held."""
+        call and escalation; a rejection carries the sign-in it rests on, never an assertion.
+        Called with the gateway's lock held."""
         assert self.passkey_directory is not None
         if a.decision == "reject":
-            return "a rejection carries a passkey assertion" if a.evidence else None
-        if a.decision != "approve" or a.evidence is None:
+            if isinstance(a.evidence, passkeys.SignIn):
+                return None
+            return "a rejection by a passkey approver carries no identity evidence"
+        if a.decision != "approve" or not isinstance(a.evidence, passkeys.Evidence):
             return "the approval carries no passkey assertion"
+        try:
+            escalation = passkeys.escalation_cid(a.escalation)
+        except passkeys.WebAuthnError as e:
+            return str(e)
         errs = self.passkey_directory.check(approver=a.approver, position=sys.maxsize,
                                             key=a.escalation, tool=a.tool,
-                                            args_sha256=a.args_sha256, ev=a.evidence,
-                                            label="approved")
+                                            args_sha256=a.args_sha256, escalation=escalation,
+                                            ev=a.evidence, label="approved")
         return (errs and "the passkey's assertion was refused: " + errs[0]) or \
             passkeys.document_problem(a.evidence, args)
 

@@ -90,23 +90,23 @@ def run(folder: Path, *, bundle: Optional[Path] = None, public_key: Optional[str
                  passkeys.load_principals(pdoc)[0], findings, problems)
 
     pkeys: Dict[str, bytes] = {}
-    directory = passkeys.Directory({})
+    pk_principals: Dict[str, passkeys.Principal] = {}
     if manifest.get("principals"):
         pdoc = json.loads((Path(principals) if principals else folder / manifest["principals"])
                           .read_text())
         pkeys, pk_principals = passkeys.load_principals(pdoc)
-        try:
-            directory = passkeys.Directory.build(
-                [(e.index, bytes(e.cid), r) for e, r in records], pk_principals)
-        except Exception as ex:          # noqa: BLE001 - malformed evidence is a problem
-            problems.append("the passkey registry could not be rebuilt because the evidence is "
-                            f"malformed ({type(ex).__name__}: {ex})")
-        _guarded("the passkey registry", _check_passkeys, records, directory, findings,
-                 problems)
+    directory = passkeys.Directory(pk_principals)
+    results: Dict[int, List[str]] = {}
+    try:                                 # registry and approvals, in one pass over the trail
+        results = _walk([(e.index, bytes(e.cid), r) for e, r in records], pkeys, directory)
+    except Exception as ex:              # noqa: BLE001 - malformed evidence is a problem
+        problems.append("the approvals and the passkey registry could not be checked because "
+                        f"the evidence is malformed ({type(ex).__name__}: {ex})")
+    _guarded("the passkey registry", _check_passkeys, records, directory, findings, problems)
 
     if manifest.get("policies"):
         _guarded("the policy decisions", _check_policies, records, folder / manifest["policies"],
-                 pkeys, directory, findings, problems)
+                 results, directory, findings, problems)
 
     if manifest.get("books"):
         pdoc = json.loads((Path(principals) if principals else folder / manifest["principals"])
@@ -261,7 +261,9 @@ def _replay(rec: Dict[str, Any], tokens: Dict[str, bytes],
 def _check_passkeys(records: List[Tuple[Any, Dict[str, Any]]], directory: "passkeys.Directory",
                     findings: List[str], problems: List[str]) -> None:
     """Report the passkey registry rebuilt from the trail, where each change was checked
-    against the one before it."""
+    against the one before it. The notes of kind `binding` (what each first passkey and each
+    rebinding rests on) go in this finding, each note of kind `clone` is a finding of its own,
+    and rejections are counted with the approvals."""
     principals = directory.principals
     problems += [f"passkeys: {p}" for p in directory.problems]
     changes = sum(1 for _, r in records if r["kind"] in passkeys.REGISTRY_KINDS)
@@ -270,15 +272,16 @@ def _check_passkeys(records: List[Tuple[Any, Dict[str, Any]]], directory: "passk
             f"The passkey registry of {len(principals)} approver"
             f"{'' if len(principals) == 1 else 's'} was rebuilt from its {changes} records in "
             "the trail: each passkey after an approver's first is confirmed by an assertion "
-            "from one already registered, and each is valid only between its enrolment and its "
-            "revocation or the approver's rebinding" + "".join(
-                "; " + n for n in directory.notes if not n.startswith("record")
-                or "bound to" in n))
+            "from one already registered, a rebinding is confirmed by one when one stands, and "
+            "each passkey is valid only in the epoch it was enrolled in, between its enrolment "
+            "and its revocation" + "".join("; " + t for k, t in directory.notes
+                                           if k == "binding"))
+    findings += [t for k, t in directory.notes if k == "clone"]
 
 
-def _check_policies(records: List[Tuple[Any, Dict[str, Any]]], folder: Path, principal_keys: Dict[str, bytes],
-                    directory: "passkeys.Directory", findings: List[str],
-                    problems: List[str]) -> None:
+def _check_policies(records: List[Tuple[Any, Dict[str, Any]]], folder: Path,
+                    results: Dict[int, List[str]], directory: "passkeys.Directory",
+                    findings: List[str], problems: List[str]) -> None:
     """Replay each policy decision, check approvals, and check that calls that ran were
     allowed by the policy."""
     modules = {f.stem: f.read_bytes() for f in folder.glob("*.wasm")}
@@ -286,8 +289,6 @@ def _check_policies(records: List[Tuple[Any, Dict[str, Any]]], folder: Path, pri
     for f in folder.glob("data-*.json"):
         doc = json.loads(f.read_text())
         data[policy.data_sha256(doc).hex()] = doc
-    by_cid = {cid_str(e.cid): r for e, r in records}
-    evidence = passkeys.evidence_children([(e.index, bytes(e.cid), r) for e, r in records])
     ran = {cid_str(r["parents"][0]) for _, r in records if r["kind"] == "tool.result"
            and r["parents"] and r["body"].get("outcome") != "error"}
     governed = {cid_str(e.cid) for e, r in records if r["kind"] == "session.start"
@@ -297,8 +298,7 @@ def _check_policies(records: List[Tuple[Any, Dict[str, Any]]], folder: Path, pri
         body = rec["body"]
         if rec["kind"] == "approval":
             approvals += 1
-            problems += [f"record {e.index}: {p}" for p in _check_approval(
-                e, rec, by_cid, principal_keys, directory, evidence.get(bytes(e.cid), []))]
+            problems += [f"record {e.index}: {p}" for p in results.get(e.index, [])]
             continue
         if rec["kind"] != "policy.decision" or body.get("policy") != policy.POLICY:
             continue
@@ -343,6 +343,7 @@ def _check_policies(records: List[Tuple[Any, Dict[str, Any]]], folder: Path, pri
                     "answers an escalation of the same call, and every call that ran had the "
                     "policy's allow"
                     + ("" if len(problems) == before else " (except as listed below)"))
+    problems += _check_allow_ties([(e.index, bytes(e.cid), r) for e, r in records], results)
     findings += _passkey_findings(directory)
 
 
@@ -395,39 +396,130 @@ class _At:
         self.index, self.cid = index, cid
 
 
-def check_approvals(triples: List[Tuple[int, bytes, Dict[str, Any]]],
-                    principals_doc: Dict[str, Any]) -> Tuple[List[str], List[str]]:
-    """Check every approval and the passkey registry in a list of (position, binary CID,
-    record), against a principals document, as `run` does for a whole evidence folder.
-    Returns (findings, problems); the test vectors in testvectors/passkey-approvals-v1.json
-    use it."""
-    ed, pk = passkeys.load_principals(principals_doc)
-    directory = passkeys.Directory.build(triples, pk)
-    problems = [f"passkeys: {p}" for p in directory.problems]
+def _walk(triples: List[Tuple[int, bytes, Dict[str, Any]]], ed_keys: Dict[str, bytes],
+          directory: "passkeys.Directory") -> Dict[int, List[str]]:
+    """One pass over the trail, in order: each registry record is applied and each approval
+    checked at its own position, so everything that is single-use is filled in trail order.
+    Returns each approval's problems by position; the registry's are in `directory`."""
+    directory.begin(triples)
     by_cid = {cid_str(c): r for _, c, r in triples}
     evidence = passkeys.evidence_children(triples)
+    results: Dict[int, List[str]] = {}
     for i, c, r in triples:
-        if r["kind"] == "approval":
-            problems += [f"record {i}: {p}" for p in _check_approval(
-                _At(i, c), r, by_cid, ed, directory, evidence.get(c, []))]
-    return _passkey_findings(directory), problems
+        kind = r.get("kind")
+        if kind in passkeys.REGISTRY_KINDS:
+            directory.step(i, c, r)
+        elif kind == "approval":
+            results[i] = _check_approval(_At(i, c), r, by_cid, ed_keys, directory,
+                                         evidence.get(c, []))
+    return results
+
+
+def check_approvals(triples: List[Tuple[int, bytes, Dict[str, Any]]],
+                    principals_doc: Dict[str, Any]) -> Tuple[List[str], List[str], List[str]]:
+    """Check the passkey registry, every approval and every decision that rests on an approval
+    in a list of (position, binary CID, record), against a principals document, as `run` does
+    for a whole evidence folder. Returns (findings, problems, notes); the test vectors in
+    testvectors/passkey-approvals-v1.json use it. The notes are one line per record that
+    something was observed about without being a problem."""
+    ed, pk = passkeys.load_principals(principals_doc)
+    directory = passkeys.Directory(pk)
+    results = _walk(triples, ed, directory)
+    problems = [f"passkeys: {p}" for p in directory.problems]
+    for i in sorted(results):
+        problems += [f"record {i}: {p}" for p in results[i]]
+    problems += _check_allow_ties(triples, results)
+    return (_passkey_findings(directory), problems, [t for _, t in directory.notes])
+
+
+def _check_allow_ties(triples: List[Tuple[int, bytes, Dict[str, Any]]],
+                      results: Dict[int, List[str]]) -> List[str]:
+    """Every decision whose input carries an `approval` rests on an earlier approval record of
+    the same call, by the same approver with the same answer, that passed its checks; and one
+    approval of one escalation allows at most one call, so one tap never pays twice."""
+    problems: List[str] = []
+    answers: Dict[bytes, List[Tuple[int, Dict[str, Any]]]] = {}
+    for i, _, r in triples:
+        parents = r.get("parents") if r.get("kind") == "approval" else None
+        if isinstance(parents, list) and len(parents) > 1 and isinstance(parents[1], bytes):
+            answers.setdefault(bytes(parents[1]), []).append((i, r))
+    by_cid = {c: r for _, c, r in triples}
+    allowed: Dict[bytes, int] = {}
+    for i, _, r in triples:
+        try:
+            body = r.get("body")
+            if r.get("kind") != "policy.decision" or not isinstance(body, dict) or \
+                    body.get("policy") != policy.POLICY or "input_json" not in body:
+                continue
+            given = json.loads(body["input_json"]).get("approval")
+            if given is None:
+                continue
+            call = passkeys.first_parent(r)
+            ok = None
+            for ai, ar in answers.get(call, []) if call else []:
+                ab = ar["body"]
+                if (ai < i and not results.get(ai) and isinstance(given, dict)
+                        and ab.get("approver") == given.get("approver")
+                        and ab.get("decision") == given.get("decision")
+                        and cid_str(ar["parents"][0]) == ab.get("escalation")):
+                    ok = ar
+                    break
+            if ok is None:
+                who = given.get("approver") if isinstance(given, dict) else given
+                problems.append(f"record {i}: the decision rests on an approval by {who} that "
+                                "is not an earlier, verified approval of this call")
+                continue
+            ab, c = ok["body"], by_cid.get(call)
+            if c is None or c["body"].get("args_sha256") != ab.get("args_sha256") or \
+                    c.get("subject") != ab.get("tool"):
+                problems.append(f"record {i}: the approval is for a different call from the "
+                                "one decided")
+            elif body.get("decision") == "allow":
+                esc = bytes(ok["parents"][0])
+                if esc in allowed:
+                    problems.append(f"record {i}: the escalation already allowed the call at "
+                                    f"record {allowed[esc]}; one approval allows one call")
+                allowed.setdefault(esc, i)
+        except Exception as ex:          # noqa: BLE001 - malformed evidence is a problem
+            problems.append(f"record {i}: the decision could not be checked because it is "
+                            f"malformed ({type(ex).__name__}: {ex})")
+    return problems
 
 
 def _passkey_findings(d: "passkeys.Directory") -> List[str]:
-    if not d.verified:
-        return []
-    n, taps = sum(d.verified.values()), len(d.verified)
-    batches = sum(1 for c in d.verified.values() if c > 1)
-    out = [f"{n} approval{'' if n == 1 else 's'} by passkey {'was' if n == 1 else 'were'} "
-           f"checked from the evidence in the trail alone ({taps} assertion"
-           f"{'' if taps == 1 else 's'}" + (f", {batches} signing several at once" if batches
-                                            else "") + "): the signature, the relying party, "
-           "the origin, user verification and the challenge for that exact call. Each nonce is "
-           "checked for reuse inside this trail; that the gateway issued it, and once, cannot "
-           "be checked from the trail"]
-    if d.witnessed:
-        out.append(f"{d.witnessed} of them also carry the gateway's own signature, which is "
-                   "a convenience and was not needed")
+    out: List[str] = []
+    if d.verified:
+        n, taps = len(d.verified), len({v[0] for v in d.verified})
+        batches = len({v[0] for v in d.verified if v[1]})
+        pinned = sum(1 for v in d.verified if v[2])
+        unpinned = sorted({f"{v[3]} on {v[4]}" for v in d.verified if not v[2]})
+        out.append(
+            f"{n} approval{'' if n == 1 else 's'} by passkey {'was' if n == 1 else 'were'} "
+            f"checked from the evidence in the trail alone ({taps} assertion"
+            f"{'' if taps == 1 else 's'}" + (f", {batches} signing several at once" if batches
+                                             else "") + "): the signature, the relying party, "
+            "the origin, user verification and the challenge for that exact call. Each nonce "
+            "is checked for reuse inside this trail; that the gateway issued it, and once, "
+            "cannot be checked from the trail")
+        if pinned:
+            out.append(f"{pinned} of them rest on a first passkey that you pinned in the "
+                       "principals")
+        if n - pinned:
+            out.append(f"{n - pinned} of them rest on identity evidence that this audit cannot "
+                       "check (" + "; ".join(unpinned) + "); pin the first passkey in the "
+                       "principals to remove that trust")
+    if d.witness_checked:
+        out.append(f"{d.witness_checked} of them also carr"
+                   f"{'ies' if d.witness_checked == 1 else 'y'} the gateway's own signature, "
+                   "which verified against the witness key you gave and was not needed")
+    if d.witness_unchecked:
+        out.append(f"{d.witness_unchecked} of them carr"
+                   f"{'ies' if d.witness_unchecked == 1 else 'y'} a gateway signature that was "
+                   "not checked (no witness key was given), and was not needed")
+    if d.rejections:
+        out.append(f"{d.rejections} rejection{'' if d.rejections == 1 else 's'} by passkey "
+                   f"approver{'' if d.rejections == 1 else 's'} authorise nothing and "
+                   "rest on sign-in evidence that this audit cannot check")
     return out
 
 
@@ -466,11 +558,12 @@ def _approval_problems(e: Any, rec: Dict[str, Any], by_cid: Dict[str, Dict[str, 
         if call is None or call["body"].get("args_sha256") != a.args_sha256:
             out.append("the approval is for a different call from the one escalated")
     if pk is not None:
-        got = passkeys.check_approval(directory, e.index, bytes(e.cid), rec, esc or {}, evidence)
-        out += got
-        if a.signature:                  # the gateway's witness signature: a convenience
-            if pk.witness_key and not a.verify(pk.witness_key):
+        out += passkeys.check_approval(directory, e.index, bytes(e.cid), rec, esc or {}, evidence)
+        if a.signature and not out and a.decision == "approve":   # the gateway's own signature
+            if pk.witness_key is None:
+                directory.witness_unchecked += 1
+            elif a.verify(pk.witness_key):
+                directory.witness_checked += 1
+            else:
                 out.append("the approval's gateway signature does not verify")
-            elif not out:
-                directory.witnessed += 1
     return out
