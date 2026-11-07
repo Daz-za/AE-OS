@@ -228,13 +228,22 @@ def tampered_logs(log: ActionLog, work: Path):
     def sig_not_text(d):
         d["sig"] = 5
 
-    def no_sigs():
+    def strip(indexes):
         out = []
-        for line in recs:
+        for i, line in enumerate(recs):
             d = json.loads(line)
-            drop_sig(d)
+            if i in indexes:
+                drop_sig(d)
             out.append(json.dumps(d, separators=(",", ":")) + "\n")
         return out
+
+    # A version 0 trail: the same records without the marker and without signatures, written
+    # as an importer would, with a signed checkpoint.
+    v0 = ActionLog.create(work / "v0-trail", log_id=LOG_ID, key_path=work / "test.key")
+    for e in log.entries()[1:]:
+        v0.append(log.record(e), allow_unsigned=True)
+    v0.checkpoint(ts=T0 + 200000)
+    v0_files = log_files(v0.path)
 
     last = len(recs) - 1
     cases = {
@@ -244,7 +253,13 @@ def tampered_logs(log: ActionLog, work: Path):
         "issuer signature removed from the last record": (edit_record(last, drop_sig), cps),
         "issuer key id kept, signature emptied": (edit_record(1, empty_sig), cps),
         "issuer signature is not text": (edit_record(1, sig_not_text), cps),
-        "no issuer signatures at all (version 0 trail)": (no_sigs(), cps),
+        "signatures stripped from the first records, marker included": (strip({0, 1, 2}), cps),
+        "every signature stripped, marker still in the trail": (strip(set(range(len(recs)))),
+                                                               cps),
+        "marker removed": (recs[1:], cps),
+        "version 0 trail with no marker and no signatures": (
+            v0_files["records"].splitlines(keepends=True),
+            v0_files["checkpoints"].splitlines(keepends=True)),
         "readable view edited": (edit_record(2, view_edit), cps),
         "record rewritten with a new CID": (edit_record(2, bytes_edit), cps),
         "record removed": (recs[:1] + recs[2:], cps),

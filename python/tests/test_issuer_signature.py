@@ -39,7 +39,7 @@ def test_append_signs_the_cid_under_its_own_context(tmp_path):
 def test_signature_does_not_change_the_record_bytes_or_cid(tmp_path):
     # the signature sits beside the record, so v0 CIDs, leaves and checkpoints are untouched
     log = _log(tmp_path)
-    e = log.entries()[0]
+    e = log.entries()[1]
     assert cid_of_bytes(dag_cbor(log.record(e))) == e.cid
     assert b"sig" not in e.raw and b"key_id" not in e.raw
 
@@ -91,7 +91,7 @@ def test_a_writer_without_the_key_refuses_to_append(tmp_path):
     read_only = ActionLog.open(tmp_path / "log", read_only=True)
     with pytest.raises(PermissionError):
         read_only.append(make_record("note", AGENT, body={"i": 99}))
-    assert len(ActionLog.open(tmp_path / "log", read_only=True)) == 2
+    assert len(ActionLog.open(tmp_path / "log", read_only=True)) == 3   # marker and two
 
 
 def test_importing_version_0_data_may_append_unsigned_explicitly(tmp_path):
@@ -126,7 +126,7 @@ def test_every_cli_path_that_writes_names_where_it_looked_for_the_key(tmp_path, 
                  ["mcp-proxy", str(log.path), "--agent", AGENT, "--key", missing, "--", "true"]):
         assert main(argv) == 2, argv
         assert "nowhere.key" in capsys.readouterr().err, argv
-    assert len(ActionLog.open(log.path, read_only=True)) == 1
+    assert len(ActionLog.open(log.path, read_only=True)) == 2     # marker and one
 
 
 def test_a_hook_without_the_key_refuses_the_tool_call_and_says_why(tmp_path):
@@ -141,46 +141,114 @@ def test_a_hook_without_the_key_refuses_the_tool_call_and_says_why(tmp_path):
         {"hook_event_name": "PreToolUse", "tool_name": "t", "tool_use_id": "1",
          "session_id": "s"}))
     assert "deny" in out and "gone.key" in err
-    assert len(ActionLog.open(log.path, read_only=True)) == 1
+    assert len(ActionLog.open(log.path, read_only=True)) == 2     # marker and one
 
 
-def test_stripping_a_signature_is_a_problem_even_when_the_rest_still_holds(tmp_path):
-    _log(tmp_path, 4)
+def _edit_lines(tmp_path, edits):
+    """Rewrite records.jsonl with `edits` ({index: function(dict)}) applied; returns problems."""
     path = tmp_path / "log" / "records.jsonl"
     lines = path.read_text().splitlines()
-    for i, expected in ((3, "record 3: issuer signature missing after record 0 was signed"),
-                        (1, "record 1: issuer signature missing after record 0 was signed")):
-        stripped = json.loads(lines[i])
-        del stripped["sig"], stripped["key_id"]
-        edited = list(lines)
-        edited[i] = json.dumps(stripped, separators=(",", ":"))
-        path.write_text("\n".join(edited) + "\n")
-        problems = ActionLog.open(tmp_path / "log", read_only=True).verify().problems
-        assert problems == [expected]
-    # a key id left behind without its signature is a problem of its own
-    kept = json.loads(lines[2])
-    kept["sig"] = ""
-    edited = list(lines)
-    edited[2] = json.dumps(kept, separators=(",", ":"))
-    path.write_text("\n".join(edited) + "\n")
-    assert ActionLog.open(tmp_path / "log", read_only=True).verify().problems == [
-        "record 2: issuer key id present without a signature",
-        "record 2: issuer signature missing after record 0 was signed"]
+    for i, fn in edits.items():
+        d = json.loads(lines[i])
+        fn(d)
+        lines[i] = json.dumps(d, separators=(",", ":"))
     path.write_text("\n".join(lines) + "\n")
-    assert ActionLog.open(tmp_path / "log", read_only=True).verify().ok
+    return ActionLog.open(tmp_path / "log", read_only=True).verify().problems
 
 
-def test_a_trail_with_no_signatures_at_all_is_a_version_0_trail_not_a_failure(tmp_path):
+def _strip(d):
+    del d["sig"], d["key_id"]
+
+
+MARKER_NOTE = "(the issuer-signing marker is record 0)"
+
+
+def test_the_first_signed_append_writes_a_signed_marker_first(tmp_path):
+    log = ActionLog.create(tmp_path / "log")
+    first = log.append(make_record("note", AGENT, body={"i": 0}, ts=1234))
+    marker = log.entries()[0]
+    rec = log.record(marker)
+    assert first.index == 1 and marker.index == 0
+    assert rec["kind"] == "x-issuer-signing" and rec["ts"] == 1234
+    assert rec["body"] == {"key_id": log.meta["key_id"]} and marker.sig
+    log.append(make_record("note", AGENT, body={"i": 1}))
+    reopened = ActionLog.open(tmp_path / "log")
+    reopened.append(make_record("note", AGENT, body={"i": 2}))
+    kinds = [reopened.record(e)["kind"] for e in reopened.entries()]
+    assert kinds == ["x-issuer-signing", "note", "note", "note"]       # written once
+    assert reopened.verify().ok and reopened.verify().issuer_signed == 4
+
+
+def test_stripping_signatures_after_the_marker_is_always_a_problem(tmp_path):
+    _log(tmp_path, 4)
+    path = tmp_path / "log" / "records.jsonl"
+    original = path.read_text()
+    for i in (1, 2, 4):                                      # first, middle and last record
+        path.write_text(original)
+        assert _edit_lines(tmp_path, {i: _strip}) == [
+            f"record {i}: issuer signature missing {MARKER_NOTE}"]
+    path.write_text(original)
+    problems = _edit_lines(tmp_path, {i: _strip for i in range(5)})       # all of them
+    assert problems == [f"record {i}: issuer signature missing {MARKER_NOTE}"
+                        for i in range(5)]
+    path.write_text(original)
+    problems = _edit_lines(tmp_path, {0: _strip, 1: _strip})              # a prefix, marker too
+    assert problems == [f"record {i}: issuer signature missing {MARKER_NOTE}" for i in (0, 1)]
+
+
+def test_a_key_id_left_without_its_signature_is_its_own_problem(tmp_path):
+    _log(tmp_path, 3)
+    problems = _edit_lines(tmp_path, {2: lambda d: d.update(sig="")})
+    assert problems == ["record 2: issuer key id present without a signature",
+                        f"record 2: issuer signature missing {MARKER_NOTE}"]
+
+
+def test_removing_the_marker_breaks_the_checkpoint_that_covers_it(tmp_path):
     _log(tmp_path, 3)
     path = tmp_path / "log" / "records.jsonl"
-    out = []
-    for line in path.read_text().splitlines():
+    lines = path.read_text().splitlines()
+    # drop the marker and renumber, as a careful forger would
+    kept = []
+    for n, line in enumerate(lines[1:]):
         d = json.loads(line)
-        del d["sig"], d["key_id"]
-        out.append(json.dumps(d, separators=(",", ":")))
-    path.write_text("\n".join(out) + "\n")
+        d["i"] = n
+        kept.append(json.dumps(d, separators=(",", ":")))
+    path.write_text("\n".join(kept) + "\n")
+    problems = ActionLog.open(tmp_path / "log", read_only=True).verify().problems
+    assert any("covers more records" in p for p in problems), problems
+
+
+def test_a_marker_naming_another_key_is_a_problem(tmp_path):
+    log = ActionLog.create(tmp_path / "log")
+    other = keys.generate_key(tmp_path / "other.key")
+    # a marker for a different key, signed by the trail's key and written by hand
+    with log._locked():
+        log._write(make_record("x-issuer-signing", log.log_id,
+                               body={"key_id": keys.key_id(keys.public_bytes(other))}), None)
+    problems = ActionLog.open(tmp_path / "log", read_only=True).verify().problems
+    assert problems == ["record 0: the issuer-signing marker names a different key than "
+                        "the trail's"]
+
+
+def test_a_trail_with_no_marker_and_no_signatures_is_a_version_0_trail(tmp_path):
+    keyless = ActionLog.create(tmp_path / "log")
+    for i in range(3):
+        keyless.append(make_record("note", AGENT, body={"i": i}), allow_unsigned=True)
+    keyless.checkpoint()
     rep = ActionLog.open(tmp_path / "log", read_only=True).verify()
-    assert rep.ok and rep.issuer_signed == 0
+    assert rep.ok and rep.issuer_signed == 0 and rep.records == 3
+
+
+def test_a_signed_writer_can_continue_a_version_0_trail_and_the_marker_marks_the_start(
+        tmp_path):
+    log = ActionLog.create(tmp_path / "log")
+    for i in range(2):
+        log.append(make_record("note", AGENT, body={"i": i}), allow_unsigned=True)
+    log.append(make_record("note", AGENT, body={"i": 2}))
+    rep = ActionLog.open(tmp_path / "log", read_only=True).verify()
+    assert rep.ok and rep.records == 4 and rep.issuer_signed == 2        # marker and the record
+    kinds = [log.record(e)["kind"] for e in log.entries()]
+    assert kinds == ["note", "note", "x-issuer-signing", "note"]
 
 
 def test_a_malformed_signature_is_reported_never_a_crash(tmp_path):

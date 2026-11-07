@@ -55,7 +55,7 @@ def test_mcp_tool_span_becomes_call_and_result(tmp_path):
         apply(rec, ev)
     for ev in otlp_events(payload):          # an exporter retry adds nothing
         apply(rec, ev)
-    recs = [log.record(e) for e in log.entries()]
+    recs = [log.record(e) for e in log.entries()[1:]]            # [0] is the signing marker
     assert [r["kind"] for r in recs] == ["session.start", "tool.call", "tool.result"]
     assert recs[1]["body"]["args_sha256"] == json_digest({"invoice": "INV-1"})
     assert recs[1]["body"]["source"]["trace_id"] == "4bf92f3577b34da6a3ce929d0e0e4736"
@@ -83,4 +83,4 @@ def test_event_validation(tmp_path):
     out = apply(rec, {"event": "tool.call", "tool": "b", "call_id": "c2",
                       "agent": "spiffe://acme.example/agent/x"})
     assert out["decision"] == "deny" and out["reason"] == "tool-not-in-allow-list"
-    assert rec.log.record(rec.log.entries()[0])["agent"] == "spiffe://acme.example/agent/x"
+    assert rec.log.record(rec.log.entries()[1])["agent"] == "spiffe://acme.example/agent/x"

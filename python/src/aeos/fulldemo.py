@@ -415,7 +415,7 @@ def run(folder: Path, out: Callable[[str], None] = print) -> int:
             continue                                    # hide the refusal from this copy
         fork.append(rec)
     while len(fork) < len(log):                         # same size, different records
-        fork.append(decode_dag_cbor(log.entries()[0].raw) | {"ts": cp.ts + len(fork),
+        fork.append(decode_dag_cbor(log.entries()[1].raw) | {"ts": cp.ts + len(fork),
                                                               "parents": []})
     fork_cp = fork.checkpoint()
     try:

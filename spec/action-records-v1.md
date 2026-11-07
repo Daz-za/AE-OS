@@ -90,6 +90,7 @@ Record kinds:
 | `period.transition` | A controller opens or closes a posting period | `period`, `state`, `by` |
 | `note` | Anything else worth recording | free form |
 | `session.end` | The session ends | `unanswered_calls` |
+| `x-issuer-signing` | The first signed append to an audit trail (section 1.1) | `key_id` |
 
 Numbers in a record are integers. Amounts are stored in minor currency units (cents), which keeps the encoding exact.
 
@@ -106,7 +107,21 @@ The signature and the issuer's `key_id` (the same 16-hex-digit identifier as in 
 
 A verifier that finds `statement_signature` must check it against the trusted public key: a `key_id` that is not the trusted key's, or a signature that does not verify, is a problem. A verifier that finds none reports the record as **log-signed only**: the audit trail's checkpoint vouches for it, but its issuer did not sign it. That is the state of every record written under version 0 and is not a failure.
 
-**Signing is monotonic.** The audit trail's writer signs every action record, and a writer without the key refuses to append. So in a trail check, once any record carries a signature, a later record without one is a problem ("record n: issuer signature missing after record m was signed"), and so is a `key_id` with an empty or missing `sig`. A trail with no signatures at all is a version 0 trail and passes. This is what makes stripping a signature detectable. An exported document on its own cannot show stripping, because a stripped record looks like a version 0 one: a log-signed-only record from a trail that is otherwise signed means "check the full trail", not "fine".
+**The signing marker.** The first signed append to a trail first appends a marker record: kind `x-issuer-signing`, agent the trail's `log_id`, body `{"key_id": <the trail's key id>}`, `ts` the time of the record that triggered it. The marker is itself issuer-signed and sits in the Merkle tree like any record, so a checkpoint that covers it stops matching if it is removed. A writer signs every record it appends and refuses to append without the key.
+
+In a trail check, the marker is the first record of kind `x-issuer-signing`, and:
+
+- from the marker on, inclusive, every record must carry an issuer signature that verifies under the trail's key. A record without one is a problem ("record n: issuer signature missing (the issuer-signing marker is record m)");
+- a marker whose `key_id` is not the trail's is a problem;
+- a `key_id` with an empty or missing `sig` is a problem, anywhere;
+- records before the marker need no signature (a version 0 prefix), and a signature that is present there is still checked;
+- a trail with no marker is a version 0 trail: its unsigned records pass.
+
+This makes stripping signatures detectable against a trail with a marker: the marker cannot be removed without breaking the checkpoints that cover it, and everything after it must be signed. It does not detect removal of the marker together with everything after it, shown with an earlier genuine checkpoint: that is an older, genuine prefix of the trail, which only a consistency proof against a checkpoint someone kept can expose. An exported document on its own cannot show stripping, because a stripped record looks like a version 0 one: a log-signed-only record from a trail that has a marker means "check the full trail", not "fine".
+
+### 1.2 Order of writing
+
+The gateway writes a call's record and each decision (capability, policy, approval) before it runs the tool, and does not run the tool if they cannot be written: the agent is told the action was not performed and an error is logged. A tool's result can only be written after the tool has run. If that write fails, the tool has run, the trail holds the call and its decisions but no result, the agent is told the action ran but is not fully on record, and an error is logged. The gap shows in the trail as a call with no result.
 
 Signatures are checked strictly, the same way in every verifier: a public key or signature point of small order, and an S value that is not reduced, make the signature invalid (a small-order key verifies some signatures for every message, so lax checking lets forged checkpoints through). A trusted public key of small order is refused when it is loaded.
 
@@ -191,7 +206,7 @@ Auditors and counterparties should keep the checkpoints they receive. Requesting
 
 ### 4.3 Full audit trail verification
 
-Anyone with read access to the audit trail directory can recompute every CID, check every causal link points backwards, check each record's readable view matches its signed bytes, check each issuer signature that is present, and check every checkpoint's signature and root against the records. Signing is monotonic (section 1.1): an unsigned record after a signed one is a problem, and a key id without a signature is a problem. A trail with no issuer signatures at all is a version 0 trail, counted as log-signed only and not reported as a problem. The Python and Rust verifiers check whole trails; the browser verifier checks single documents and consistency proofs only.
+Anyone with read access to the audit trail directory can recompute every CID, check every causal link points backwards, check each record's readable view matches its signed bytes, check each issuer signature that is present, and check every checkpoint's signature and root against the records. From the signing marker on, an unsigned record is a problem, and a key id without a signature is a problem (section 1.1). A trail with no marker is a version 0 trail, counted as log-signed only and not reported as a problem. The Python and Rust verifiers check whole trails; the browser verifier checks single documents and consistency proofs only.
 
 ## 5. Encodings
 
@@ -234,7 +249,7 @@ Version 0 of this format was called "AE-OS Receipts" (`spec/receipts-v0.md`). It
 
 ## 8. Test vectors
 
-`testvectors/action-records-v1.json` holds test vectors for every part of this format: canonical encodings, CIDs, Merkle roots and proofs, and valid and tampered action records, consistency proofs and audit trails with the problems a verifier reports for each. Action record cases include good, altered, wrong-key, swapped and missing issuer signatures, each with the expected `signature` state (`issuer-signed` or `log-signed only`). `testvectors/receipts-v0.json` is the frozen version 0 file, with version 0 documents. The Python, Rust and browser implementations in this repository test against both. A change to this specification needs matching vectors.
+`testvectors/action-records-v1.json` holds test vectors for every part of this format: canonical encodings, CIDs, Merkle roots and proofs, and valid and tampered action records, consistency proofs and audit trails with the problems a verifier reports for each. Action record cases include good, altered, wrong-key, swapped and missing issuer signatures, each with the expected `signature` state (`issuer-signed` or `log-signed only`). Audit trail cases include signatures stripped from a prefix, from one record and from every record, a removed marker, and a version 0 trail with no marker. `testvectors/receipts-v0.json` is the frozen version 0 file, with version 0 documents. The Python, Rust and browser implementations in this repository test against both. A change to this specification needs matching vectors.
 
 ## 9. Planned for later versions
 

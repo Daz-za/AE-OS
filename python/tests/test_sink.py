@@ -49,7 +49,7 @@ def test_events_endpoint(server):
     assert [d["event"] for d in doc["recorded"]] == ["tool.call", "tool.result"]
     assert doc["recorded"][0]["decision"] == "allow"
     assert doc["problems"] == ["event 2: unknown event 'bogus'"]
-    assert len(rec.log) == 3
+    assert len(rec.log) == 4
 
 
 def test_traces_endpoint(server):
@@ -57,7 +57,7 @@ def test_traces_endpoint(server):
     payload = otlp(span("tools/call t", {"mcp.method.name": "tools/call",
                                          "gen_ai.tool.name": "t", "jsonrpc.request.id": "1"}))
     assert post(url + "/v1/traces", payload) == (200, {})
-    assert [rec.log.record(e)["kind"] for e in rec.log.entries()] == \
+    assert [rec.log.record(e)["kind"] for e in rec.log.entries()[1:]] == \
         ["session.start", "tool.call", "tool.result"]
 
 
@@ -81,7 +81,7 @@ def test_ingest_collector_file(tmp_path):
                                   span_id=f"{i:016x}"))) for i in range(3)]
     count, problems = ingest(rec, io.StringIO("\n".join(lines + ["not json"])), "otlp")
     assert count == 6 and len(problems) == 1 and problems[0].startswith("line 4:")
-    assert len(rec.log) == 7
+    assert len(rec.log) == 8
 
 
 def test_malformed_otlp_is_a_client_error(server):

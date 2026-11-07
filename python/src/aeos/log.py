@@ -46,6 +46,10 @@ WRITTEN_TYPE = LEGACY_RECEIPT_TYPE
 # The issuer signs the binary CID of each action record under this context, which is
 # separate from the checkpoint's. Records without a signature are "log-signed only".
 STATEMENT_CONTEXT = b"aeos-action-record/statement/v1\n"
+# The first signed append to a trail first appends this record, itself issuer-signed. It sits
+# in the Merkle tree, so no checkpoint can be valid once it is removed, and from it onward
+# every record must carry a valid issuer signature (see `ActionLog.verify`).
+MARKER_KIND = "x-issuer-signing"
 ISSUER_SIGNED = "issuer-signed"
 LOG_SIGNED_ONLY = "log-signed only"
 
@@ -254,6 +258,8 @@ class ActionLog:
         self.log_id: str = meta["log_id"]
         self.public_key = bytes.fromhex(meta["public_key"])
         self._key = key
+        self._marker_index: Optional[int] = None   # the issuer-signing marker, once written
+        self._first_signed_seen = False
         self.key_source: Optional[Path] = None     # where open() looked for the key
         self._entries: List[Entry] = []
         self._leaves: List[bytes] = []
@@ -328,6 +334,11 @@ class ActionLog:
                     sig = unb64(d["sig"]) if _present(d.get("sig")) else None
                 except (ValueError, TypeError):
                     sig = None             # reported by verify(); the record itself still loads
+                if sig is not None and not self._first_signed_seen:
+                    # the marker, when there is one, is the first signed record
+                    self._first_signed_seen = True
+                    if decode_dag_cbor(raw).get("kind") == MARKER_KIND:
+                        self._marker_index = int(d["i"])
                 self._add(Entry(int(d["i"]), cid, raw, sig, d.get("key_id") if sig else None))
 
     def _add(self, e: Entry) -> None:
@@ -357,6 +368,10 @@ class ActionLog:
                allow_unsigned: bool = False) -> Entry:
         """Append a record, signed with the issuer key, and return its index and CID.
 
+        The first signed append to a trail first appends an issuer-signing marker record
+        (kind `x-issuer-signing`, carrying the key id), itself signed; from it on, every
+        record must be signed, which is how a stripped signature is detected.
+
         Without the signing key this raises, as `checkpoint()` does: a writer that cannot
         sign must not write. `allow_unsigned=True` is only for importing existing version 0
         data, which has no issuer signatures; a trail that holds signed records then reports
@@ -375,24 +390,40 @@ class ActionLog:
             for p in record.get("parents", []):
                 if bytes(p) not in self._by_cid:
                     raise KeyError(f"parent {cid_str(bytes(p))} is not in this log")
-            sig = self._key.sign(statement_message(cid)) if self._key is not None else None
-            e = Entry(len(self._entries), cid, raw, sig,
-                      self.meta["key_id"] if sig else None)
-            if content is not None:
-                cdir = self.path / "content"
-                cdir.mkdir(exist_ok=True)
-                (cdir / f"{cid_str(cid)}.json").write_text(json.dumps(content, indent=2))
-            fields: Dict[str, Any] = {"i": e.index, "cid": cid_str(cid), "cbor": b64(raw)}
-            if sig:
-                fields.update(key_id=e.signer, sig=b64(sig))
-            fields["view"] = to_view(decode_dag_cbor(raw))
-            line = json.dumps(fields, separators=(",", ":")) + "\n"
-            with open(self.path / "records.jsonl", "ab") as f:
-                f.write(line.encode())
-                f.flush()
-            self._offset += len(line.encode())
-            self._add(e)
-            return e
+            if not allow_unsigned and self._marker_index is None:
+                marker = make_record(MARKER_KIND, self.log_id,
+                                     body={"key_id": self.meta["key_id"]},
+                                     ts=record.get("ts"))
+                self._marker_index = self._write(marker, None).index
+                self._first_signed_seen = True
+                if cid in self._by_cid:        # the record was the marker itself
+                    return self._entries[self._by_cid[cid]]
+            return self._write(record, content, signed=not allow_unsigned)
+
+    def _write(self, record: Dict[str, Any], content: Optional[Dict[str, Any]],
+               signed: bool = True) -> Entry:
+        """Write one record to the file, under the lock; signed unless importing version 0."""
+        raw = dag_cbor(record)
+        cid = cid_of_bytes(raw)
+        sig = (self._key.sign(statement_message(cid))
+               if signed and self._key is not None else None)
+        e = Entry(len(self._entries), cid, raw, sig,
+                  self.meta["key_id"] if sig else None)
+        if content is not None:
+            cdir = self.path / "content"
+            cdir.mkdir(exist_ok=True)
+            (cdir / f"{cid_str(cid)}.json").write_text(json.dumps(content, indent=2))
+        fields: Dict[str, Any] = {"i": e.index, "cid": cid_str(cid), "cbor": b64(raw)}
+        if sig:
+            fields.update(key_id=e.signer, sig=b64(sig))
+        fields["view"] = to_view(decode_dag_cbor(raw))
+        line = json.dumps(fields, separators=(",", ":")) + "\n"
+        with open(self.path / "records.jsonl", "ab") as f:
+            f.write(line.encode())
+            f.flush()
+        self._offset += len(line.encode())
+        self._add(e)
+        return e
 
     def checkpoint(self, ts: Optional[int] = None) -> Checkpoint:
         """Sign the current tree head and record it in checkpoints.jsonl."""
@@ -474,7 +505,7 @@ class ActionLog:
         rep = VerifyReport()
         leaves: List[bytes] = []
         seen: Dict[bytes, int] = {}
-        first_signed: Optional[int] = None
+        marker_at: Optional[int] = None
         with open(self.path / "records.jsonl", "rb") as f:
             for n, line in enumerate(f):
                 rep.records += 1
@@ -496,6 +527,13 @@ class ActionLog:
                 for p in rec.get("parents", []):
                     if bytes(p) not in seen:
                         rep.problems.append(f"record {n}: parent is missing or later in the log")
+                if marker_at is None and rec.get("kind") == MARKER_KIND:
+                    # From the marker on, every record must carry a valid issuer signature.
+                    marker_at = n
+                    body = rec.get("body")
+                    if not isinstance(body, dict) or body.get("key_id") != self.meta["key_id"]:
+                        rep.problems.append(f"record {n}: the issuer-signing marker names a "
+                                            "different key than the trail's")
                 if _present(d.get("sig")):
                     try:
                         good = (d.get("key_id") == self.meta["key_id"]
@@ -507,17 +545,13 @@ class ActionLog:
                         rep.issuer_signed += 1
                     else:
                         rep.problems.append(f"record {n}: issuer signature does not verify")
-                    if first_signed is None:
-                        first_signed = n
                 else:
-                    # Signing is monotonic: once a record is signed, an unsigned one after it
-                    # means a signature was stripped (or a writer that could not sign wrote).
                     if _present(d.get("key_id")):
                         rep.problems.append(f"record {n}: issuer key id present without a "
                                             "signature")
-                    if first_signed is not None:
-                        rep.problems.append(f"record {n}: issuer signature missing after "
-                                            f"record {first_signed} was signed")
+                    if marker_at is not None:
+                        rep.problems.append(f"record {n}: issuer signature missing (the "
+                                            f"issuer-signing marker is record {marker_at})")
                 seen[cid] = n
                 leaves.append(merkle.leaf_hash(cid))
         prev: Optional[Checkpoint] = None

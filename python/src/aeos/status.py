@@ -5,7 +5,7 @@ import datetime as dt
 from collections import Counter
 from typing import Any, Dict, List
 
-from .log import ActionLog
+from .log import MARKER_KIND, ActionLog
 
 
 # What a check's result means for the reader: (when valid, when invalid).
@@ -52,6 +52,8 @@ def summary(log: ActionLog) -> Dict[str, Any]:
     last_ts = None
     for e in log.entries():
         rec = log.record(e)
+        if rec.get("kind") == MARKER_KIND:
+            continue                            # the trail's own marker, not an actor
         kinds[rec.get("kind")] += 1
         agents.add(rec.get("agent"))
         body = rec.get("body") or {}

@@ -50,7 +50,7 @@ def test_action_record_rejects_wrong_key_and_altered_record(tmp_path):
 def test_append_is_idempotent_and_requires_known_parents(tmp_path):
     log = ActionLog.create(tmp_path / "log")
     rec = make_record("note", AGENT, ts=1)
-    assert log.append(rec).index == log.append(rec).index == 0
+    assert log.append(rec).index == log.append(rec).index == 1       # 0 is the signing marker
     with pytest.raises(KeyError):
         log.append(make_record("note", AGENT, parents=[b"\x01" * 36], ts=2))
 
@@ -62,10 +62,10 @@ def test_reopen_and_verify_clean_log(tmp_path):
     _fill(log, 1, start=4)
     log.checkpoint()
     again = ActionLog.open(tmp_path / "log")
-    assert len(again) == 5
+    assert len(again) == 6                      # five records and the signing marker
     rep = again.verify()
     assert rep.ok, rep.problems
-    assert (rep.records, rep.checkpoints) == (5, 2)
+    assert (rep.records, rep.checkpoints) == (6, 2)
 
 
 def test_verify_detects_edited_deleted_and_reordered_records(tmp_path):
@@ -89,11 +89,11 @@ def test_verify_detects_edited_deleted_and_reordered_records(tmp_path):
     from aeos.canon import cid_of_bytes, cid_str, dag_cbor
     from aeos.log import b64, to_view
     raw = dag_cbor(rec)
-    forged = json.dumps({"i": 5, "cid": cid_str(cid_of_bytes(raw)), "cbor": b64(raw),
+    forged = json.dumps({"i": 6, "cid": cid_str(cid_of_bytes(raw)), "cbor": b64(raw),
                          "view": to_view(rec)})
-    check(lines[:5] + [forged], "root does not match")
+    check(lines[:6] + [forged], "root does not match")
     # delete a record
-    check(lines[:5], "covers more records")
+    check(lines[:6], "covers more records")
     # reorder records
     check([lines[1], lines[0]] + lines[2:], "out of sequence")
 

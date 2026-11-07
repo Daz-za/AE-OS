@@ -116,6 +116,9 @@ impl Checkpoint {
 pub const ACTION_RECORD_TYPE: &str = "aeos-action-record/v1";
 pub const LEGACY_RECEIPT_TYPE: &str = "aeos-receipt/v0";
 
+/// The first signed append to a trail first appends a record of this kind, itself signed.
+pub const MARKER_KIND: &str = "x-issuer-signing";
+
 /// The issuer signs the binary CID of each action record under this context, which is
 /// separate from the checkpoint's.
 pub const STATEMENT_CONTEXT: &[u8] = b"aeos-action-record/statement/v1\n";
@@ -322,7 +325,7 @@ pub fn verify_log(files: &LogFiles, public_key: &[u8]) -> VerifyReport {
 
     let mut leaves: Vec<Hash> = Vec::new();
     let mut seen: HashSet<Vec<u8>> = HashSet::new();
-    let mut first_signed: Option<usize> = None;
+    let mut marker_at: Option<usize> = None;
     for (n, line) in lines(files.records).enumerate() {
         rep.records += 1;
         let parsed = (|| -> Result<_, String> {
@@ -369,6 +372,19 @@ pub fn verify_log(files: &LogFiles, public_key: &[u8]) -> VerifyReport {
                 }
             }
         }
+        if marker_at.is_none() && rec.get("kind") == Some(&Value::Text(MARKER_KIND.into())) {
+            // From the marker on, every record must carry a valid issuer signature.
+            marker_at = Some(n);
+            let names_trail_key = matches!(
+                rec.get("body").and_then(|b| b.get("key_id")),
+                Some(Value::Text(k)) if *k == key_id(public_key)
+            );
+            if !names_trail_key {
+                rep.problems.push(format!(
+                    "record {n}: the issuer-signing marker names a different key than the trail's"
+                ));
+            }
+        }
         if present(d.get("sig")) {
             let good = d.get("key_id").and_then(Json::as_str) == Some(key_id(public_key).as_str())
                 && d.get("sig")
@@ -383,18 +399,15 @@ pub fn verify_log(files: &LogFiles, public_key: &[u8]) -> VerifyReport {
                 rep.problems
                     .push(format!("record {n}: issuer signature does not verify"));
             }
-            first_signed.get_or_insert(n);
         } else {
-            // Signing is monotonic: an unsigned record after a signed one means a signature
-            // was stripped, or a writer that could not sign wrote.
             if present(d.get("key_id")) {
                 rep.problems.push(format!(
                     "record {n}: issuer key id present without a signature"
                 ));
             }
-            if let Some(m) = first_signed {
+            if let Some(m) = marker_at {
                 rep.problems.push(format!(
-                    "record {n}: issuer signature missing after record {m} was signed"
+                    "record {n}: issuer signature missing (the issuer-signing marker is record {m})"
                 ));
             }
         }

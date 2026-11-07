@@ -45,7 +45,7 @@ def test_status_and_plain_language_results(tmp_path, capsys):
     capsys.readouterr()
     assert main(["status", str(tmp_path / "d" / "log")]) == 0
     text = capsys.readouterr().out
-    assert "6 records" in text and "Every record is covered" in text
+    assert "7 records" in text and "Every record is covered" in text
     s = status.summary(ActionLog.open(tmp_path / "d" / "log", read_only=True))
     assert s["tool_calls"] == 1 and s["checkpoints"] == 2
     assert main(["verify", str(tmp_path / "d" / "tampered-copy")]) == 1

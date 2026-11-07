@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from . import books
 from .canon import cid_parse, cid_str
 from .delegation import money
-from .log import ActionLog
+from .log import MARKER_KIND, ActionLog
 
 # Which check made a decision, in the reader's words.
 CHECKS = {
@@ -70,6 +70,8 @@ def agents(log: ActionLog) -> Dict[str, Any]:
     calls: Dict[str, str] = {}                  # call fingerprint -> the agent that made it
     for e in log.entries():
         rec = log.record(e)
+        if rec.get("kind") == MARKER_KIND:
+            continue                            # the trail's own marker, not an actor
         who, kind, body = rec.get("agent") or "", rec.get("kind"), rec.get("body") or {}
         if kind == "policy.decision":
             # Count calls, not decisions: one call can be refused by more than one check,

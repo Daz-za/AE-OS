@@ -39,6 +39,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
+import logging
+
 from cryptography import x509
 
 from . import books, delegation, identity, policy as policy_mod
@@ -48,6 +50,7 @@ from .recorder import Recorder
 
 Tool = Callable[[Dict[str, Any]], Any]
 PROTOCOL_VERSION = "2025-06-18"
+LOG = logging.getLogger("aeos.gateway")
 
 
 class Gateway:
@@ -112,7 +115,14 @@ class Gateway:
                 extra["authorization"] = delegation.POLICY
             if self.policy is not None:
                 extra["policy_sha256"] = self.policy.sha256
-            self.recorder(peer).session(session, subject="mcp", extra=extra)
+            try:
+                self.recorder(peer).session(session, subject="mcp", extra=extra)
+            except OSError as e:
+                self._sessions.pop(session, None)
+                LOG.error("could not write to the audit trail %s (new session): %s: %s",
+                          self.log.log_id, type(e).__name__, e)
+                return _err(rid, -32003, "the session was not opened: it could not be written "
+                                         "to the audit trail"), None
             return _ok(rid, {"protocolVersion": PROTOCOL_VERSION, "capabilities": {"tools": {}},
                              "serverInfo": {"name": "aeos-gateway", "version": "0.1"}}), session
         known = self._sessions.get(session or "")
@@ -130,42 +140,76 @@ class Gateway:
         rec = self.recorder(peer)
         call_id = str(rid)
         at = now_ms()
-        cap = self._authorize(peer, name, args, token, at) \
-            if self.authority_key is not None else None
-        entry, refusal = rec.call(name, call_id=call_id, session_id=session, arguments=args,
-                                  on_behalf_of=cap["principal"] if cap else None, ts=at)
-        reserved = cap["envelope"] if cap and cap["allowed"] else None
-        reasons = [f"{peer} may not use {name}"] if refusal else []
-        if cap:                                     # each check's outcome is recorded
-            rec.decision(entry, name, decision="allow" if cap["allowed"] else "deny",
-                         policy=delegation.POLICY, body=cap["body"],
-                         on_behalf_of=cap["principal"], ts=at)
-            reasons += cap["body"]["reasons"]
-        if reasons:
-            if reserved is not None:
-                self.budget.release(reserved, cap["body"]["amount"])
-            return _refused(rid, "; ".join(reasons)), session
-        obo = cap["principal"] if cap else None
-        if self.policy is not None:
-            stop = self._apply_policy(rec, entry, rid, peer, name, args, approval, obo, at)
-            if stop is not None:
+        cap, reserved, obo = None, None, None
+        try:
+            cap = self._authorize(peer, name, args, token, at) \
+                if self.authority_key is not None else None
+            entry, refusal = rec.call(name, call_id=call_id, session_id=session, arguments=args,
+                                      on_behalf_of=cap["principal"] if cap else None, ts=at)
+            reserved = cap["envelope"] if cap and cap["allowed"] else None
+            reasons = [f"{peer} may not use {name}"] if refusal else []
+            if cap:                                     # each check's outcome is recorded
+                rec.decision(entry, name, decision="allow" if cap["allowed"] else "deny",
+                             policy=delegation.POLICY, body=cap["body"],
+                             on_behalf_of=cap["principal"], ts=at)
+                reasons += cap["body"]["reasons"]
+            if reasons:
                 if reserved is not None:
                     self.budget.release(reserved, cap["body"]["amount"])
-                return stop, session
+                return _refused(rid, "; ".join(reasons)), session
+            obo = cap["principal"] if cap else None
+            if self.policy is not None:
+                stop = self._apply_policy(rec, entry, rid, peer, name, args, approval, obo, at)
+                if stop is not None:
+                    if reserved is not None:
+                        self.budget.release(reserved, cap["body"]["amount"])
+                    return stop, session
+        except OSError as e:     # the call's record (or its decision) could not be written
+            # Nothing has run: the tool is only called once its call and decisions are on record.
+            if reserved is not None:
+                self.budget.release(reserved, cap["body"]["amount"])
+            elif cap and cap["allowed"]:
+                self.budget.release(cap["envelope"], cap["body"]["amount"])
+            return self._not_recorded(rid, session, e, ran=False), session
         tool = self.tools[name]
         try:                                        # the books also need the call's record
             out = tool(args, entry) if getattr(tool, "takes_call", False) else tool(args)
         except Exception as e:                      # the tool's failure is the agent's answer
             if reserved is not None:                  # a call that did not run spends nothing
                 self.budget.release(reserved, cap["body"]["amount"])
-            rec.result(call_id, session_id=session, error={"message": str(e)}, on_behalf_of=obo)
+            try:
+                rec.result(call_id, session_id=session, error={"message": str(e)},
+                           on_behalf_of=obo)
+            except OSError as write_error:
+                return self._not_recorded(rid, session, write_error, ran=True), session
             if isinstance(e, books.Refused):
                 return _refused(rid, str(e)), session
             return _ok(rid, {"isError": True, "content": [{"type": "text", "text": str(e)}]}), \
                 session
-        rec.result(call_id, session_id=session, result=out, on_behalf_of=obo)
+        try:
+            rec.result(call_id, session_id=session, result=out, on_behalf_of=obo)
+        except OSError as e:
+            # The tool has run and its answer cannot be written down. The call and its
+            # decisions are already on record, so the trail shows a call with no result.
+            return self._not_recorded(rid, session, e, ran=True), session
         return _ok(rid, {"content": [{"type": "text", "text": json.dumps(out)}],
                          "structuredContent": out}), session
+
+    def _not_recorded(self, rid: Any, session: Optional[str], error: OSError, *,
+                      ran: bool) -> Dict[str, Any]:
+        """Tell the agent a record could not be written, and log it. Never stay silent."""
+        LOG.error("could not write to the audit trail %s (session %s): %s: %s", self.log.log_id,
+                  session, type(error).__name__, error)
+        if ran:
+            text = ("The action ran, but its result could not be written to the audit trail, "
+                    "so it is not fully on record. Do not repeat it; ask an operator to "
+                    "check the audit trail.")
+        else:
+            text = ("The action was not performed: it could not be written to the audit "
+                    "trail first, and nothing is done unrecorded. Try again once an operator "
+                    "has fixed the audit trail.")
+        return _ok(rid, {"isError": True, "content": [{"type": "text", "text": text}],
+                         "structuredContent": {"recorded": False, "ran": ran}})
 
     def _apply_policy(self, rec: Recorder, call: Any, rid: Any, peer: str, tool: str,
                       args: Dict[str, Any], approval: Optional[str], obo: Optional[str],
@@ -281,7 +325,7 @@ class Gateway:
                 pass
 
             def setup(self) -> None:
-                _handshake_or_refuse(self.request)
+                _handshake_or_refuse(self.request, self.client_address)
                 super().setup()
 
             def do_POST(self) -> None:
@@ -300,9 +344,17 @@ class Gateway:
                 if self.path != "/mcp" or not isinstance(msg, dict):
                     self._send(404, _err(None, -32600, "invalid request"), None)
                     return
-                reply, session = gw.handle(peer, fp, self.headers.get("Mcp-Session-Id"), msg,
-                                           self.headers.get("AEOS-Capability"),
-                                           self.headers.get("AEOS-Approval"))
+                try:
+                    reply, session = gw.handle(peer, fp, self.headers.get("Mcp-Session-Id"),
+                                               msg, self.headers.get("AEOS-Capability"),
+                                               self.headers.get("AEOS-Approval"))
+                except Exception:
+                    # Never a silent drop: log it, and tell the agent not to count on a record.
+                    LOG.exception("unexpected error handling a request from %s", peer)
+                    self._send(500, _err(msg.get("id"), -32603,
+                                         "internal error: the request may not have been "
+                                         "recorded in the audit trail"), None)
+                    return
                 self._send(200, reply, session)
 
             def do_DELETE(self) -> None:
@@ -342,17 +394,26 @@ class Gateway:
             self.server.server_close()
 
 
+class HandshakeRefused(OSError):
+    """A client's TLS handshake failed and it has been told why. Not an error of ours."""
+
+
 class _MutualTlsServer(ThreadingHTTPServer):
     daemon_threads = True
 
     def handle_error(self, request: Any, client_address: Any) -> None:
-        # A refused handshake is an expected outcome, and the client has been told why.
-        if isinstance(sys.exc_info()[1], (ssl.SSLError, OSError)):
+        exc = sys.exc_info()[1]
+        if isinstance(exc, HandshakeRefused):
+            return                      # already logged, with the reason, when it happened
+        if isinstance(exc, (ConnectionResetError, BrokenPipeError, ConnectionAbortedError)):
+            LOG.info("client %s went away mid-request: %s", client_address[0], type(exc).__name__)
             return
-        super().handle_error(request, client_address)
+        # Anything else is ours to know about: an unsuppressed, structured error.
+        LOG.error("unhandled error serving %s: %s: %s", client_address[0],
+                  type(exc).__name__, exc, exc_info=exc)
 
 
-def _handshake_or_refuse(sock: ssl.SSLSocket) -> None:
+def _handshake_or_refuse(sock: ssl.SSLSocket, client_address: Any) -> None:
     """Complete the TLS handshake, or send the refusal and close without a reset.
 
     With TLS 1.3 the client finishes its handshake before the server checks the client
@@ -364,7 +425,11 @@ def _handshake_or_refuse(sock: ssl.SSLSocket) -> None:
     sock.settimeout(10)
     try:
         sock.do_handshake()
-    except (ssl.SSLError, OSError):
+    except (ssl.SSLError, OSError) as failure:
+        reason = (getattr(failure, "reason", None) or type(failure).__name__)
+        if isinstance(failure, ssl.SSLCertVerificationError) and failure.verify_message:
+            reason += f" ({failure.verify_message})"      # OpenSSL's standard wording only
+        LOG.info("refused a TLS handshake from %s: %s", client_address[0], reason)
         try:
             sock.shutdown(socket.SHUT_WR)
             sock.settimeout(0.2)
@@ -376,7 +441,7 @@ def _handshake_or_refuse(sock: ssl.SSLSocket) -> None:
             pass
         finally:
             sock.close()
-        raise
+        raise HandshakeRefused(reason) from failure
 
 
 def _ok(rid: Any, result: Dict[str, Any]) -> Dict[str, Any]:

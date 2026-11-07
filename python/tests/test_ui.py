@@ -53,10 +53,10 @@ def test_functions_need_the_access_code_and_a_local_host_name(page):
 def test_example_records_action_record_and_checks(page, tmp_path):
     status, body = page("/api/demo", {})
     state = json.loads(body)
-    assert status == 200 and state["status"]["records"] == 6 and "1. An audit trail" in state["story"]
+    assert status == 200 and state["status"]["records"] == 7 and "1. An audit trail" in state["story"]
 
     records = json.loads(page("/api/records")[1])
-    assert records["total"] == 6 and records["records"][2]["record"]["kind"] == "policy.decision"
+    assert records["total"] == 7 and records["records"][3]["record"]["kind"] == "policy.decision"
 
     receipt = json.loads(page("/api/action-record?index=4")[1])
     assert json.loads(page("/api/receipt?index=4")[1]) == receipt  # version 0 path still served

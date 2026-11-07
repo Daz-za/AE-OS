@@ -36,11 +36,11 @@ def test_hook_session(tmp_path):
     denied = json.loads(outputs[3][1])["hookSpecificOutput"]
     assert denied["permissionDecision"] == "deny"
     log = ActionLog.open(tmp_path / "log")
-    assert [log.record(e)["kind"] for e in log.entries()] == [
+    assert [log.record(e)["kind"] for e in log.entries()[1:]] == [      # [0] is the marker
         "session.start", "tool.call", "tool.result", "tool.call", "policy.decision",
         "session.end"]
     assert log.record(log.entries()[-1])["body"]["unanswered_calls"] == 1
-    assert log.verify().ok and log.checkpoints()[-1].size == 6
+    assert log.verify().ok and log.checkpoints()[-1].size == 7
 
 
 def test_hook_refuses_tool_when_it_cannot_record(tmp_path):

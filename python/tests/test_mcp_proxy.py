@@ -39,7 +39,8 @@ def test_proxy_records_calls_and_results(tmp_path):
     assert [r["id"] for r in replies] == [0, 1, 2]
     recs = [log.record(e) for e in log.entries()]
     kinds = [r["kind"] for r in recs]
-    assert kinds[0] == "session.start" and kinds[-1] == "session.end"
+    assert kinds[0] == "x-issuer-signing" and kinds[1] == "session.start"
+    assert kinds[-1] == "session.end"
     assert kinds.count("tool.call") == 2 and kinds.count("tool.result") == 2
     call = next(r for r in recs if r["kind"] == "tool.call" and r["subject"] == "invoice.pay")
     assert call["body"]["args_sha256"] == json_digest({"invoice": "INV-1", "amount": 1250})
