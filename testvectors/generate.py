@@ -1,13 +1,16 @@
-"""Generate the shared AE-OS Receipts test vectors.
+"""Generate the shared AE-OS action record test vectors.
 
-Every implementation of the format checks itself against receipts-v0.json. The expected
+Every implementation of the format checks itself against action-records-v1.json. The expected
 results (CIDs, roots, proofs, and the problems a verifier reports) come from the Python
 reference implementation, so a second implementation that passes agrees with it.
 
 Run from the repository root after `pip install -e python`:
 
-    python testvectors/generate.py            # rewrite receipts-v0.json
+    python testvectors/generate.py            # rewrite action-records-v1.json
     python testvectors/generate.py --check    # fail if the file is out of date
+
+testvectors/receipts-v0.json is the version 0 file, frozen: it is never regenerated, and
+every implementation must keep verifying it (it holds `aeos-receipt/v0` documents).
 
 The log is signed with a public test key derived from a fixed phrase below. Never use it
 for a real log.
@@ -24,14 +27,15 @@ from pathlib import Path
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from aeos import ReceiptLog, make_record, verify_consistency_doc, verify_receipt
+from aeos import ActionLog, make_record, verify_consistency_doc, verify_action_record
 from aeos import merkle
 from aeos.canon import (Link, canonical_json, cid_of_bytes, cid_str, dag_cbor,
                         decode_dag_cbor, json_digest)
 from aeos.log import b64, to_view
 
-OUT = Path(__file__).with_name("receipts-v0.json")
+OUT = Path(__file__).with_name("action-records-v1.json")
 
+# The seed phrase is unchanged from version 0 so both vector files share one test key.
 TEST_SEED = hashlib.sha256(b"aeos-receipts public test key; never use for a real log").digest()
 LOG_ID = "urn:example:acme:ap"
 AGENT = "spiffe://acme.example/agent/accounts-payable/7f3a"
@@ -131,7 +135,7 @@ def merkle_cases(max_size=12):
 
 
 # --------------------------------------------------------------------------------------
-# A small log, its receipts and consistency proofs, and tampered copies
+# A small log, its action records and consistency proofs, and tampered copies
 # --------------------------------------------------------------------------------------
 
 def build_log(work: Path):
@@ -140,7 +144,7 @@ def build_log(work: Path):
     key_path.write_bytes(key.private_bytes(serialization.Encoding.PEM,
                                            serialization.PrivateFormat.PKCS8,
                                            serialization.NoEncryption()))
-    log = ReceiptLog.create(work / "log", log_id=LOG_ID, key_path=key_path)
+    log = ActionLog.create(work / "log", log_id=LOG_ID, key_path=key_path)
     log.meta["created"] = T0
     (work / "log" / "log.json").write_text(json.dumps(log.meta, indent=2) + "\n")
 
@@ -183,7 +187,7 @@ def log_files(path: Path):
             "checkpoints": (path / "checkpoints.jsonl").read_text()}
 
 
-def tampered_logs(log: ReceiptLog, work: Path):
+def tampered_logs(log: ActionLog, work: Path):
     base = log_files(log.path)
     recs = base["records"].splitlines(keepends=True)
     cps = base["checkpoints"].splitlines(keepends=True)
@@ -226,7 +230,7 @@ def tampered_logs(log: ReceiptLog, work: Path):
         (d / "log.json").write_text(base["log_json"])
         (d / "records.jsonl").write_text("".join(r))
         (d / "checkpoints.jsonl").write_text("".join(c))
-        rep = ReceiptLog.open(d, read_only=True).verify()
+        rep = ActionLog.open(d, read_only=True).verify()
         out.append({"name": name, "records": "".join(r), "checkpoints": "".join(c),
                     "expect": {"records": rep.records, "checkpoints": rep.checkpoints,
                                "problems": rep.problems}})
@@ -238,8 +242,8 @@ def base64_decode(s):
     return base64.b64decode(s, validate=True)
 
 
-def receipt_cases(log, first, second, entry, other_pub):
-    good = log.receipt(entry, second)
+def action_record_cases(log, first, second, entry, other_pub):
+    good = log.action_record(entry, second)
 
     def variant(fn):
         doc = json.loads(json.dumps(good))
@@ -261,9 +265,10 @@ def receipt_cases(log, first, second, entry, other_pub):
 
     pub = log.public_key
     cases = [
-        ("valid receipt, latest checkpoint", good, pub),
-        ("valid receipt, first record", log.receipt(log.entries()[0], first), pub),
-        ("valid receipt, last record of first checkpoint", log.receipt(log.entries()[2], first), pub),
+        ("valid action record, latest checkpoint", good, pub),
+        ("valid action record, first record", log.action_record(log.entries()[0], first), pub),
+        ("valid action record, last record of first checkpoint",
+         log.action_record(log.entries()[2], first), pub),
         ("wrong public key", good, other_pub),
         ("record changed", variant(change_record), pub),
         ("record and CID changed together", variant(change_both), pub),
@@ -278,10 +283,10 @@ def receipt_cases(log, first, second, entry, other_pub):
          variant(lambda d: d["checkpoint"].update(size=d["checkpoint"]["size"] + 1)), pub),
         ("checkpoint key id changed",
          variant(lambda d: d["checkpoint"].update(key_id="0" * 16)), pub),
-        ("wrong document type", variant(lambda d: d.update(type="aeos-receipt/v9")), pub),
+        ("wrong document type", variant(lambda d: d.update(type="aeos-action-record/v9")), pub),
     ]
-    return [{"name": n, "public_key": h(k), "receipt": doc,
-             "expect_problems": verify_receipt(doc, k)} for n, doc, k in cases]
+    return [{"name": n, "public_key": h(k), "action_record": doc,
+             "expect_problems": verify_action_record(doc, k)} for n, doc, k in cases]
 
 
 def consistency_cases(log, first, second, other_pub):
@@ -318,8 +323,8 @@ def generate():
             serialization.Encoding.Raw, serialization.PublicFormat.Raw)
         log_json, logs = tampered_logs(log, work)
         return {
-            "format": "aeos-receipts/test-vectors/v0",
-            "about": "Shared test vectors for AE-OS Receipts v0 (spec/receipts-v0.md). "
+            "format": "aeos-action-records/test-vectors/v1",
+            "about": "Shared test vectors for AE-OS action records v1 (spec/action-records-v1.md). "
                      "Generated by testvectors/generate.py from the Python reference "
                      "implementation. The test key is public; never use it for a real log.",
             "test_key": {"ed25519_seed": h(TEST_SEED), "public_key": h(log.public_key),
@@ -328,7 +333,7 @@ def generate():
             "cbor_reject": cbor_rejects(),
             "canonical_json": json_cases(),
             "merkle": merkle_cases(),
-            "receipts": receipt_cases(log, first, second, result, other_pub),
+            "action_records": action_record_cases(log, first, second, result, other_pub),
             "consistency": consistency_cases(log, first, second, other_pub),
             "logs": {"public_key": h(log.public_key), "log_json": log_json, "cases": logs},
         }
