@@ -18,5 +18,5 @@ def __getattr__(name: str):
     # Deprecated version 0 names, kept for one release (see log.py).
     from . import log
     if name in log.DEPRECATED_ALIASES:
-        return getattr(log, name)
+        return log.deprecated_alias(name, stacklevel=2)
     raise AttributeError(f"module 'aeos' has no attribute {name!r}")

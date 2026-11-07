@@ -1,12 +1,13 @@
 import datetime as dt
 import json
 import shutil
+import time
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from aeos import ActionLog, audit, fulldemo, identity, witness
-from aeos.gateway import AgentClient, Gateway
+from aeos.gateway import AgentClient, CertificateExpiredError, Gateway, handshake_error
 from aeos.log import make_record
 
 DOMAIN = "acme.example"
@@ -91,6 +92,59 @@ def test_gateway_refuses_expired_and_foreign_certificates(gateway, td):
         client(rogue.issue("spiffe://rogue.example/agent/ap").write(tmp / "svid", "r"),
                both).initialize()
     assert len(log) == 0
+
+
+def test_the_gateway_itself_refuses_an_expired_certificate_with_the_real_reason(gateway, td):
+    # The client's own check is off here, as for software that replays a stolen certificate.
+    # The reason must arrive every time: the alert used to race the request and lose, leaving
+    # "connection reset by peer".
+    log, client, tmp = gateway
+    old = td.issue(AGENT, not_before=dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1)
+                   ).write(tmp / "svid", "old")
+    port = client("ap").port
+    for _ in range(25):
+        replay = AgentClient(port, old, tmp / "bundle.pem", gateway_id=GATEWAY,
+                             trust_domain=DOMAIN, check_own_certificate=False)
+        with pytest.raises(OSError) as refused:
+            replay.initialize()
+        assert handshake_error(refused.value) == "the certificate has expired"
+    assert len(log) == 0
+
+
+def test_a_certificate_that_expires_mid_session_is_refused_locally_with_a_plain_reason(
+        gateway, td):
+    log, client, tmp = gateway
+    short = td.issue(AGENT, ttl=dt.timedelta(minutes=5)).write(tmp / "svid", "short")
+    now = [dt.datetime.now(dt.timezone.utc)]
+    port = client("ap").port
+    c = AgentClient(port, short, tmp / "bundle.pem", gateway_id=GATEWAY, trust_domain=DOMAIN,
+                    clock=lambda: now[0])
+    c.initialize()
+    assert c.call("erp.pay", {"amount": 1})["result"]["structuredContent"] == {"paid": 1}
+    before = len(log)
+    now[0] += dt.timedelta(minutes=6)
+    with pytest.raises(CertificateExpiredError, match="your certificate has expired") as e:
+        c.call("erp.pay", {"amount": 1})
+    assert handshake_error(e.value) == "your certificate has expired"
+    assert len(log) == before                      # nothing was sent
+
+
+def test_a_reset_after_the_handshake_is_described_plainly():
+    for err in (ConnectionResetError(), BrokenPipeError()):
+        assert handshake_error(err) == (
+            "the gateway closed the connection; it may have refused this certificate")
+
+
+def test_an_accepted_first_call_adds_no_waiting(gateway):
+    log, client, tmp = gateway
+    client("ap").initialize()                       # warm up imports and caches
+    took = []
+    for _ in range(7):
+        c = client("ap")
+        t0 = time.perf_counter()
+        c.initialize()
+        took.append(time.perf_counter() - t0)
+    assert sorted(took)[len(took) // 2] < 0.05, took
 
 
 def _log_with(tmp_path, name, n):

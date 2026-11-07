@@ -28,6 +28,7 @@ class Recorder:
     def __init__(self, log: ActionLog, *, agent: str, on_behalf_of: Optional[str] = None,
                  allow_tools: Optional[Iterable[str]] = None, store_content: bool = False,
                  checkpoint_every: int = 0) -> None:
+        log.require_signing()
         self.log = log
         self.agent = agent
         self.obo = on_behalf_of

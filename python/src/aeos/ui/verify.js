@@ -316,7 +316,66 @@ export async function keyId(publicKey) {
   return hex(await sha256(publicKey)).slice(0, 16);
 }
 
+// Edwards25519, for the strict checks in verifySignature. Verifiers disagree about keys and
+// signature points of small order (some forgeries then verify for every message) and about
+// scalars that are not reduced. AE-OS refuses all of them, in every verifier, so each one
+// gives the same answer.
+const P = 2n ** 255n - 19n;
+const L = 2n ** 252n + 27742317777372353535851937790883648493n;
+const D = (-121665n * modPow(121666n, P - 2n, P)) % P + P;
+
+function modPow(base, exp, mod) {
+  let result = 1n;
+  base %= mod;
+  for (; exp > 0n; exp >>= 1n) {
+    if (exp & 1n) result = (result * base) % mod;
+    base = (base * base) % mod;
+  }
+  return result;
+}
+
+function leInt(bytes) {
+  let n = 0n;
+  for (let i = bytes.length - 1; i >= 0; i--) n = (n << 8n) | BigInt(bytes[i]);
+  return n;
+}
+
+function decodePoint(enc) {
+  if (enc.length !== 32) return null;
+  const n = leInt(enc);
+  const y = (n & ((1n << 255n) - 1n)) % P;
+  const sign = n >> 255n;
+  const u = (y * y - 1n + P) % P;
+  const v = (D * y * y + 1n) % P;
+  const x2 = (u * modPow(v, P - 2n, P)) % P;
+  let x = modPow(x2, (P + 3n) / 8n, P);
+  if ((x * x - x2 + P) % P !== 0n) x = (x * modPow(2n, (P - 1n) / 4n, P)) % P;
+  if ((x * x - x2 + P) % P !== 0n) return null;
+  if ((x & 1n) !== sign) x = (P - x) % P;
+  return [x, y];
+}
+
+function addPoints([x1, y1], [x2, y2]) {
+  const t = (D * x1 * x2 * y1 * y2) % P;
+  return [
+    (((x1 * y2 + x2 * y1) % P) * modPow((1n + t) % P, P - 2n, P)) % P,
+    (((y1 * y2 + x1 * x2) % P) * modPow((1n - t + P) % P, P - 2n, P)) % P,
+  ];
+}
+
+/** True if the encoded point has an order dividing 8 (including the identity). */
+export function isSmallOrder(enc) {
+  let point = decodePoint(enc);
+  if (point === null) return false;
+  for (let i = 0; i < 3; i++) point = addPoints(point, point);
+  return point[0] === 0n && point[1] === 1n;
+}
+
 export async function verifySignature(publicKey, signature, message) {
+  if (signature.length !== 64 || isSmallOrder(publicKey) || isSmallOrder(signature.slice(0, 32))
+      || leInt(signature.slice(32)) >= L) {
+    return false;
+  }
   try {
     const key = await subtle.importKey("raw", publicKey, { name: "Ed25519" }, false, ["verify"]);
     return await subtle.verify("Ed25519", key, signature, message);
@@ -457,5 +516,6 @@ export function parsePublicKey(input) {
   }
   const key = unhex(h);
   if (key.length !== 32) throw new Error("a public key is 64 hexadecimal characters");
+  if (isSmallOrder(key)) throw new Error("this is not a usable public key: it is a point of small order, which makes forged signatures possible");
   return key;
 }

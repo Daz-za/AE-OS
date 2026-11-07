@@ -222,10 +222,29 @@ def tampered_logs(log: ActionLog, work: Path):
         sig[0] ^= 1
         d["sig"] = b64(bytes(sig))
 
+    def empty_sig(d):
+        d["sig"] = ""
+
+    def sig_not_text(d):
+        d["sig"] = 5
+
+    def no_sigs():
+        out = []
+        for line in recs:
+            d = json.loads(line)
+            drop_sig(d)
+            out.append(json.dumps(d, separators=(",", ":")) + "\n")
+        return out
+
+    last = len(recs) - 1
     cases = {
         "untouched log": (recs, cps),
         "issuer signature altered": (edit_record(1, bad_record_sig), cps),
         "issuer signature removed from one record": (edit_record(1, drop_sig), cps),
+        "issuer signature removed from the last record": (edit_record(last, drop_sig), cps),
+        "issuer key id kept, signature emptied": (edit_record(1, empty_sig), cps),
+        "issuer signature is not text": (edit_record(1, sig_not_text), cps),
+        "no issuer signatures at all (version 0 trail)": (no_sigs(), cps),
         "readable view edited": (edit_record(2, view_edit), cps),
         "record rewritten with a new CID": (edit_record(2, bytes_edit), cps),
         "record removed": (recs[:1] + recs[2:], cps),
@@ -254,6 +273,88 @@ def base64_decode(s):
     return base64.b64decode(s, validate=True)
 
 
+IDENTITY = bytes.fromhex("01" + "00" * 31)                  # the point of order 1
+ORDER_8 = bytes.fromhex("c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a")
+
+
+def weak_key_cases(log, entry, second):
+    """Signatures a lax Ed25519 verifier accepts and a strict one must not.
+
+    A small-order public key makes some signatures verify for every message (with the
+    identity as key, R = identity and S = 0 does), so a verifier that accepts them accepts
+    forged checkpoints and issuer signatures. Every verifier here refuses small-order keys,
+    small-order R and unreduced S, and the lax OpenSSL check is asserted to accept the
+    forgeries so the vectors keep meaning something.
+    """
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    from aeos import keys
+    from aeos.canon import cid_of_bytes as _cid
+    from aeos.log import Checkpoint, statement_message
+
+    base = log.action_record(entry, second)
+
+    def lax_accepts(pub, sig, message):
+        try:
+            Ed25519PublicKey.from_public_bytes(pub).verify(sig, message)
+            return True
+        except Exception:
+            return False
+
+    def doc_with(pub, checkpoint_sig, statement_sig, ts=None):
+        d = json.loads(json.dumps(base))
+        d["checkpoint"]["key_id"] = keys.key_id(pub)
+        if ts is not None:
+            d["checkpoint"]["ts"] = ts
+        d["checkpoint"]["sig"] = b64(checkpoint_sig)
+        if statement_sig is None:
+            d.pop("statement_signature")
+        else:
+            d["statement_signature"] = {"key_id": keys.key_id(pub), "sig": b64(statement_sig)}
+        return d
+
+    def checkpoint_message(d):
+        return Checkpoint.from_json(d["checkpoint"]).message()
+
+    out = []
+    # 1. identity as the key: R = identity, S = 0 verifies for every message.
+    forged = bytes(IDENTITY) + bytes(32)
+    d = doc_with(IDENTITY, forged, forged)
+    assert lax_accepts(IDENTITY, forged, checkpoint_message(d))
+    assert lax_accepts(IDENTITY, forged, statement_message(_cid(base64_decode(d["record"]))))
+    out.append(("small-order public key with a forged signature", d, IDENTITY))
+
+    # 2. an order-8 key with R = identity and S = 0 verifies when 8 divides the hash k, so
+    #    search the checkpoint time for a message where it does.
+    for ts in range(base["checkpoint"]["ts"], base["checkpoint"]["ts"] + 1000):
+        d = doc_with(ORDER_8, forged, None, ts)
+        msg = checkpoint_message(d)
+        k = int.from_bytes(hashlib.sha512(IDENTITY + ORDER_8 + msg).digest(), "little") % keys._L
+        if k % 8 == 0:
+            break
+    assert lax_accepts(ORDER_8, forged, checkpoint_message(d))
+    out.append(("small-order key and small-order R, forged checkpoint", d, ORDER_8))
+
+    # 3. an honest key but a small-order R.
+    d = json.loads(json.dumps(base))
+    sig = bytes(IDENTITY) + base64_decode(base["checkpoint"]["sig"])[32:]
+    d["checkpoint"]["sig"] = b64(sig)
+    out.append(("small-order R in the checkpoint signature", d, log.public_key))
+
+    # 4. honest signatures with S + L: the same point, but S is not reduced.
+    def unreduced(sig_b64):
+        raw = base64_decode(sig_b64)
+        s = int.from_bytes(raw[32:], "little") + keys._L
+        return raw[:32] + s.to_bytes(32, "little")
+
+    d = json.loads(json.dumps(base))
+    d["checkpoint"]["sig"] = b64(unreduced(base["checkpoint"]["sig"]))
+    out.append(("checkpoint signature with S not reduced", d, log.public_key))
+    d = json.loads(json.dumps(base))
+    d["statement_signature"]["sig"] = b64(unreduced(base["statement_signature"]["sig"]))
+    out.append(("issuer signature with S not reduced", d, log.public_key))
+    return out
+
+
 def action_record_cases(log, first, second, entry, other_pub):
     good = log.action_record(entry, second)
 
@@ -276,6 +377,7 @@ def action_record_cases(log, first, second, entry, other_pub):
         doc["record"] = b64(raw + b"\x00")
 
     pub = log.public_key
+    weak_cases = weak_key_cases(log, entry, second)
     other_key = Ed25519PrivateKey.from_private_bytes(hashlib.sha256(b"another public test key").digest())
     other_sig = other_key.sign(statement_message(entry.cid))
 
@@ -317,7 +419,11 @@ def action_record_cases(log, first, second, entry, other_pub):
         ("issuer signature names another key id",
          variant(lambda d: d["statement_signature"].update(key_id="0" * 16)), pub),
         ("issuer signature malformed", variant(lambda d: d.update(statement_signature="x")), pub),
-    ]
+        ("issuer signature not text", variant(lambda d: d["statement_signature"].update(sig=5)),
+         pub),
+        ("document type under its later name",
+         variant(lambda d: d.update(type="aeos-action-record/v1")), pub),
+    ] + weak_cases
     out = []
     for n, doc, k in cases:
         problems, state = verify_action_record_detail(doc, k)

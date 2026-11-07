@@ -49,13 +49,42 @@ test("Merkle inclusion and consistency proofs verify", async () => {
 
 test("action records report the same problems as the reference implementation", async () => {
   for (const c of V.action_records) {
-    const key = parsePublicKey(c.public_key);
+    const key = unhex(c.public_key);    // raw bytes: the verifier itself refuses weak keys
     const { problems, signature } = await verifyActionRecordDetail(c.action_record, key);
     assert.deepEqual(problems, c.expect_problems, c.name);
     assert.equal(signature, c.expect_signature, c.name);
     assert.deepEqual(await verifyActionRecord(c.action_record, key), c.expect_problems, c.name);
   }
   assert.equal(actionRecordContent(V.action_records[0].action_record).v, 0);
+});
+
+test("small-order public keys are refused at load and by the verifier", async () => {
+  for (const c of V.action_records.filter((x) => /^small-order (public )?key/.test(x.name))) {
+    assert.throws(() => parsePublicKey(c.public_key), /small order/);
+    assert.ok((await verifyActionRecord(c.action_record, unhex(c.public_key))).length > 0);
+  }
+});
+
+test("the verifier deployed at ae-os.org still accepts what writers emit now", async () => {
+  // A copy of https://ae-os.org/verify/verify.js, which only knows `aeos-receipt/v0`. Writers
+  // keep that document type, with the issuer signature as an extra field, until it is updated.
+  const live = await import("../../../tests/fixtures/ae-os-org-verify.js");
+  let checked = 0;
+  for (const c of V.action_records.filter((x) => x.expect_problems.length === 0)) {
+    const doc = c.action_record;
+    if (doc.type === "aeos-receipt/v0") {
+      assert.deepEqual(await live.verifyReceipt(doc, live.parsePublicKey(c.public_key)), [],
+        c.name);
+      checked++;
+    } else {
+      // the later type name is not read there yet, which is why writers do not use it yet
+      assert.equal(doc.type, "aeos-action-record/v1");
+      assert.deepEqual(await live.verifyReceipt(doc, live.parsePublicKey(c.public_key)),
+        ["not an aeos-receipt/v0 document"]);
+    }
+  }
+  assert.ok(checked >= 4);
+  assert.ok(V.action_records.some((c) => c.action_record.statement_signature));
 });
 
 test("version 0 receipts in the frozen vectors still verify, and the old names still work", async () => {

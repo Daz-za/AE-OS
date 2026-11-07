@@ -25,7 +25,8 @@ def test_action_record_round_trip(tmp_path):
     entries = _fill(log, 5)
     receipt = log.action_record(entries[2])
     assert verify_action_record(receipt, log.public_key) == []
-    assert receipt["type"] == "aeos-action-record/v1"
+    # writers keep the version 0 document type for now; readers accept both
+    assert receipt["type"] == "aeos-receipt/v0" and "statement_signature" in receipt
     # same action record survives JSON serialisation
     assert verify_action_record(json.loads(json.dumps(receipt)), log.public_key) == []
 

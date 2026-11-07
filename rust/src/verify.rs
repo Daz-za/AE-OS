@@ -9,7 +9,7 @@ use crate::canon::{
 use crate::merkle::{self, Hash};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, VerifyingKey};
 use serde_json::Value as Json;
 use std::collections::HashSet;
 
@@ -31,7 +31,8 @@ pub fn verify_signature(public_key: &[u8], signature: &[u8], message: &[u8]) -> 
     let Ok(sig) = Signature::from_slice(signature) else {
         return false;
     };
-    vk.verify(message, &sig).is_ok()
+    // Strict: small-order keys and R, and unreduced S, fail, as in the Python and JS verifiers.
+    vk.verify_strict(message, &sig).is_ok()
 }
 
 fn unb64(s: &str) -> Result<Vec<u8>, String> {
@@ -220,6 +221,11 @@ pub fn verify_action_record_detail(doc: &Json, public_key: &[u8]) -> (Vec<String
     (problems, state)
 }
 
+/// A field is there unless absent, null or empty, the same rule as in every verifier.
+fn present(v: Option<&Json>) -> bool {
+    !matches!(v, None | Some(Json::Null)) && v != Some(&Json::String(String::new()))
+}
+
 fn statement_message(cid: &[u8]) -> Vec<u8> {
     let mut m = STATEMENT_CONTEXT.to_vec();
     m.extend_from_slice(cid);
@@ -316,6 +322,7 @@ pub fn verify_log(files: &LogFiles, public_key: &[u8]) -> VerifyReport {
 
     let mut leaves: Vec<Hash> = Vec::new();
     let mut seen: HashSet<Vec<u8>> = HashSet::new();
+    let mut first_signed: Option<usize> = None;
     for (n, line) in lines(files.records).enumerate() {
         rep.records += 1;
         let parsed = (|| -> Result<_, String> {
@@ -362,7 +369,7 @@ pub fn verify_log(files: &LogFiles, public_key: &[u8]) -> VerifyReport {
                 }
             }
         }
-        if d.get("sig").is_some_and(|s| !s.is_null() && s != "") {
+        if present(d.get("sig")) {
             let good = d.get("key_id").and_then(Json::as_str) == Some(key_id(public_key).as_str())
                 && d.get("sig")
                     .and_then(Json::as_str)
@@ -375,6 +382,20 @@ pub fn verify_log(files: &LogFiles, public_key: &[u8]) -> VerifyReport {
             } else {
                 rep.problems
                     .push(format!("record {n}: issuer signature does not verify"));
+            }
+            first_signed.get_or_insert(n);
+        } else {
+            // Signing is monotonic: an unsigned record after a signed one means a signature
+            // was stripped, or a writer that could not sign wrote.
+            if present(d.get("key_id")) {
+                rep.problems.push(format!(
+                    "record {n}: issuer key id present without a signature"
+                ));
+            }
+            if let Some(m) = first_signed {
+                rep.problems.push(format!(
+                    "record {n}: issuer signature missing after record {m} was signed"
+                ));
             }
         }
         seen.insert(cid.clone());

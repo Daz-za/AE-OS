@@ -36,8 +36,12 @@ except ImportError:  # pragma: no cover
 FORMAT = "aeos-receipts/v0"
 CHECKPOINT_CONTEXT = b"aeos-receipts/checkpoint/v0\n"
 
+# Readers accept both document types. Writers keep emitting the version 0 type, with the
+# issuer signature as an extra field, until deployed verifiers (ae-os.org/verify) read
+# `aeos-action-record/v1`; WRITTEN_TYPE then moves to it in a later release.
 ACTION_RECORD_TYPE = "aeos-action-record/v1"
 LEGACY_RECEIPT_TYPE = "aeos-receipt/v0"
+WRITTEN_TYPE = LEGACY_RECEIPT_TYPE
 
 # The issuer signs the binary CID of each action record under this context, which is
 # separate from the checkpoint's. Records without a signature are "log-signed only".
@@ -128,6 +132,12 @@ class Checkpoint:
     def verify(self, public_key: bytes) -> bool:
         return (self.key_id == keys.key_id(public_key)
                 and keys.verify(public_key, self.sig, self.message()))
+
+
+def _present(value: Any) -> bool:
+    """A field counts as there unless it is absent, null or empty (the same in every
+    verifier); anything else present must then be a valid base64 signature."""
+    return value is not None and value != ""
 
 
 def statement_message(cid: bytes) -> bytes:
@@ -244,6 +254,7 @@ class ActionLog:
         self.log_id: str = meta["log_id"]
         self.public_key = bytes.fromhex(meta["public_key"])
         self._key = key
+        self.key_source: Optional[Path] = None     # where open() looked for the key
         self._entries: List[Entry] = []
         self._leaves: List[bytes] = []
         self._by_cid: Dict[bytes, int] = {}
@@ -283,6 +294,8 @@ class ActionLog:
                 if keys.public_bytes(key).hex() != meta["public_key"]:
                     raise ValueError("signing key does not match the log's public key")
         log = cls(path, meta, key)
+        if not read_only:
+            log.key_source = kp
         log._load_new()
         return log
 
@@ -311,7 +324,10 @@ class ActionLog:
                 d = json.loads(line)
                 raw = unb64(d["cbor"])
                 cid = cid_of_bytes(raw)
-                sig = unb64(d["sig"]) if d.get("sig") else None
+                try:
+                    sig = unb64(d["sig"]) if _present(d.get("sig")) else None
+                except (ValueError, TypeError):
+                    sig = None             # reported by verify(); the record itself still loads
                 self._add(Entry(int(d["i"]), cid, raw, sig, d.get("key_id") if sig else None))
 
     def _add(self, e: Entry) -> None:
@@ -329,13 +345,28 @@ class ActionLog:
         """True when the signing key is loaded, so checkpoints can be issued."""
         return self._key is not None
 
-    def append(self, record: Dict[str, Any], content: Optional[Dict[str, Any]] = None
-               ) -> Entry:
-        """Append a record and return its index and CID.
+    def require_signing(self) -> None:
+        """Raise unless the signing key is loaded: a writer that cannot sign must not write."""
+        if self._key is None:
+            where = f"looked for {self.key_source}" if self.key_source else "none was given"
+            raise PermissionError(f"this audit trail cannot sign, so nothing can be written to "
+                                  f"it: no signing key found ({where}). Open it with the key "
+                                  "file (--key).")
+
+    def append(self, record: Dict[str, Any], content: Optional[Dict[str, Any]] = None, *,
+               allow_unsigned: bool = False) -> Entry:
+        """Append a record, signed with the issuer key, and return its index and CID.
+
+        Without the signing key this raises, as `checkpoint()` does: a writer that cannot
+        sign must not write. `allow_unsigned=True` is only for importing existing version 0
+        data, which has no issuer signatures; a trail that holds signed records then reports
+        the unsigned ones that follow as problems (see `verify`).
 
         `content` (optional) is stored beside the log under content/<cid>.json, for
         operators who keep full arguments and results. The record itself holds digests.
         """
+        if not allow_unsigned:
+            self.require_signing()
         raw = dag_cbor(record)
         cid = cid_of_bytes(raw)
         with self._locked():
@@ -365,8 +396,7 @@ class ActionLog:
 
     def checkpoint(self, ts: Optional[int] = None) -> Checkpoint:
         """Sign the current tree head and record it in checkpoints.jsonl."""
-        if self._key is None:
-            raise PermissionError("no signing key loaded for this log")
+        self.require_signing()
         with self._locked():
             cp = Checkpoint(self.log_id, len(self._leaves), merkle.root(self._leaves),
                             now_ms() if ts is None else ts, self.meta["key_id"])
@@ -406,7 +436,7 @@ class ActionLog:
         if checkpoint.size <= e.index:
             raise ValueError("checkpoint does not cover this record")
         proof = merkle.inclusion_proof(e.index, self._leaves[:checkpoint.size])
-        doc = {"type": ACTION_RECORD_TYPE, "log_id": self.log_id, "index": e.index,
+        doc = {"type": WRITTEN_TYPE, "log_id": self.log_id, "index": e.index,
                "cid": cid_str(e.cid), "record": b64(e.raw),
                "inclusion_proof": [h.hex() for h in proof],
                "checkpoint": checkpoint.to_json()}
@@ -417,7 +447,7 @@ class ActionLog:
     def receipt(self, e: Entry, checkpoint: Optional[Checkpoint] = None) -> Dict[str, Any]:
         """Deprecated name of `action_record`, kept for one release."""
         warnings.warn("ActionLog.receipt() is renamed action_record()", DeprecationWarning,
-                      stacklevel=2)
+                      stacklevel=2)       # points at the caller
         return self.action_record(e, checkpoint)
 
     def consistency_proof(self, old_size: int, new_size: int) -> List[bytes]:
@@ -444,6 +474,7 @@ class ActionLog:
         rep = VerifyReport()
         leaves: List[bytes] = []
         seen: Dict[bytes, int] = {}
+        first_signed: Optional[int] = None
         with open(self.path / "records.jsonl", "rb") as f:
             for n, line in enumerate(f):
                 rep.records += 1
@@ -465,17 +496,28 @@ class ActionLog:
                 for p in rec.get("parents", []):
                     if bytes(p) not in seen:
                         rep.problems.append(f"record {n}: parent is missing or later in the log")
-                if d.get("sig"):
+                if _present(d.get("sig")):
                     try:
                         good = (d.get("key_id") == self.meta["key_id"]
                                 and keys.verify(self.public_key, unb64(d["sig"]),
                                                 statement_message(cid)))
-                    except ValueError:
+                    except (ValueError, TypeError):
                         good = False
                     if good:
                         rep.issuer_signed += 1
                     else:
                         rep.problems.append(f"record {n}: issuer signature does not verify")
+                    if first_signed is None:
+                        first_signed = n
+                else:
+                    # Signing is monotonic: once a record is signed, an unsigned one after it
+                    # means a signature was stripped (or a writer that could not sign wrote).
+                    if _present(d.get("key_id")):
+                        rep.problems.append(f"record {n}: issuer key id present without a "
+                                            "signature")
+                    if first_signed is not None:
+                        rep.problems.append(f"record {n}: issuer signature missing after "
+                                            f"record {first_signed} was signed")
                 seen[cid] = n
                 leaves.append(merkle.leaf_hash(cid))
         prev: Optional[Checkpoint] = None
@@ -501,10 +543,15 @@ class ActionLog:
 DEPRECATED_ALIASES = {"ReceiptLog": "ActionLog", "verify_receipt": "verify_action_record"}
 
 
+def deprecated_alias(name: str, *, stacklevel: int) -> Any:
+    """The object a deprecated version 0 name stands for, warning at the caller's line."""
+    new = DEPRECATED_ALIASES[name]
+    warnings.warn(f"aeos.{name} is renamed {new}; the old name is removed after the "
+                  "next release", DeprecationWarning, stacklevel=stacklevel + 1)
+    return globals()[new]
+
+
 def __getattr__(name: str) -> Any:
     if name in DEPRECATED_ALIASES:
-        new = DEPRECATED_ALIASES[name]
-        warnings.warn(f"aeos.{name} is renamed {new}; the old name is removed after the "
-                      "next release", DeprecationWarning, stacklevel=2)
-        return globals()[new]
+        return deprecated_alias(name, stacklevel=2)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

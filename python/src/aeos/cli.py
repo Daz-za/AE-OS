@@ -34,6 +34,7 @@ from typing import List, Optional
 from . import (__version__, audit, demo, fulldemo, hooks, mcp_proxy, report, setup, sink,
                status, ui, workspace)
 from .canon import cid_parse, cid_str
+from .keys import is_small_order
 from .log import (ISSUER_SIGNED, ActionLog, make_record, to_view, verify_action_record,
                   verify_action_record_detail, verify_consistency_doc)
 from .recorder import Recorder
@@ -45,10 +46,13 @@ def _public_key(value: str) -> bytes:
     p = Path(value)
     if p.is_file():
         text = p.read_text().strip()
-        if text.startswith("{"):
-            return bytes.fromhex(json.loads(text)["public_key"])
-        return bytes.fromhex(text)
-    return bytes.fromhex(value)
+        key = bytes.fromhex(json.loads(text)["public_key"] if text.startswith("{") else text)
+    else:
+        key = bytes.fromhex(value)
+    if is_small_order(key):
+        raise SystemExit("aeos: this is not a usable public key: it is a point of small order, "
+                         "which makes forged signatures possible")
+    return key
 
 
 def _write(doc: dict, out: Optional[str]) -> None:
@@ -359,6 +363,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     key = Path(a.key) if getattr(a, "key", None) else None
 
     def recorder() -> Recorder:
+        # raises PermissionError, naming where the key was looked for, if it is missing
         return Recorder(ActionLog.open(Path(a.log), key_path=key), agent=a.agent,
                         on_behalf_of=a.on_behalf_of, allow_tools=a.allow_tool,
                         store_content=a.store_content, checkpoint_every=a.checkpoint_every)
@@ -369,11 +374,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         sys.stderr.write(err)
         return code
     if a.cmd == "ingest":
+        try:
+            rec = recorder()
+        except PermissionError as e:
+            print(f"aeos ingest: {e}", file=sys.stderr)
+            return 2
         f = sys.stdin if a.file == "-" else open(a.file, encoding="utf-8")
-        rec = recorder()
         with f:
             count, problems = sink.ingest(rec, f, a.format)
-        if count and rec.log.can_sign:
+        if count:
             rec.log.checkpoint()
         for p in problems:
             print(f"skipped {p}", file=sys.stderr)
@@ -385,6 +394,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             os.environ.get("AEOS_SINK_TOKEN")
         try:
             sink.serve(recorder(), host or "127.0.0.1", int(port), token or None)
+        except PermissionError as e:
+            print(f"aeos sink: {e}", file=sys.stderr)
+            return 2
         except ValueError as e:
             print(f"aeos sink: {e}", file=sys.stderr)
             return 2
@@ -392,6 +404,12 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     read_only = a.cmd in ("verify", "show", "consistency")
     log = ActionLog.open(Path(a.log), key_path=key, read_only=read_only)
+    if a.cmd in ("append", "checkpoint", "mcp-proxy"):
+        try:
+            log.require_signing()
+        except PermissionError as e:
+            print(f"aeos {a.cmd}: {e}", file=sys.stderr)
+            return 2
 
     if a.cmd == "append":
         body = json.loads(a.body)
@@ -410,7 +428,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"No record {a.ref} in this log ({len(log)} records). "
                   f"See the record numbers with: aeos show {a.log}", file=sys.stderr)
             return 1
-        _write(log.action_record(e), a.out)
+        try:
+            doc = log.action_record(e)
+        except PermissionError as err:
+            print(f"aeos {a.cmd}: no signed checkpoint covers record {a.ref} yet, and "
+                  f"signing one needs the key. {err}", file=sys.stderr)
+            return 2
+        _write(doc, a.out)
         return 0
     if a.cmd == "consistency":
         cps = log.checkpoints()

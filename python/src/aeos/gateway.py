@@ -29,11 +29,17 @@ import base64
 import http.client
 import json
 import secrets
+import socket
 import ssl
+import sys
 import threading
+import time
+import datetime as dt
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Optional, Tuple
+
+from cryptography import x509
 
 from . import books, delegation, identity, policy as policy_mod
 from .canon import canonical_json, cid_str, json_digest
@@ -67,6 +73,7 @@ class Gateway:
                  policy: Optional[policy_mod.Policy] = None,
                  policy_facts: Optional[Callable[[str, Dict[str, Any]], Dict[str, Any]]] = None
                  ) -> None:
+        log.require_signing()
         self.log, self.tools, self.trust_domain = log, tools, trust_domain
         self.permissions = {k: set(v) for k, v in permissions.items()}
         self.obo = on_behalf_of or {}
@@ -273,6 +280,10 @@ class Gateway:
             def log_message(self, fmt: str, *args: Any) -> None:
                 pass
 
+            def setup(self) -> None:
+                _handshake_or_refuse(self.request)
+                super().setup()
+
             def do_POST(self) -> None:
                 try:
                     peer, fp = identity.peer_identity(self.connection,
@@ -316,8 +327,11 @@ class Gateway:
                 self.end_headers()
                 self.wfile.write(data)
 
-        server = ThreadingHTTPServer((host, port), Handler)
-        server.socket = self.context.wrap_socket(server.socket, server_side=True)
+        server = _MutualTlsServer((host, port), Handler)
+        # The handshake runs in the handler's own thread, not in the accept loop, so one slow
+        # or refused client cannot hold up the others.
+        server.socket = self.context.wrap_socket(server.socket, server_side=True,
+                                                 do_handshake_on_connect=False)
         self.server = server
         threading.Thread(target=server.serve_forever, daemon=True).start()
         return server.server_address[1]
@@ -326,6 +340,43 @@ class Gateway:
         if self.server:
             self.server.shutdown()
             self.server.server_close()
+
+
+class _MutualTlsServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        # A refused handshake is an expected outcome, and the client has been told why.
+        if isinstance(sys.exc_info()[1], (ssl.SSLError, OSError)):
+            return
+        super().handle_error(request, client_address)
+
+
+def _handshake_or_refuse(sock: ssl.SSLSocket) -> None:
+    """Complete the TLS handshake, or send the refusal and close without a reset.
+
+    With TLS 1.3 the client finishes its handshake before the server checks the client
+    certificate, so the "certificate expired" alert reaches a client that may already be
+    sending its request. Closing with that request unread would reset the connection and
+    destroy the alert. So on failure the server half-closes, reads what the client sent for
+    a moment, and only then closes.
+    """
+    sock.settimeout(10)
+    try:
+        sock.do_handshake()
+    except (ssl.SSLError, OSError):
+        try:
+            sock.shutdown(socket.SHUT_WR)
+            sock.settimeout(0.2)
+            deadline = time.monotonic() + 0.5
+            while time.monotonic() < deadline:
+                if not socket.socket.recv(sock, 65536):    # raw bytes: the TLS state is dead
+                    break
+        except OSError:
+            pass
+        finally:
+            sock.close()
+        raise
 
 
 def _ok(rid: Any, result: Dict[str, Any]) -> Dict[str, Any]:
@@ -340,13 +391,24 @@ def _err(rid: Any, code: int, message: str) -> Dict[str, Any]:
     return {"jsonrpc": "2.0", "id": rid, "error": {"code": code, "message": message}}
 
 
+class CertificateExpiredError(OSError):
+    """The client's own certificate is past its end date; nothing was sent."""
+
+
 class AgentClient:
     """An agent's MCP client: connects with its SVID and checks the gateway's SPIFFE ID."""
 
     def __init__(self, port: int, svid_files: Tuple[Path, Path], bundle_file: Path, *,
                  gateway_id: str, trust_domain: str, host: str = "127.0.0.1",
-                 token: Optional[bytes] = None) -> None:
+                 token: Optional[bytes] = None, check_own_certificate: bool = True,
+                 clock: Callable[[], dt.datetime] = identity._now) -> None:
         self.host, self.port = host, port
+        self.clock = clock
+        # Refuse locally, with a plain reason, once our own certificate has expired. The
+        # gateway checks it as well; a test that wants to see the gateway do so turns this off.
+        self._own_not_after = (
+            x509.load_pem_x509_certificate(Path(svid_files[0]).read_bytes()).not_valid_after_utc
+            if check_own_certificate else None)
         self.context = identity.client_context(svid_files, bundle_file)
         self.gateway_id, self.trust_domain = gateway_id, trust_domain
         self.session: Optional[str] = None
@@ -355,14 +417,14 @@ class AgentClient:
 
     def _post(self, method: str, params: Optional[Dict[str, Any]] = None,
               http_method: str = "POST", approval: Optional[bytes] = None) -> Dict[str, Any]:
+        if self._own_not_after is not None and self.clock() > self._own_not_after:
+            raise CertificateExpiredError("your certificate has expired")
         conn = http.client.HTTPSConnection(self.host, self.port, context=self.context,
                                            timeout=10)
         try:
             conn.connect()
             identity.peer_identity(conn.sock, trust_domain=self.trust_domain,
                                    expect=self.gateway_id)
-            if self.session is None:
-                self._read_early_alert(conn.sock)
             self._next += 1
             body = json.dumps({"jsonrpc": "2.0", "id": self._next, "method": method,
                                "params": params or {}})
@@ -381,25 +443,6 @@ class AgentClient:
             return json.loads(data or b"{}")
         finally:
             conn.close()
-
-    @staticmethod
-    def _read_early_alert(sock: ssl.SSLSocket) -> None:
-        """Surface a refusal of our certificate before sending anything.
-
-        With TLS 1.3 the client finishes its handshake before the gateway checks the client
-        certificate, and the gateway's alert ("certificate expired") arrives afterwards. If the
-        request were sent first, the gateway's close would reset the connection and the alert
-        would be lost, leaving only "connection reset". A refused connection reports its reason
-        within milliseconds; an accepted one stays silent until it gets a request.
-        """
-        previous = sock.gettimeout()
-        sock.settimeout(0.1)
-        try:
-            sock.recv(1)             # TLS 1.3 session tickets are consumed here; no data comes
-        except (TimeoutError, ssl.SSLWantReadError):
-            pass
-        finally:
-            sock.settimeout(previous)
 
     def initialize(self) -> Dict[str, Any]:
         return self._post("initialize", {"protocolVersion": PROTOCOL_VERSION,
@@ -427,6 +470,10 @@ PLAIN_TLS_ERRORS = {
 
 def handshake_error(e: BaseException) -> str:
     """A plain description of why a TLS connection was refused."""
+    if isinstance(e, CertificateExpiredError):
+        return str(e)
+    if isinstance(e, (ConnectionResetError, BrokenPipeError)):
+        return "the gateway closed the connection; it may have refused this certificate"
     if isinstance(e, ssl.SSLCertVerificationError):
         return e.verify_message or str(e)
     if isinstance(e, ssl.SSLError):

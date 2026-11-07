@@ -66,23 +66,27 @@ def test_v0_receipt_document_made_today_verifies(tmp_path):
 
 
 def test_deprecated_python_names_still_import_and_work(tmp_path):
-    with pytest.warns(DeprecationWarning, match="ActionLog"):
+    with pytest.warns(DeprecationWarning, match="ActionLog") as seen:
         old_log_class = aeos.ReceiptLog
     assert old_log_class is ActionLog
-    with pytest.warns(DeprecationWarning, match="verify_action_record"):
+    assert seen[0].filename == __file__           # the warning points at the caller
+    with pytest.warns(DeprecationWarning, match="verify_action_record") as seen:
         old_verify = log_module.verify_receipt
     assert old_verify is verify_action_record
-    with pytest.warns(DeprecationWarning):
+    assert seen[0].filename == __file__
+    with pytest.warns(DeprecationWarning) as seen:
         from aeos.log import ReceiptLog  # noqa: F401  (how downstream code imports it)
+    assert seen[0].filename == __file__
     with pytest.raises(AttributeError):
         aeos.NoSuchName  # noqa: B018
 
 
 def test_deprecated_receipt_method_returns_the_action_record(tmp_path):
     log, e = _small_log(tmp_path)
-    with pytest.warns(DeprecationWarning, match="action_record"):
+    with pytest.warns(DeprecationWarning, match="action_record") as seen:
         doc = log.receipt(e)
-    assert doc == log.action_record(e)
+    assert seen[0].filename == __file__
+    assert doc == log.action_record(e) and doc["type"] == "aeos-receipt/v0"
     cp = log.checkpoints()[-1]
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)

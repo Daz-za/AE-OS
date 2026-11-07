@@ -144,8 +144,14 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
                 },
                 &key,
             );
+            let unsigned = rep.records - rep.issuer_signed.min(rep.records);
+            let note = if unsigned > 0 && rep.issuer_signed != rep.records {
+                format!(", {unsigned} of them log-signed only (no issuer signature)")
+            } else {
+                String::new()
+            };
             let ok = format!(
-                "{} records and {} signed checkpoints in {}",
+                "{} records{note} and {} signed checkpoints in {}",
                 rep.records, rep.checkpoints, rep.log_id
             );
             Ok(report(&rep.problems, ok))

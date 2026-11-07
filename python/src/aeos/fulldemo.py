@@ -365,8 +365,10 @@ def run(folder: Path, out: Callable[[str], None] = print) -> int:
         reasons = []
         for files, b in ((stale, bundle), (outsider, private / "outsider-bundle.pem")):
             try:
-                AgentClient(port, files, b, gateway_id=GATEWAY,
-                            trust_domain=DOMAIN).initialize()
+                # check_own_certificate=False: a replayed certificate comes from software
+                # that does not check itself, so the gateway has to be the one to refuse it
+                AgentClient(port, files, b, gateway_id=GATEWAY, trust_domain=DOMAIN,
+                            check_own_certificate=False).initialize()
                 reasons.append("accepted")
             except OSError as e:
                 reasons.append(handshake_error(e))

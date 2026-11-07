@@ -3,6 +3,8 @@ import base64
 import json
 from pathlib import Path
 
+import pytest
+
 from aeos import ActionLog, keys, make_record, verify_action_record_detail
 from aeos.canon import cid_of_bytes, dag_cbor
 from aeos.cli import main
@@ -81,14 +83,136 @@ def test_records_without_a_signature_are_log_signed_only_not_failures(tmp_path):
         ([], LOG_SIGNED_ONLY)
 
 
-def test_log_written_without_the_key_has_unsigned_records_that_still_verify(tmp_path):
-    log = _log(tmp_path, 2)
-    reader = ActionLog.open(tmp_path / "log")           # signing.key is found: signs
-    reader._key = None                                   # a writer without the key
-    reader.append(make_record("note", AGENT, body={"i": 99}))
+def test_a_writer_without_the_key_refuses_to_append(tmp_path):
+    _log(tmp_path, 2)
+    keyless = ActionLog.open(tmp_path / "log", key_path=tmp_path / "missing.key")
+    with pytest.raises(PermissionError, match="missing.key"):
+        keyless.append(make_record("note", AGENT, body={"i": 99}))
+    read_only = ActionLog.open(tmp_path / "log", read_only=True)
+    with pytest.raises(PermissionError):
+        read_only.append(make_record("note", AGENT, body={"i": 99}))
+    assert len(ActionLog.open(tmp_path / "log", read_only=True)) == 2
+
+
+def test_importing_version_0_data_may_append_unsigned_explicitly(tmp_path):
+    keyless = ActionLog.create(tmp_path / "log")
+    keyless._key = None
+    for i in range(2):
+        keyless.append(make_record("note", AGENT, body={"i": i}), allow_unsigned=True)
     rep = ActionLog.open(tmp_path / "log", read_only=True).verify()
-    assert rep.ok and rep.records == 3 and rep.issuer_signed == 2
-    assert log.public_key
+    assert rep.ok and rep.records == 2 and rep.issuer_signed == 0
+
+
+def test_recorder_and_gateway_refuse_a_log_that_cannot_sign(tmp_path):
+    from aeos.recorder import Recorder
+    _log(tmp_path, 1)
+    keyless = ActionLog.open(tmp_path / "log", key_path=tmp_path / "missing.key")
+    with pytest.raises(PermissionError, match="missing.key"):
+        Recorder(keyless, agent=AGENT)
+    from aeos.gateway import Gateway
+    with pytest.raises(PermissionError, match="missing.key"):
+        Gateway(keyless, {}, permissions={}, trust_domain="acme.example",
+                svid_files=(tmp_path / "a", tmp_path / "b"), bundle_file=tmp_path / "c")
+
+
+def test_every_cli_path_that_writes_names_where_it_looked_for_the_key(tmp_path, capsys):
+    log = _log(tmp_path, 1)
+    missing = str(tmp_path / "nowhere.key")
+    events = tmp_path / "events.jsonl"
+    events.write_text("")
+    for argv in (["append", str(log.path), "--agent", AGENT, "--kind", "note", "--key", missing],
+                 ["checkpoint", str(log.path), "--key", missing],
+                 ["ingest", str(log.path), str(events), "--agent", AGENT, "--key", missing],
+                 ["mcp-proxy", str(log.path), "--agent", AGENT, "--key", missing, "--", "true"]):
+        assert main(argv) == 2, argv
+        assert "nowhere.key" in capsys.readouterr().err, argv
+    assert len(ActionLog.open(log.path, read_only=True)) == 1
+
+
+def test_a_hook_without_the_key_refuses_the_tool_call_and_says_why(tmp_path):
+    from aeos import hooks
+    from aeos.recorder import Recorder
+    log = _log(tmp_path, 1)
+
+    def recorder():
+        return Recorder(ActionLog.open(log.path, key_path=tmp_path / "gone.key"), agent=AGENT)
+
+    code, out, err = hooks.run(recorder, json.dumps(
+        {"hook_event_name": "PreToolUse", "tool_name": "t", "tool_use_id": "1",
+         "session_id": "s"}))
+    assert "deny" in out and "gone.key" in err
+    assert len(ActionLog.open(log.path, read_only=True)) == 1
+
+
+def test_stripping_a_signature_is_a_problem_even_when_the_rest_still_holds(tmp_path):
+    _log(tmp_path, 4)
+    path = tmp_path / "log" / "records.jsonl"
+    lines = path.read_text().splitlines()
+    for i, expected in ((3, "record 3: issuer signature missing after record 0 was signed"),
+                        (1, "record 1: issuer signature missing after record 0 was signed")):
+        stripped = json.loads(lines[i])
+        del stripped["sig"], stripped["key_id"]
+        edited = list(lines)
+        edited[i] = json.dumps(stripped, separators=(",", ":"))
+        path.write_text("\n".join(edited) + "\n")
+        problems = ActionLog.open(tmp_path / "log", read_only=True).verify().problems
+        assert problems == [expected]
+    # a key id left behind without its signature is a problem of its own
+    kept = json.loads(lines[2])
+    kept["sig"] = ""
+    edited = list(lines)
+    edited[2] = json.dumps(kept, separators=(",", ":"))
+    path.write_text("\n".join(edited) + "\n")
+    assert ActionLog.open(tmp_path / "log", read_only=True).verify().problems == [
+        "record 2: issuer key id present without a signature",
+        "record 2: issuer signature missing after record 0 was signed"]
+    path.write_text("\n".join(lines) + "\n")
+    assert ActionLog.open(tmp_path / "log", read_only=True).verify().ok
+
+
+def test_a_trail_with_no_signatures_at_all_is_a_version_0_trail_not_a_failure(tmp_path):
+    _log(tmp_path, 3)
+    path = tmp_path / "log" / "records.jsonl"
+    out = []
+    for line in path.read_text().splitlines():
+        d = json.loads(line)
+        del d["sig"], d["key_id"]
+        out.append(json.dumps(d, separators=(",", ":")))
+    path.write_text("\n".join(out) + "\n")
+    rep = ActionLog.open(tmp_path / "log", read_only=True).verify()
+    assert rep.ok and rep.issuer_signed == 0
+
+
+def test_a_malformed_signature_is_reported_never_a_crash(tmp_path):
+    _log(tmp_path, 3)
+    path = tmp_path / "log" / "records.jsonl"
+    lines = path.read_text().splitlines()
+    for bad in (5, ["x"], {"a": 1}, True, "not base64!"):
+        d = json.loads(lines[1])
+        d["sig"] = bad
+        edited = list(lines)
+        edited[1] = json.dumps(d, separators=(",", ":"))
+        path.write_text("\n".join(edited) + "\n")
+        opened = ActionLog.open(tmp_path / "log", read_only=True)      # still opens
+        assert opened.verify().problems == ["record 1: issuer signature does not verify"], bad
+
+
+def test_weak_keys_and_signatures_are_refused(tmp_path):
+    identity_key = bytes.fromhex("01" + "00" * 31)
+    forged = identity_key + bytes(32)                 # verifies for every message if lax
+    assert keys.is_small_order(identity_key) and not keys.verify(identity_key, forged, b"x")
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    Ed25519PublicKey.from_public_bytes(identity_key).verify(forged, b"x")   # OpenSSL is lax
+    real = keys.generate_key(tmp_path / "k.key")
+    pub = keys.public_bytes(real)
+    assert not keys.is_small_order(pub) and keys.verify(pub, real.sign(b"m"), b"m")
+    sig = real.sign(b"m")
+    unreduced = sig[:32] + (int.from_bytes(sig[32:], "little") + keys._L).to_bytes(32, "little")
+    assert not keys.verify(pub, unreduced, b"m")
+    assert not keys.verify(pub, identity_key + sig[32:], b"m")
+    with pytest.raises(SystemExit, match="small order"):
+        from aeos.cli import _public_key
+        _public_key(identity_key.hex())
 
 
 def test_audit_trail_verification_flags_an_altered_issuer_signature(tmp_path):
