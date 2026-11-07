@@ -1,6 +1,6 @@
 # AE-OS identity, delegation, policy, books, gateway and witnesses (draft)
 
-Status: draft, implemented in the Python package (`identity.py`, `delegation.py`, `policy.py`, `books.py`, `gateway.py`, `witness.py`, `audit.py`). The receipt log format is defined in [receipts-v0.md](receipts-v0.md), and the formats here sit beside it. Formats may change before they are frozen with test vectors.
+Status: draft, implemented in the Python package (`identity.py`, `delegation.py`, `policy.py`, `books.py`, `gateway.py`, `witness.py`, `audit.py`). The audit trail format is defined in [action-records-v1.md](action-records-v1.md), and the formats here sit beside it. Formats may change before they are frozen with test vectors.
 
 ## 1. Workload identity
 
@@ -143,7 +143,7 @@ A cosignature is an Ed25519 signature over:
 "aeos-receipts/cosignature/v0\n" || DAG-CBOR({"checkpoint": <checkpoint message>, "time": <ms>})
 ```
 
-where `<checkpoint message>` is the exact byte string the log signed (receipts-v0 section 3). The design follows [C2SP tlog-cosignature](https://github.com/C2SP/C2SP/blob/main/tlog-cosignature.md), adapted to v0 checkpoints. Cosignatures are stored one per line in `cosignatures.jsonl` in the log folder:
+where `<checkpoint message>` is the exact byte string the log signed (action-records-v1 section 3). The design follows [C2SP tlog-cosignature](https://github.com/C2SP/C2SP/blob/main/tlog-cosignature.md), adapted to v0 checkpoints. Cosignatures are stored one per line in `cosignatures.jsonl` in the log folder:
 
 ```json
 {"witness":"external-auditor","key_id":"<16 hex>","log":"<log id>","size":14,"time":1792405000000,"sig":"<base64>"}
@@ -167,7 +167,7 @@ A checkpoint is final for an auditor when at least k of the n witnesses the audi
 
 `svids/` holds the certificate chains (no keys) the agents presented. `key-hierarchy.json`, when present, lists each key and certificate (role, algorithm, holder, what it signs, issuer, validity and fingerprint); it is informational and the audit does not rely on it. `witnesses.json` holds `{"required": k, "keys": {name: hex public key}}`. The last four entries are present when the gateway required tokens: the authorization service's public key (hex), `principals.json` as `{SPIFFE ID: hex Ed25519 public key}`, `intents/<CID>.json` as `{"cid", "envelope", "signature"}`, and `tokens/<sha256 hex>.biscuit` holding each token presented. The audit:
 
-- recomputes the log (receipts-v0 section 6);
+- recomputes the audit trail (action-records-v1 section 6);
 - for each `session.start` with `svid_sha256`, checks the matching chain against the trust bundle at the record's time, and checks that its SPIFFE ID is the record's `agent`;
 - replays each `aeos-capability/v0` decision from the token, the record's `agent`, `subject`, `ts` and `amount`, the envelope and the principal's key, with the budget spent by earlier allowed calls that ran, and checks it gives the recorded decision and, for an allowed call, that the record's `obo` is the envelope's principal;
 - checks that, in sessions with `authorization`, every call with a successful `tool.result` has an allow decision;

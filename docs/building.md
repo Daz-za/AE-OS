@@ -30,7 +30,7 @@ Follow the numbered views in order. Each view says what to do there and has a bu
 
 | View | What it does |
 |---|---|
-| **1 Set up** | Builds the company the way the architecture does, one step at a time: the organization, the certificate authority, the people, the agents, their SPIFFE identities, the receipt log, the books, the rules, the systems, the delegated authority and the gateway. Each step has optional settings, a link to the part of the site it matches, and shows what it made, such as the certificate chain or each agent's capability token |
+| **1 Set up** | Builds the company the way the architecture does, one step at a time: the organization, the certificate authority, the people, the agents, their SPIFFE identities, the audit trail, the books, the rules, the systems, the delegated authority and the gateway. Each step has optional settings, a link to the part of the site it matches, and shows what it made, such as the certificate chain or each agent's capability token |
 | **2 Run the close** | The film's chapters as real calls through the gateway: the instruction, the agents at work, the controls, the intercompany match, the CFO's decision and the audit. It uses Kestrel Foods' agents and books, so a workspace started from Acme uses **Try a call** instead |
 | **3 Try a call** | Act as any agent, send any tool call and see each check |
 | **Architecture** | The layers from [How it works](https://ae-os.org/how-it-works), drawn from your workspace: people, agents, the controls, the systems and the ledger. Each call travels through the parts it touches, and each check lights green, amber or red. A live record lists everything the log receives, including calls from the command line or your own agents |
@@ -52,7 +52,7 @@ Each call shows the checks it passed or failed, in the order the gateway ran the
 | Approval | When the rules sent it to a person, did an approver sign an approval of this exact call? |
 | Tool | Did the tool run? |
 | Books of account | For a journal entry: does it balance, use known accounts, and fall in an open month? |
-| Receipt | Was the call recorded, and has a signed checkpoint sealed it? |
+| Action record | Was the call recorded, and has a signed checkpoint sealed it? |
 
 The **Decisions**, **Books**, **Agents** and **Records** views show what happened, and each refused or escalated call has a **Show each check** button. **Audit** runs the auditor's check of the whole folder.
 
@@ -187,7 +187,7 @@ Leaving the `with` block seals the log. The parts are also usable on their own: 
 | Path | What it is |
 |---|---|
 | `workspace.json` | Your description of the organization |
-| `log/` | The receipt log: every record and signed checkpoint |
+| `log/` | The audit trail: every action record and signed checkpoint |
 | `evidence.json`, `trust/`, `svids/`, `intents/`, `tokens/`, `policies/`, `witnesses.json` | What an auditor needs, besides the log |
 | `private/` | Private keys, the connection files and the example ERP's payments. Never give this folder to anyone |
 

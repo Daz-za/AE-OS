@@ -1,10 +1,10 @@
 # aeos
 
-The Python library, command line and browser workspace for [AE-OS](https://ae-os.org). It runs the AE-OS architecture on one computer: a certificate authority and SPIFFE identities for agents, delegated authority signed by a person, an MCP gateway, rules compiled to WebAssembly, books of account, witnesses, and a signed, independently verifiable receipt for every agent action.
+The Python library, command line and browser workspace for [AE-OS](https://ae-os.org). It runs the AE-OS architecture on one computer: a certificate authority and SPIFFE identities for agents, delegated authority signed by a person, an MCP gateway, rules compiled to WebAssembly, books of account, witnesses, and an independently verifiable action record for every agent action, sealed in a signed audit trail.
 
-Every action an agent takes becomes a record in an append-only Merkle log (the structure Certificate Transparency uses). The log operator signs checkpoints. Anyone holding the log's public key can then check, offline, that a given record is in the log and that the log has only grown since a checkpoint they kept earlier.
+Every action an agent takes becomes an action record in an append-only Merkle audit trail (the structure Certificate Transparency uses). The trail's operator signs checkpoints. Anyone holding the trail's public key can then verify, offline, that a given action record is in the trail and that the trail has only grown since a checkpoint they kept earlier. The proof that one action record is in the trail is its Receipt, in the sense of the IETF SCITT standard.
 
-The format is specified in [spec/receipts-v0.md](../spec/receipts-v0.md).
+The format is specified in [spec/action-records-v1.md](../spec/action-records-v1.md). It is SCITT-aligned, not yet SCITT-conformant: that spec lists exactly what matches and what does not. Code, files and commands from before the rename (`ReceiptLog`, `verify_receipt`, `aeos receipt`, `aeos verify-receipt`, `aeos-receipt/v0` files) keep working; the Python names are deprecated aliases for one release.
 
 ## Install
 
@@ -23,7 +23,7 @@ Requires Python 3.10 or later, with the `cryptography`, `biscuit-python` and `wa
 
 ## Work in the web browser
 
-`aeos ui` opens a page on this computer. It starts with the workspace described above: **Start the guided tour** sets up Kestrel Foods and leads you through it, and **Continue** followed by a folder's name reopens a workspace you made earlier in the same folder. Under Other ways in, the page runs the short and narrated examples and opens any log or evidence folder. For an open folder it lists the records, agents, decisions and books, downloads receipts, signs checkpoints, checks receipts from other logs and runs the audit.
+`aeos ui` opens a page on this computer. It starts with the workspace described above: **Start the guided tour** sets up Kestrel Foods and leads you through it, and **Continue** followed by a folder's name reopens a workspace you made earlier in the same folder. Under Other ways in, the page runs the short and narrated examples and opens any log or evidence folder. For an open folder it lists the records, agents, decisions and books, downloads action records, signs checkpoints, verifies action records from other audit trails and runs the audit.
 
 The page is served only at 127.0.0.1, this computer's own address. Each launch makes a new access code that is part of the address; other websites open in the same browser do not have it and cannot use the page. `aeos ui FOLDER` opens a workspace, log or evidence folder directly, and `--no-browser` prints the address so you can paste it into a browser on this computer.
 
@@ -44,7 +44,7 @@ Configure the agent to launch the `aeos mcp-proxy ...` command in place of the s
 
 ## Record tool calls from a gateway or agent framework
 
-The MCP proxy above works when the agent talks to its MCP servers over stdio. For agents that reach their tools through a gateway, or agents built on a framework, the log can receive tool-call reports instead. Each report becomes the same `tool.call` and `tool.result` records the proxy writes, so receipts and verification work the same way.
+The MCP proxy above works when the agent talks to its MCP servers over stdio. For agents that reach their tools through a gateway, or agents built on a framework, the log can receive tool-call reports instead. Each report becomes the same `tool.call` and `tool.result` records the proxy writes, so action records and verification work the same way.
 
 ### From a gateway, over HTTP
 
@@ -112,10 +112,10 @@ Agents built with the Claude Agent SDK for Python can call the same handler from
 
 ```python
 from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
-from aeos import ReceiptLog, Recorder
+from aeos import ActionLog, Recorder
 from aeos.hooks import handle
 
-rec = Recorder(ReceiptLog.open("ap-log"), agent="spiffe://acme.example/agent/ap",
+rec = Recorder(ActionLog.open("ap-log"), agent="spiffe://acme.example/agent/ap",
                allow_tools=["mcp__erp__invoice_read"])
 
 async def record(input_data, tool_use_id, context):
@@ -134,9 +134,9 @@ Call `rec.end(session_id)` when the agent's session finishes, to record it and s
 `Recorder` is the piece all of the above share, and any framework's callbacks can use it:
 
 ```python
-from aeos import ReceiptLog, Recorder
+from aeos import ActionLog, Recorder
 
-rec = Recorder(ReceiptLog.open("ap-log"), agent="spiffe://acme.example/agent/ap")
+rec = Recorder(ActionLog.open("ap-log"), agent="spiffe://acme.example/agent/ap")
 call, refusal = rec.call("erp.invoice.pay", call_id="c-17", session_id="s-4",
                          arguments={"invoice": "INV-20417"})
 rec.result("c-17", session_id="s-4", result={"payment": "PAY-88"})
@@ -147,8 +147,8 @@ rec.end("s-4")
 
 ```
 aeos checkpoint ./ap-log                     # sign the current state
-aeos receipt ./ap-log 12 -o receipt.json     # receipt for record 12
-aeos verify-receipt receipt.json --public-key <hex>
+aeos action-record ./ap-log 12 -o record-12.json   # action record 12, with its Receipt
+aeos verify-action-record record-12.json --public-key <hex>
 
 aeos consistency ./ap-log --old 40 -o proof.json   # log grew from size 40 without edits
 aeos verify-consistency proof.json --public-key <hex>
@@ -159,18 +159,18 @@ aeos show ./ap-log                           # readable records
 
 The auditor should get the public key from a source they trust, not from the files under review.
 
-Auditors who prefer not to install anything can check receipts and growth proofs in a web browser at [ae-os.org/verify](https://ae-os.org/verify). The page runs [`verify.js`](src/aeos/ui/verify.js), the same checker that `aeos ui` uses; the files stay on the auditor's device. Its tests (`node --test src/aeos/ui/verify.test.mjs`) run the shared test vectors.
+Auditors who prefer not to install anything can verify action records and growth proofs in a web browser at [ae-os.org/verify](https://ae-os.org/verify). The page runs [`verify.js`](src/aeos/ui/verify.js), the same checker that `aeos ui` uses; the files stay on the auditor's device. Its tests (`node --test src/aeos/ui/verify.test.mjs`) run the shared test vectors.
 
 ## Use it as a library
 
 ```python
-from aeos import ReceiptLog, make_record, verify_receipt
+from aeos import ActionLog, make_record, verify_action_record
 
-log = ReceiptLog.create("ap-log")
+log = ActionLog.create("ap-log")
 e = log.append(make_record("tool.call", "spiffe://acme.example/agent/ap",
                            subject="erp.invoice.pay", body={"amount_minor": 125000}))
-receipt = log.receipt(e)
-assert verify_receipt(receipt, log.public_key) == []
+record = log.action_record(e)
+assert verify_action_record(record, log.public_key) == []
 ```
 
 `examples/invoice_demo.py` walks through an escalated invoice payment, the auditor's checks and a tampering attempt.
@@ -203,5 +203,5 @@ Version 0.1 is an early release for evaluation.
 
 - The signing key is a file. Keep it outside the log directory (`--key`) and away from the agent.
 - The whole log is held in memory and hashed on load, which suits logs up to a few hundred thousand records. Each `aeos hook` call loads the log, so start a new log per agent or per period when a single log grows large.
-- A receipt proves a record is in the log. Whether the log is complete depends on the agent being able to reach its tools only through a recorded path: the proxy, a gateway that reports to the sink, or the hook.
+- A verified action record is proven to be in the audit trail. Whether the log is complete depends on the agent being able to reach its tools only through a recorded path: the proxy, a gateway that reports to the sink, or the hook.
 - The gateway meters each intent's total budget in its own memory, and several gateways do not share it. A workspace rebuilds the budget spent from the log when it starts.
