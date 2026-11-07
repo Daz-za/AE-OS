@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .canon import cid_parse, cid_str, json_digest
 from .webauthn import (BATCH_CONTEXT_NAME, CID_LEN, DOCUMENT_TOOL, MAX_BATCH, RESERVED,
@@ -39,6 +39,7 @@ REVOKE_TOOL = "aeos/passkey-revoke"
 REBIND_TOOL = "aeos/approver-rebind"
 REGISTRY_KINDS = (KIND_ENROLLED, KIND_REVOKED, KIND_REBOUND)
 
+Commit = Callable[[], None]                     # applies what a judgement found, once
 Record = Tuple[int, bytes, Dict[str, Any]]      # (index in the trail, binary CID, record)
 Item = Tuple[str, bytes, bytes]                 # (tool, args_sha256, escalation CID; b"" for a document)
 
@@ -271,16 +272,62 @@ def load_principals(doc: Any) -> Tuple[Dict[str, bytes], Dict[str, Principal]]:
     return ed, pk
 
 
+class OwnedLock:
+    """A re-entrant lock that knows which thread holds it, so code that must run under it
+    refuses when it does not, instead of quietly running without it."""
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._owner: Optional[int] = None
+        self._depth = 0
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        if not self._lock.acquire(blocking, timeout):
+            return False
+        self._owner = threading.get_ident()
+        self._depth += 1
+        return True
+
+    def release(self) -> None:
+        if self._owner != threading.get_ident():
+            raise RuntimeError("the lock is not held by this thread")
+        self._depth -= 1
+        if not self._depth:
+            self._owner = None
+        self._lock.release()
+
+    def held(self) -> bool:
+        """Whether the calling thread holds the lock."""
+        return self._owner == threading.get_ident()
+
+    def __enter__(self) -> "OwnedLock":
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.release()
+
+
 class Directory:
-    """Passkey approvers and their credentials, rebuilt from the trail in order."""
+    """Passkey approvers and their credentials, rebuilt from the trail in order.
+
+    One lock covers the whole directory. A live gateway holds it from the check of an
+    approval until the approval is on disk, and a recorder holds it around a registry change
+    from its judgement until it is on disk, so a revocation cannot fall between a check and
+    the approval it allows, and the directory never holds a change the trail does not. Lock
+    order, across AE-OS: directory, then gateway, then recorder, then the trail's file lock.
+
+    Changes are made in two steps, both with the lock held by the calling thread: `prepare`
+    and `judge` decide and change nothing, and the function they return applies the result
+    once the record is written. `apply` and `check` do both at once, for the audit, which
+    reads a trail that is already written.
+    """
 
     def __init__(self, principals: Dict[str, Principal], demo: bool = False) -> None:
         self.principals = principals
         self.demo = demo                   # accept http://localhost, and say so in a note
-        # One lock for the whole directory. A gateway holds it from the check of an approval
-        # until the approval is recorded, and a recorder holds it around a registry change, so
-        # a revocation cannot fall between the two.
-        self.lock = threading.RLock()
+        self.lock = OwnedLock()
+        self._version = 0                  # moves on with every change applied
         self.creds: Dict[bytes, Credential] = {}
         self.identity: Dict[str, List[Tuple[int, str]]] = {}      # approver -> (position, identity)
         self.epochs: Dict[str, List[int]] = {}                    # approver -> positions that began one
@@ -327,17 +374,59 @@ class Directory:
 
     # -- the checks --
 
+    def _require_lock(self, what: str) -> None:
+        if not self.lock.held():
+            raise RuntimeError(f"{what} needs the passkey directory's lock, held by this thread "
+                               "(lock order: directory, gateway, recorder, file)")
+
+    def _committer(self, effects: List[Commit]) -> Commit:
+        """The function that applies `effects`, refusing if the directory changed since they
+        were judged, or if they were applied already."""
+        version = self._version
+
+        def commit() -> None:
+            self._require_lock("applying a change to the passkey directory")
+            if self._version != version:
+                raise RuntimeError("the passkey directory changed after this was judged")
+            for effect in effects:
+                effect()
+            self._version += 1
+
+        return commit
+
     def check(self, *, approver: str, position: int, key: str, tool: str, args_sha256: bytes,
               escalation: Optional[bytes], ev: Evidence) -> List[str]:
-        """Check one assertion for one request, as the person at `approver` at `position`.
+        """Check one assertion for one request, as the person at `approver` at `position`,
+        and record its use (single use and the signature counter) if it stands. For the audit,
+        which checks a trail already written; a live writer uses `judge`.
+
+        Takes the directory lock (lock order: directory, gateway, recorder, file)."""
+        with self.lock:
+            errs, commit = self.judge(approver=approver, position=position, key=key, tool=tool,
+                                      args_sha256=args_sha256, escalation=escalation, ev=ev)
+            if commit is not None:
+                commit()
+            return errs
+
+    def judge(self, *, approver: str, position: int, key: str, tool: str, args_sha256: bytes,
+              escalation: Optional[bytes], ev: Evidence) -> Tuple[List[str], Optional[Commit]]:
+        """Check one assertion as `check` does, changing nothing: the problems, or none and the
+        function that records the assertion's use, to call once the record is on disk.
         `escalation` is the escalation an approval answers, or None for a confirmation of a
         registry change, which must be a single request. `key` names what the assertion
-        answers, so a retry of the same answer is not a replay."""
-        with self.lock:
-            return self._check(approver, position, key, tool, args_sha256, escalation, ev)
+        answers, so a retry of the same answer is not a replay.
+
+        The calling thread must hold the directory lock from here until it commits (lock
+        order: directory, gateway, recorder, file)."""
+        self._require_lock("judging an assertion")
+        effects: List[Commit] = []
+        errs = self._check(approver, position, key, tool, args_sha256, escalation, ev, effects)
+        return (errs, None) if errs else ([], self._committer(effects))
 
     def _check(self, approver: str, position: int, key: str, tool: str, args_sha256: bytes,
-               escalation: Optional[bytes], ev: Evidence) -> List[str]:
+               escalation: Optional[bytes], ev: Evidence, effects: List[Commit]) -> List[str]:
+        """The problems with an assertion; when there are none, what accepting it changes is
+        added to `effects`, and nothing is changed here."""
         label = "approval" if escalation is not None else "change"
         same = "the one approved" if escalation is not None else "the change it confirms"
         c = self.creds.get(ev.credential_id)
@@ -380,14 +469,19 @@ class Directory:
                                    challenge=challenge_for(ev.nonce, expected))
         except WebAuthnError as e:
             return [f"the passkey's assertion does not stand: {e}"]
-        used = self.ledger.use(position, ev, key, item)
+        used, record_use = self.ledger.judge(position, ev, key, item)
         if used:
             return [used]
+        effects.append(record_use)
         if (got.sign_count or c.sign_count) and got.sign_count <= c.sign_count:
-            self.notes.append(("clone", f"record {position}: the passkey's signature counter did "
-                               f"not rise ({c.sign_count}, then {got.sign_count}): it may have "
-                               "been cloned"))
-        c.sign_count = max(c.sign_count, got.sign_count)
+            note = (f"record {position}: the passkey's signature counter did not rise "
+                    f"({c.sign_count}, then {got.sign_count}): it may have been cloned")
+            effects.append(lambda: self.notes.append(("clone", note)))
+
+        def count() -> None:
+            c.sign_count = max(c.sign_count, got.sign_count)
+
+        effects.append(count)
         return []
 
     # -- building: one pass over the trail, in order --
@@ -404,7 +498,8 @@ class Directory:
     def step(self, index: int, cid: bytes, rec: Dict[str, Any]) -> None:
         """Apply a registry record at its position, collecting a problem if it is refused."""
         try:
-            self.apply(index, cid, rec, self.children.get(cid, []))
+            with self.lock:
+                self.apply(index, cid, rec, self.children.get(cid, []))
         except (WebAuthnError, KeyError, TypeError, ValueError, AttributeError) as e:
             self.problems.append(f"record {index}: {e}")
 
@@ -424,26 +519,45 @@ class Directory:
         return who
 
     def _confirm(self, index: int, cid: bytes, who: str, tool: str, args: bytes,
-                 found: List[Evidence], summary: Any) -> None:
+                 found: List[Evidence], summary: Any, effects: List[Commit]) -> None:
         """The change at `index` is asserted by a registered passkey, as a single request."""
         if not isinstance(summary, dict) or summary.get("kind") != EVIDENCE_KIND:
             raise WebAuthnError("no confirmation by a registered passkey")
         mine = [e for e in found if e.assertion_sha256 == summary.get("assertion_sha256")]
         if not mine:
             raise WebAuthnError("the confirming assertion is not in the trail")
-        errs = self.check(approver=who, position=index, key=cid_str(cid), tool=tool,
-                          args_sha256=args, escalation=None, ev=mine[0])
+        errs = self._check(who, index, cid_str(cid), tool, args, None, mine[0], effects)
         if errs:
             raise WebAuthnError("the change is not confirmed by a registered passkey: "
                                 + errs[0])
 
     def apply(self, index: int, cid: bytes, rec: Dict[str, Any], found: List[Evidence]) -> None:
-        """Apply one registry record at `index`; raises WebAuthnError if it is refused.
-        `found` are the confirming assertions that follow it."""
-        with self.lock:
-            self._apply(index, cid, rec, found)
+        """Judge one registry record at `index` and apply it; raises WebAuthnError if it is
+        refused. `found` are the confirming assertions that follow it. For the audit, which
+        reads a trail already written; a live writer uses `prepare`.
 
-    def _apply(self, index: int, cid: bytes, rec: Dict[str, Any], found: List[Evidence]) -> None:
+        The calling thread must hold the directory lock (lock order: directory, gateway,
+        recorder, file); this refuses otherwise rather than take it."""
+        self.prepare(index, cid, rec, found)()
+
+    def prepare(self, index: int, cid: bytes, rec: Dict[str, Any],
+                found: List[Evidence]) -> Commit:
+        """Judge one registry record as if it were written at `index`, changing nothing:
+        raises WebAuthnError if it would be refused, and otherwise returns the function that
+        applies it, to call once the record and its confirming assertion are on disk.
+
+        The calling thread must hold the directory lock from here until it commits (lock
+        order: directory, gateway, recorder, file); this refuses otherwise rather than take
+        it, so it can never wait for the lock while holding the trail's."""
+        self._require_lock("judging a registry change")
+        effects: List[Commit] = []
+        self._judge_change(index, cid, rec, found, effects)
+        return self._committer(effects)
+
+    def _judge_change(self, index: int, cid: bytes, rec: Dict[str, Any], found: List[Evidence],
+                      effects: List[Commit]) -> None:
+        """Raise if the registry record is refused; otherwise add what it changes to
+        `effects`, in order, changing nothing here."""
         b = rec["body"]
         kind = rec["kind"]
         who = self._declared(b.get("approver"))
@@ -455,10 +569,10 @@ class Directory:
             if self.has_valid(who, index):          # a passkey stands: it must say yes
                 self._confirm(index, cid, who, REBIND_TOOL,
                               rebind_args_sha256(who, identity, sign_in), found,
-                              b.get("evidence"))
-            self._begin_epoch(index, who, identity, sign_in, pinned=False)
-            self.notes.append(("binding", f"record {index}: {who} is bound to {identity} on "
-                               f"{sign_in.describe()}, which this audit cannot check"))
+                              b.get("evidence"), effects)
+            effects.append(lambda: self._begin_epoch(index, who, identity, sign_in, False))
+            self._note(effects, "binding", f"record {index}: {who} is bound to {identity} on "
+                       f"{sign_in.describe()}, which this audit cannot check")
             return
         cred_id = b.get("credential_id")
         if not isinstance(cred_id, bytes) or not cred_id:
@@ -470,8 +584,12 @@ class Directory:
             if target.revoked_at is not None:
                 raise WebAuthnError("the passkey was already revoked")
             self._confirm(index, cid, who, REVOKE_TOOL, revoke_args_sha256(who, cred_id),
-                          found, b.get("evidence"))
-            target.revoked_at = index
+                          found, b.get("evidence"), effects)
+
+            def revoke() -> None:
+                target.revoked_at = index
+
+            effects.append(revoke)
             return
         public_key, rp_id, origin = b.get("public_key"), b.get("rp_id"), b.get("origin")
         if cred_id in self.creds:
@@ -481,8 +599,8 @@ class Directory:
         key = parse_cose_key(public_key)
         check_origin(rp_id, origin, demo=self.demo)
         if self.demo and (rp_id == "localhost" or origin.startswith("http://")):
-            self.notes.append(("demo", f"record {index}: the origin {origin} is accepted only "
-                               "because this audit was run with --demo"))
+            self._note(effects, "demo", f"record {index}: the origin {origin} is accepted only "
+                       "because this audit was run with --demo")
         root = not self.has_valid(who, index)
         if root:
             sign_in = SignIn.parse(b.get("identity_evidence"))
@@ -494,22 +612,28 @@ class Directory:
                                 challenge=enrol_challenge(who, sign_in.sha256),
                                 credential_id=cred_id, public_key=public_key)
             pinned = self._pinned(who, cred_id, public_key, rp_id, origin, identity)
-            self._begin_epoch(index, who, identity, sign_in, pinned)
-            self.notes.append(("binding", f"record {index}: the first passkey of {who} rests on "
-                               f"{sign_in.describe()}, which this audit cannot check"
-                               + (" (pinned in your principals)" if pinned else
-                                  " (not pinned in your principals)")))
+            basis = sign_in.describe()
+            epoch = self.epoch_at(who, index) + 1   # the epoch this enrolment begins
+            effects.append(lambda: self._begin_epoch(index, who, identity, sign_in, pinned))
+            self._note(effects, "binding", f"record {index}: the first passkey of {who} rests "
+                       f"on {basis}, which this audit cannot check"
+                       + (" (pinned in your principals)" if pinned else
+                          " (not pinned in your principals)"))
         else:
             if identity != self.identity_at(who, index):
                 raise WebAuthnError("the new passkey is enrolled for an identity other than "
                                     "the approver's current one")
             self._confirm(index, cid, who, ENROL_TOOL,
                           enrol_args_sha256(who, identity, cred_id, public_key, rp_id, origin),
-                          found, b.get("evidence"))
-        pinned, basis = self.basis[who]
-        self.creds[cred_id] = Credential(who, cred_id, public_key, key, rp_id, origin, identity,
-                                         self.epoch_at(who, index + 1), index, root, pinned,
-                                         basis)
+                          found, b.get("evidence"), effects)
+            pinned, basis = self.basis[who]
+            epoch = self.epoch_at(who, index)
+        credential = Credential(who, cred_id, public_key, key, rp_id, origin, identity, epoch,
+                                index, root, pinned, basis)
+        effects.append(lambda: self.creds.__setitem__(cred_id, credential))
+
+    def _note(self, effects: List[Commit], kind: str, text: str) -> None:
+        effects.append(lambda: self.notes.append((kind, text)))
 
     def _begin_epoch(self, index: int, who: str, identity: str, sign_in: SignIn,
                      pinned: bool) -> None:
@@ -542,21 +666,33 @@ class UseLedger:
         self.nonces: Dict[bytes, Tuple[bytes, int]] = {}
 
     def use(self, position: int, ev: Evidence, key: str, item: Item) -> Optional[str]:
+        """Record a use of the assertion, or say why it is refused."""
+        problem, record = self.judge(position, ev, key, item)
+        if record is not None:
+            record()
+        return problem
+
+    def judge(self, position: int, ev: Evidence, key: str, item: Item
+              ) -> Tuple[Optional[str], Optional[Commit]]:
+        """Why a use of the assertion is refused, or None and the function that records it;
+        changes nothing."""
         a = ev.assertion_sha256
         prior = self.assertions.get(a)
         if prior:
             if any(k == key for _, k, _ in prior):
-                return None
+                return None, lambda: None
             if ev.batch is not None and all(i != item for _, _, i in prior):
-                self.assertions[a].append((position, key, item))
-                return None
-            return f"the assertion was already used at record {prior[0][0]}"
+                return None, lambda: self.assertions[a].append((position, key, item))
+            return f"the assertion was already used at record {prior[0][0]}", None
         seen = self.nonces.get(ev.nonce)
         if seen is not None:
-            return f"the nonce was already used by the assertion at record {seen[1]}"
-        self.nonces[ev.nonce] = (a, position)
-        self.assertions[a] = [(position, key, item)]
-        return None
+            return f"the nonce was already used by the assertion at record {seen[1]}", None
+
+        def first_use() -> None:
+            self.nonces[ev.nonce] = (a, position)
+            self.assertions[a] = [(position, key, item)]
+
+        return None, first_use
 
 
 # ---- approvals --------------------------------------------------------------------------------

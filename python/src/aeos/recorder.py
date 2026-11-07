@@ -150,21 +150,36 @@ class Recorder:
 
     def approval(self, call: Entry, approval: Any, ts: Optional[int] = None) -> Entry:
         """Record a person's signed approval, linked to the escalation and the call. A passkey
-        approver's assertion goes in a child record; a rejection's sign-in is in the summary."""
+        approver's assertion goes in a child record, written in the same write as the approval
+        so neither is ever in the trail without the other; a rejection's sign-in is in the
+        summary.
+
+        Takes the recorder's lock, then the trail's (lock order: directory, gateway, recorder,
+        file); a gateway holds the directory lock around it."""
         with self._lock:
             body = dict(approval.fields())
             if approval.signature:
                 body["signature"] = approval.signature
             if approval.evidence is not None:
                 body["evidence"] = approval.evidence.summary()
-            entry = self._append("approval", agent=approval.approver, obo=None,
-                                 subject=approval.tool, body=body,
-                                 parents=[cid_parse(approval.escalation), call.cid], ts=ts)
+            rec = make_record("approval", approval.approver, on_behalf_of=self.obo,
+                              subject=approval.tool, body=body,
+                              parents=[cid_parse(approval.escalation), call.cid],
+                              ts=now_ms() if ts is None else ts)
+            records = [rec]
             if hasattr(approval.evidence, "body"):
-                self._append("x-approval-evidence", agent=approval.approver, obo=None,
-                             subject=approval.tool, body=approval.evidence.body(),
-                             parents=[entry.cid], ts=ts)
+                records.append(self._evidence_record(rec, approval.approver, approval.tool,
+                                                     approval.evidence))
+            entry = self.log.append_all(records)[0]
+            self._maybe_checkpoint()
             return entry
+
+    def _evidence_record(self, parent: Dict[str, Any], approver: str, subject: Optional[str],
+                         evidence: Any) -> Dict[str, Any]:
+        """The `x-approval-evidence` child that carries a passkey assertion."""
+        return make_record("x-approval-evidence", approver, on_behalf_of=self.obo,
+                           subject=subject, body=evidence.body(),
+                           parents=[cid_of_bytes(dag_cbor(parent))], ts=parent["ts"])
 
     def passkey_enrolled(self, approver: str, *, identity: str, credential_id: bytes,
                          public_key: bytes, rp_id: str, origin: str,
@@ -199,11 +214,14 @@ class Recorder:
 
     def _registry(self, kind: str, approver: str, body: Dict[str, Any], identity_evidence: Any,
                   confirmation: Any, ts: Optional[int]) -> Entry:
-        """Judge a registry record, then write it. With the passkey directory held, the record
-        is built first, the directory applies it at the position the trail will give it, and
-        only if it accepts it are the record and its confirming assertion written; a refusal
-        raises and writes nothing. The directory stays locked throughout, so a gateway that
-        shares it never sees a change half made."""
+        """Judge a registry record, write it, then apply it, in that order. With the passkey
+        directory locked throughout, the directory judges the record at the position the
+        trail will give it and changes nothing; the record and its confirming assertion are
+        then written together, in one write; only once both are on disk does the directory
+        apply the change. A refusal raises and writes nothing, and a failed write leaves the
+        directory as it was, so a retry starts clean.
+
+        Lock order: directory, gateway, recorder, file; this takes the directory's first."""
         guard = self.passkeys.lock if self.passkeys is not None else contextlib.nullcontext()
         with guard, self._lock:
             if identity_evidence is not None:
@@ -213,15 +231,17 @@ class Recorder:
             rec = make_record(kind, approver, on_behalf_of=self.obo, subject=None, body=body,
                               parents=[], ts=now_ms() if ts is None else ts)
             cid = cid_of_bytes(dag_cbor(rec))
+            records = [rec]
+            if confirmation is not None:
+                records.append(self._evidence_record(rec, approver, None, confirmation))
             found = [confirmation] if confirmation is not None else []
             judge = None if self.passkeys is None else \
-                (lambda index: self.passkeys.apply(index, cid, rec, found))
-            entry = self.log.append(rec, None, before=judge)
+                (lambda index: self.passkeys.prepare(index, cid, rec, found))
+            entries, commit = self.log._append_judged(records, judge=judge)
+            if commit is not None:
+                commit()
             self._maybe_checkpoint()
-            if confirmation is not None:
-                self._append("x-approval-evidence", agent=approver, obo=None, subject=None,
-                             body=confirmation.body(), parents=[entry.cid], ts=rec["ts"])
-            return entry
+            return entries[0]
 
     def _refusal(self, tool: str) -> Optional[str]:
         if self.allow is not None and tool not in self.allow:

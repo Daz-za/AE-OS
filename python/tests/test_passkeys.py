@@ -12,7 +12,8 @@ from aeos.canon import cid_of_bytes, cid_str, dag_cbor, decode_dag_cbor, json_di
 from aeos.gateway import AgentClient, Gateway
 from aeos.log import now_ms
 from passkey_scenarios import ARGS, DEMO_CASES, TOOL, A, B, E, scenarios
-from webauthn_support import APPROVER, Trail, cose_es256, nonce, pin, principals, sign_in_of
+from webauthn_support import (APPROVER, SoftAuthenticator, Trail, cose_es256, nonce, pin,
+                              principals, sign_in_of)
 
 VECTORS = Path(__file__).resolve().parents[2] / "testvectors" / "passkey-approvals-v1.json"
 CASES = scenarios()
@@ -383,22 +384,6 @@ def test_the_recorder_refuses_a_registry_change_the_directory_refuses(gateway):
     assert audit.check_approvals(recs, principals())[1] == []
 
 
-def test_a_trail_refuses_before_it_writes_anything(tmp_path):
-    from aeos import make_record
-    log = ActionLog.create(tmp_path / "log", log_id="urn:example:before")
-
-    def refuse(index):
-        raise ValueError(f"refused at {index}")
-
-    with pytest.raises(ValueError, match="refused at 1"):       # position 1: the marker is 0
-        log.append(make_record("note", AGENT, body={"i": 1}), before=refuse)
-    assert len(log) == 0                                        # not even the marker
-    seen = []
-    log.append(make_record("note", AGENT, body={"i": 1}), before=seen.append)
-    log.append(make_record("note", AGENT, body={"i": 2}), before=seen.append)
-    assert seen == [1, 2] and len(log) == 3
-
-
 def test_a_revocation_cannot_fall_between_the_check_and_the_approval(gateway):
     import threading
     gw, log, c, rec, _ = gateway
@@ -411,7 +396,7 @@ def test_a_revocation_cannot_fall_between_the_check_and_the_approval(gateway):
                                                      B.rp_id, B.origin)))
     esc = c.call(TOOL, args)["result"]["structuredContent"]["escalation"]
     d = gw.passkey_directory
-    real, checked, done = d.check, threading.Event(), threading.Event()
+    real, checked, done = d.judge, threading.Event(), threading.Event()
 
     def paused(**kw):
         got = real(**kw)
@@ -420,7 +405,7 @@ def test_a_revocation_cannot_fall_between_the_check_and_the_approval(gateway):
             done.wait(timeout=1.0)
         return got
 
-    d.check = paused
+    d.judge = paused
 
     def revoke():
         checked.wait(10)
@@ -441,6 +426,167 @@ def test_a_revocation_cannot_fall_between_the_check_and_the_approval(gateway):
     if reply["result"]["structuredContent"] == {"paid": "I2"}:
         assert kinds.index("approval") < kinds.index("x-passkey-revoked")
     assert audit.check_approvals(recs, principals())[1] == []
+
+
+class _TornWrites:
+    """Make the trail's next write of a record of `kind` stop after `keep` complete lines and
+    fail, as a full disk does: keep=0 loses the record itself, keep=1 the assertion after it."""
+
+    def __init__(self, monkeypatch, keep, kind):
+        import aeos.log as log_module
+        real_open, self.fired = open, False
+        outer = self
+
+        class Torn:
+            def __init__(self, f):
+                self.f = f
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                self.f.close()
+
+            def write(self, data):
+                if f'"kind":"{kind}"'.encode() not in data:
+                    return self.f.write(data)
+                lines = data.split(b"\n")
+                self.f.write(b"".join(x + b"\n" for x in lines[:keep]) + lines[keep][:20])
+                self.f.flush()
+                outer.fired = True
+                raise OSError("No space left on device")
+
+            def flush(self):
+                self.f.flush()
+
+        def torn_open(path, mode="r", *a, **k):
+            f = real_open(path, mode, *a, **k)
+            if not outer.fired and str(path).endswith("records.jsonl") and "a" in mode:
+                return Torn(f)
+            return f
+
+        monkeypatch.setattr(log_module, "open", torn_open, raising=False)
+
+
+def _enrol_b(rec, n=7):
+    return rec.passkey_enrolled(
+        CFO, identity=IDENTITY, credential_id=B.credential_id, public_key=B.cose_key,
+        rp_id=B.rp_id, origin=B.origin,
+        confirmation=A.evidence(nonce(n), passkeys.ENROL_TOOL, passkeys.enrol_args_sha256(
+            CFO, IDENTITY, B.credential_id, B.cose_key, B.rp_id, B.origin)))
+
+
+@pytest.mark.parametrize("keep", [0, 1], ids=["the record write fails",
+                                              "the confirming assertion write fails"])
+def test_a_failed_registry_write_leaves_the_directory_and_the_trail_agreeing(gateway, keep,
+                                                                           monkeypatch):
+    gw, log, c, rec, _ = gateway
+    d = gw.passkey_directory
+    before = (len(log), (log.path / "records.jsonl").read_bytes(), dict(d.creds),
+              dict(d.ledger.nonces), list(d.notes))
+    torn = _TornWrites(monkeypatch, keep, passkeys.KIND_ENROLLED)
+    with pytest.raises(OSError):
+        _enrol_b(rec)
+    assert torn.fired
+    monkeypatch.undo()
+    # the live directory holds nothing the trail does not, and the trail holds nothing partial
+    assert (len(log), (log.path / "records.jsonl").read_bytes(), dict(d.creds),
+            dict(d.ledger.nonces), list(d.notes)) == before
+    recs = [(e.index, bytes(e.cid), log.record(e)) for e in ActionLog.open(log.path).entries()]
+    assert audit.check_approvals(recs, principals())[1] == []
+    assert ActionLog.open(log.path).verify().ok
+    # the same change, with the same assertion, goes through once the disk recovers
+    entry = _enrol_b(rec)
+    assert B.credential_id in d.creds and d.creds[B.credential_id].enrolled_at == entry.index
+    recs = [(e.index, bytes(e.cid), log.record(e)) for e in ActionLog.open(log.path).entries()]
+    assert [r["kind"] for _, _, r in recs][-2:] == ["x-passkey-enrolled", "x-approval-evidence"]
+    assert audit.check_approvals(recs, principals())[1] == []
+    assert ActionLog.open(log.path).verify().ok
+
+
+def test_a_failed_approval_write_uses_nothing_up_and_the_retry_is_recorded_whole(gateway,
+                                                                              monkeypatch):
+    gw, log, c, rec, _ = gateway
+    args = {"invoice": "I2", "amount_minor": 900}
+    esc = c.call(TOOL, args)["result"]["structuredContent"]["escalation"]
+    answer = _approval(esc, A, 2, args)
+    torn = _TornWrites(monkeypatch, 1, "approval")   # the approval lands, its assertion not
+    refused = c.call(TOOL, args, approval=answer)
+    monkeypatch.undo()
+    assert torn.fired
+    assert "could not be written" in _text(refused)
+    assert gw.passkey_directory.ledger.assertions == {}        # the assertion is still unused
+    recs = [(e.index, bytes(e.cid), log.record(e)) for e in ActionLog.open(log.path).entries()]
+    assert "approval" not in [r["kind"] for _, _, r in recs]
+    ok = c.call(TOOL, args, approval=answer)
+    assert ok["result"]["structuredContent"] == {"paid": "I2"}
+    recs = [(e.index, bytes(e.cid), log.record(e)) for e in ActionLog.open(log.path).entries()]
+    kinds = [r["kind"] for _, _, r in recs]
+    assert kinds.count("approval") == kinds.count("x-approval-evidence") == 1
+    assert audit.check_approvals(recs, principals())[1] == []
+
+
+def test_the_directory_changes_only_under_its_lock_and_only_after_the_write(gateway):
+    gw, log, c, rec, _ = gateway
+    d = gw.passkey_directory
+    rev = {"v": 0, "kind": passkeys.KIND_REVOKED, "agent": CFO, "obo": None, "subject": None,
+           "body": {"approver": CFO, "credential_id": A.credential_id}, "parents": [], "ts": 1}
+    with pytest.raises(RuntimeError, match="lock"):
+        d.apply(len(log), b"x", rev, [])
+    with pytest.raises(RuntimeError, match="lock"):
+        d.prepare(len(log), b"x", rev, [])
+    ev = A.evidence(nonce(40), passkeys.ENROL_TOOL, passkeys.enrol_args_sha256(
+        CFO, IDENTITY, B.credential_id, B.cose_key, B.rp_id, B.origin))
+    enrol = {"v": 0, "kind": passkeys.KIND_ENROLLED, "agent": CFO, "obo": None,
+             "subject": None, "parents": [], "ts": 1,
+             "body": {"approver": CFO, "identity": IDENTITY, "credential_id": B.credential_id,
+                      "public_key": B.cose_key, "rp_id": B.rp_id, "origin": B.origin,
+                      "evidence": ev.summary()}}
+    with d.lock:
+        commit = d.prepare(len(log), b"enrol", enrol, [ev])
+        assert B.credential_id not in d.creds and d.ledger.nonces.get(ev.nonce) is None
+    with pytest.raises(RuntimeError, match="lock"):
+        commit()                                     # the lock was let go in between
+    with d.lock:
+        commit()
+        assert B.credential_id in d.creds
+        with pytest.raises(RuntimeError, match="changed"):
+            commit()                                 # once only
+
+
+def test_a_registry_judgement_never_waits_for_the_directory_while_holding_the_trail(gateway):
+    """One thread holds the directory and wants the trail, as a gateway recording an approval
+    does; another holds the trail and judges a change without the directory. The second must
+    refuse at once rather than wait, or the two would wait for each other for ever."""
+    import threading
+    import time
+    from aeos import make_record
+    gw, log, c, rec, _ = gateway
+    d = gw.passkey_directory
+    holding, errors = threading.Event(), []
+
+    def gateway_like():
+        with d.lock:
+            holding.set()
+            time.sleep(0.3)
+            log.append(make_record("note", CFO, body={"g": 1}))
+
+    def raw_writer():
+        holding.wait(5)
+        r = make_record(passkeys.KIND_REVOKED, CFO,
+                        body={"approver": CFO, "credential_id": A.credential_id})
+        try:
+            log._append_judged([r], judge=lambda i: d.prepare(i, b"x", r, []))
+        except RuntimeError as e:
+            errors.append(str(e))
+
+    threads = [threading.Thread(target=f, daemon=True) for f in (gateway_like, raw_writer)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(10)
+    assert not any(t.is_alive() for t in threads), "deadlock"
+    assert errors and "lock" in errors[0]
 
 
 def _folder(g, tmp_path, pr):

@@ -121,3 +121,153 @@ def test_read_only_log_cannot_sign(tmp_path):
     ActionLog.create(tmp_path / "log")
     with pytest.raises(PermissionError):
         ActionLog.open(tmp_path / "log", read_only=True).checkpoint()
+
+
+# ---- writing together, failing cleanly, and reading while another thread writes --------------
+
+
+def test_records_appended_together_land_in_one_write_and_may_cite_each_other(tmp_path):
+    log = ActionLog.create(tmp_path / "log")
+    parent = make_record("note", AGENT, body={"n": 1}, ts=1)
+    from aeos.canon import cid_of_bytes, dag_cbor
+    child = make_record("note", AGENT, body={"n": 2}, parents=[cid_of_bytes(dag_cbor(parent))],
+                        ts=1)
+    a, b = log.append_all([parent, child])
+    assert (a.index, b.index) == (1, 2)            # the marker is record 0
+    assert log.append_all([parent, child]) == [a, b]           # already there: not written again
+    assert len(log) == 3 and ActionLog.open(log.path).verify().ok
+
+
+def test_a_failed_write_leaves_nothing_behind_and_the_next_write_lands_clean(tmp_path,
+                                                                             monkeypatch):
+    log = ActionLog.create(tmp_path / "log")
+    _fill(log, 2)
+    import aeos.log as log_module
+    real_open = open
+
+    class TornFile:
+        """Writes half of what it is given, then fails, as a full disk does."""
+
+        def __init__(self, f):
+            self.f = f
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.f.close()
+
+        def write(self, data):
+            self.f.write(data[:len(data) // 2])
+            self.f.flush()
+            raise OSError("No space left on device")
+
+    def torn_open(path, mode="r", *a, **k):
+        f = real_open(path, mode, *a, **k)
+        return TornFile(f) if str(path).endswith("records.jsonl") and "a" in mode else f
+
+    monkeypatch.setattr(log_module, "open", torn_open, raising=False)
+    with pytest.raises(OSError):
+        log.append(make_record("note", AGENT, body={"n": 1}))
+    monkeypatch.undo()
+    assert len(log) == 3 and len(ActionLog.open(log.path).entries()) == 3
+    assert (log.path / "records.jsonl").read_bytes().endswith(b"\n")    # the torn line is cut
+    log.append(make_record("note", AGENT, body={"n": 3}))
+    reopened = ActionLog.open(log.path)
+    assert len(reopened) == 4 and reopened.verify().ok
+
+
+def test_a_line_left_half_written_by_a_dead_writer_is_skipped_then_cut(tmp_path):
+    log = ActionLog.create(tmp_path / "log")
+    _fill(log, 2)
+    with open(log.path / "records.jsonl", "ab") as f:
+        f.write(b'{"i":3,"cid":"bafy')                   # a writer died mid-line
+    other = ActionLog.open(log.path)
+    assert len(other) == 3                               # readers skip it
+    other.append(make_record("note", AGENT, body={"after": 1}))
+    rep = ActionLog.open(log.path).verify()
+    assert rep.ok and rep.records == 4
+
+
+def test_a_judge_runs_before_anything_is_written_and_a_refusal_writes_nothing(tmp_path):
+    log = ActionLog.create(tmp_path / "log", log_id="urn:example:judge")
+
+    def refuse(index):
+        raise ValueError(f"refused at {index}")
+
+    with pytest.raises(ValueError, match="refused at 1"):       # position 1: the marker is 0
+        log._append_judged([make_record("note", AGENT, body={"i": 1})], judge=refuse)
+    assert len(log) == 0                                        # not even the marker
+    seen = []
+    for i in (1, 2):
+        _, verdict = log._append_judged([make_record("note", AGENT, body={"i": i})],
+                                        judge=lambda index: seen.append(index) or index)
+        assert verdict == seen[-1]
+    assert seen == [1, 2] and len(log) == 3
+
+
+def test_writing_to_the_trail_from_inside_its_own_write_raises_instead_of_hanging(tmp_path):
+    import threading
+    log = ActionLog.create(tmp_path / "log")
+    errors = []
+
+    def nested(index):
+        log.append(make_record("note", AGENT, body={"inner": index}))
+
+    def outer():
+        try:
+            log._append_judged([make_record("note", AGENT, body={"outer": 1})], judge=nested)
+        except RuntimeError as e:
+            errors.append(str(e))
+
+    t = threading.Thread(target=outer, daemon=True)
+    t.start()
+    t.join(5)
+    assert not t.is_alive(), "the nested write deadlocked"
+    assert errors and "would deadlock" in errors[0]
+    assert len(log) == 0
+    log.append(make_record("note", AGENT, body={"after": 1}))   # the lock was let go
+    assert len(log) == 2
+
+
+def test_a_read_between_a_write_and_its_indexing_does_not_count_the_line_twice(tmp_path,
+                                                                               monkeypatch):
+    """A reader in another thread runs at the worst moment: the writer's line is on disk and
+    not yet in its index. It must wait, not index the line itself."""
+    import threading
+    import aeos.log as log_module
+    log = ActionLog.create(tmp_path / "log")
+    log.append(make_record("note", AGENT, body={"n": 0}))
+    real_open = open
+    readers = []
+
+    class ReadAfterWrite:
+        def __init__(self, f):
+            self.f = f
+
+        def __enter__(self):
+            return self.f.__enter__()
+
+        def __exit__(self, *exc):
+            done = self.f.__exit__(*exc)
+            reader = threading.Thread(target=log.entries)
+            reader.start()
+            readers.append(reader)
+            reader.join(0.3)          # blocks on the index lock; without it, it reads now
+            return done
+
+    def hooked(path, mode="r", *a, **k):
+        f = real_open(path, mode, *a, **k)
+        return ReadAfterWrite(f) if str(path).endswith("records.jsonl") and "a" in mode else f
+
+    monkeypatch.setattr(log_module, "open", hooked, raising=False)
+    log.append(make_record("note", AGENT, body={"n": 1}))
+    monkeypatch.undo()
+    for r in readers:
+        r.join(5)
+    log.append(make_record("note", AGENT, body={"n": 2}))
+    assert [e.index for e in log.entries()] == [0, 1, 2, 3]
+    lines = [json.loads(x) for x in (log.path / "records.jsonl").read_text().splitlines()]
+    assert [x["i"] for x in lines] == [0, 1, 2, 3]
+    assert log.checkpoint().size == 4
+    assert ActionLog.open(log.path).verify().ok

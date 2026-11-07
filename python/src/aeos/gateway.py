@@ -284,13 +284,16 @@ class Gateway:
         except (ValueError, KeyError, TypeError):
             return {}, "the approval could not be read"
         pk = self.passkey_directory and self.passkey_directory.principals.get(a.approver)
-        # A passkey approval is checked and recorded with the directory held, so a revocation
-        # recorded meanwhile lands before the check or after the approval, never between.
+        # A passkey approval is judged, recorded and only then counted as used, with the
+        # directory held throughout, so a revocation recorded meanwhile lands before the check
+        # or after the approval, never between, and a failed write uses nothing up.
+        # Lock order: directory, gateway, recorder, file.
         with (self.passkey_directory.lock if pk is not None else contextlib.nullcontext()):
             return self._approval_locked(rec, call, a, pk, peer, tool, args, at)
 
     def _approval_locked(self, rec: Recorder, call: Any, a: Any, pk: Any, peer: str, tool: str,
                          args: Dict[str, Any], at: int) -> Tuple[Dict[str, Any], Optional[str]]:
+        commit = None
         with self._lock:
             asked = self.escalations.get(a.escalation)
             if asked is None:
@@ -299,36 +302,41 @@ class Gateway:
                     a.args_sha256 != asked[2]:
                 return {}, "the approval is for a different call"
             if pk is not None:
-                problem = self._passkey_problem(a, args)
+                problem, commit = self._passkey_problem(a, args)
                 if problem:
                     return {}, problem
             elif not a.verify(self.principal_keys.get(a.approver, b"")):
                 return {}, "the approval's signature does not verify"
         rec.approval(call, a, ts=at)
+        if commit is not None:
+            commit()
         return {"approver": a.approver, "decision": a.decision, "escalation": a.escalation}, \
             None
 
-    def _passkey_problem(self, a: Any, args: Dict[str, Any]) -> Optional[str]:
+    def _passkey_problem(self, a: Any, args: Dict[str, Any]
+                         ) -> Tuple[Optional[str], Optional[passkeys.Commit]]:
         """A passkey approver's answer: an approval needs a valid assertion for this exact
         call and escalation; a rejection carries the sign-in it rests on, never an assertion.
-        Called with the gateway's lock held."""
+        The problem, or None and what records the assertion's use once the approval is on
+        disk. Called with the directory lock and then the gateway's lock held."""
         assert self.passkey_directory is not None
         if a.decision == "reject":
             if isinstance(a.evidence, passkeys.SignIn):
-                return None
-            return "a rejection by a passkey approver carries no identity evidence"
+                return None, None
+            return "a rejection by a passkey approver carries no identity evidence", None
         if a.decision != "approve" or not isinstance(a.evidence, passkeys.Evidence):
-            return "the approval carries no passkey assertion"
+            return "the approval carries no passkey assertion", None
         try:
             escalation = passkeys.escalation_cid(a.escalation)
         except passkeys.WebAuthnError as e:
-            return str(e)
-        errs = self.passkey_directory.check(approver=a.approver, position=sys.maxsize,
-                                            key=a.escalation, tool=a.tool,
-                                            args_sha256=a.args_sha256, escalation=escalation,
-                                            ev=a.evidence)
-        return (errs and "the passkey's assertion was refused: " + errs[0]) or \
-            passkeys.document_problem(a.evidence, args)
+            return str(e), None
+        errs, commit = self.passkey_directory.judge(
+            approver=a.approver, position=sys.maxsize, key=a.escalation, tool=a.tool,
+            args_sha256=a.args_sha256, escalation=escalation, ev=a.evidence)
+        if errs:
+            return "the passkey's assertion was refused: " + errs[0], None
+        problem = passkeys.document_problem(a.evidence, args)
+        return (problem, None) if problem else (None, commit)
 
     def _authorize(self, peer: str, tool: str, args: Dict[str, Any], token: Optional[str],
                    at: int) -> Dict[str, Any]:

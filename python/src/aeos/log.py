@@ -16,12 +16,14 @@ from __future__ import annotations
 import base64
 import contextlib
 import json
+import os
+import threading
 import time
 import uuid
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple, TypeVar
 
 from . import keys, merkle
 from .canon import (Link, cid_of_bytes, cid_parse, cid_str, dag_cbor, decode_dag_cbor)
@@ -52,6 +54,8 @@ STATEMENT_CONTEXT = b"aeos-action-record/statement/v1\n"
 MARKER_KIND = "x-issuer-signing"
 ISSUER_SIGNED = "issuer-signed"
 LOG_SIGNED_ONLY = "log-signed only"
+
+_T = TypeVar("_T")
 
 RECORD_KINDS = {"session.start", "session.end", "tool.call", "tool.result",
                 "policy.decision", "approval", "journal.entry", "period.transition", "note"}
@@ -297,6 +301,14 @@ class VerifyReport:
 
 
 class ActionLog:
+    """An audit trail on disk, safe to share between threads and between processes.
+
+    Lock order, across AE-OS: the passkey directory, then the gateway, then the recorder,
+    then this trail's file lock. A thread takes them in that order and never the other way
+    round; the trail's in-memory index lock is taken inside the file lock, and readers take
+    it alone.
+    """
+
     def __init__(self, path: Path, meta: Dict[str, Any],
                  key: Optional[keys.Ed25519PrivateKey]) -> None:
         self.path = Path(path)
@@ -311,6 +323,10 @@ class ActionLog:
         self._leaves: List[bytes] = []
         self._by_cid: Dict[bytes, int] = {}
         self._offset = 0
+        # Guards the in-memory index (_entries, _leaves, _by_cid, _offset) so a reader in one
+        # thread never loads a line a writer in another has written but not yet indexed.
+        self._index_lock = threading.RLock()
+        self._holder: Optional[int] = None         # thread holding the file lock, if any
 
     # ---- creation and opening ---------------------------------------------------------
 
@@ -355,18 +371,47 @@ class ActionLog:
 
     @contextlib.contextmanager
     def _locked(self) -> Iterator[None]:
+        """Hold the trail's file lock, then its index lock, with the index brought up to date
+        and any partly written last line removed.
+
+        Lock order: directory, gateway, recorder, file (see the class). A thread that already
+        holds this lock and asks for it again, for example by writing from inside the judge
+        of a write, would wait for itself forever, so it is refused at once instead."""
+        if self._holder == threading.get_ident():
+            raise RuntimeError("this thread is already writing to the audit trail: a write "
+                               "from inside another write would deadlock")
         with open(self.path / ".lock", "a") as lf:
             if fcntl:
                 fcntl.flock(lf, fcntl.LOCK_EX)
             try:
-                self._load_new()
-                yield
+                with self._index_lock:
+                    self._holder = threading.get_ident()
+                    try:
+                        self._load_new_locked()
+                        self._drop_partial_line()
+                        yield
+                    finally:
+                        self._holder = None
             finally:
                 if fcntl:
                     fcntl.flock(lf, fcntl.LOCK_UN)
 
+    def _drop_partial_line(self) -> None:
+        """Cut a partly written last line, left by a write that failed or a writer that died.
+        Called with the file lock held, so no live writer is still writing it; it was never
+        acknowledged, and appending after it would fuse it with the next record."""
+        path = self.path / "records.jsonl"
+        if path.stat().st_size > self._offset:
+            os.truncate(path, self._offset)
+
     def _load_new(self) -> None:
-        """Read records appended since the last read (possibly by another process)."""
+        """Read records appended since the last read (possibly by another process). Lines are
+        indexed under the index lock, so a read in one thread and a write in another never
+        both count the same line."""
+        with self._index_lock:
+            self._load_new_locked()
+
+    def _load_new_locked(self) -> None:
         with open(self.path / "records.jsonl", "rb") as f:
             f.seek(self._offset)
             for line in f:
@@ -419,8 +464,7 @@ class ActionLog:
                                   "file (--key).")
 
     def append(self, record: Dict[str, Any], content: Optional[Dict[str, Any]] = None, *,
-               allow_unsigned: bool = False,
-               before: Optional[Callable[[int], None]] = None) -> Entry:
+               allow_unsigned: bool = False) -> Entry:
         """Append a record, signed with the issuer key, and return its index and CID.
 
         The first signed append to a trail first appends an issuer-signing marker record
@@ -435,58 +479,125 @@ class ActionLog:
         `content` (optional) is stored beside the log under content/<cid>.json, for
         operators who keep full arguments and results. The record itself holds digests.
 
-        `before(index)` runs with the trail locked, once the record is known to be new and
-        before anything is written, with the position the record will take (after the marker,
-        if this append writes one). If it raises, nothing is written: this is how a caller
-        refuses a record it has just judged, with no other writer able to move the position.
+        Takes the trail's file lock (lock order: directory, gateway, recorder, file).
+        """
+        return self.append_all([record], [content], allow_unsigned=allow_unsigned)[0]
+
+    def append_all(self, records: Sequence[Dict[str, Any]],
+                   contents: Optional[Sequence[Optional[Dict[str, Any]]]] = None, *,
+                   allow_unsigned: bool = False) -> List[Entry]:
+        """Append several records together, as `append` does each, in one write under one
+        lock: a reader sees all of them or none, and a failed write leaves none behind (a
+        partly written last line is skipped by readers and cut by the next writer). A record
+        may name an earlier one of the same call as its parent. Records already in the trail
+        are returned as they are, not written again.
+
+        Takes the trail's file lock (lock order: directory, gateway, recorder, file).
+        """
+        return self._append_judged(records, contents, allow_unsigned=allow_unsigned)[0]
+
+    def _append_judged(self, records: Sequence[Dict[str, Any]],
+                       contents: Optional[Sequence[Optional[Dict[str, Any]]]] = None, *,
+                       allow_unsigned: bool = False,
+                       judge: Optional[Callable[[int], _T]] = None
+                       ) -> Tuple[List[Entry], Optional[_T]]:
+        """`append_all`, with `judge(position)` run under the lock once the first record is
+        known to be new, before anything is written, with the position it will take. Its
+        answer is returned beside the entries; if it raises, nothing is written. It must not
+        change anything or write to this trail: the caller applies what it judged only after
+        this returns, with everything on disk. Private: the recorder uses it for registry
+        changes, holding the passkey directory's lock around the whole of it.
+
+        Lock order: directory, gateway, recorder, file. The judge runs with the file lock
+        held, so it may only use a lock earlier in that order that its thread already holds,
+        never wait for one, and a write to this trail from inside it raises at once.
         """
         if not allow_unsigned:
             self.require_signing()
-        raw = dag_cbor(record)
-        cid = cid_of_bytes(raw)
+        contents = list(contents) if contents is not None else [None] * len(records)
+        if len(contents) != len(records):
+            raise ValueError("one content (or None) per record")
         with self._locked():
-            if cid in self._by_cid:            # same bytes, same record: idempotent
-                return self._entries[self._by_cid[cid]]
-            for p in record.get("parents", []):
-                if bytes(p) not in self._by_cid:
-                    raise KeyError(f"parent {cid_str(bytes(p))} is not in this log")
-            if before is not None:
-                before(len(self._entries) + (1 if not allow_unsigned
-                                             and self._marker_index is None else 0))
+            parents_ok = set(self._by_cid)
+            slots: List[Tuple[Optional[Entry], int]] = []   # (entry already there, or its batch slot)
+            todo: List[Tuple[Dict[str, Any], Optional[Dict[str, Any]]]] = []
+            batch_slot: Dict[bytes, int] = {}
+            for record, content in zip(records, contents):
+                cid = cid_of_bytes(dag_cbor(record))
+                if cid in self._by_cid:        # same bytes, same record: idempotent
+                    slots.append((self._entries[self._by_cid[cid]], -1))
+                    continue
+                if cid in batch_slot:
+                    slots.append((None, batch_slot[cid]))
+                    continue
+                for p in record.get("parents", []):
+                    if bytes(p) not in parents_ok:
+                        raise KeyError(f"parent {cid_str(bytes(p))} is not in this log")
+                parents_ok.add(cid)
+                batch_slot[cid] = len(todo)
+                slots.append((None, len(todo)))
+                todo.append((record, content))
+            if not todo:
+                return [e for e, _ in slots if e is not None], None
+            marker = None
             if not allow_unsigned and self._marker_index is None:
                 marker = make_record(MARKER_KIND, self.log_id,
                                      body={"key_id": self.meta["key_id"]},
-                                     ts=record.get("ts"))
-                self._marker_index = self._write(marker, None).index
+                                     ts=todo[0][0].get("ts"))
+                if cid_of_bytes(dag_cbor(marker)) in batch_slot:
+                    marker = None              # the record being written is the marker itself
+            verdict = None
+            if judge is not None and slots[0][0] is None:
+                verdict = judge(len(self._entries) + (1 if marker is not None else 0))
+            written = self._write_all(([(marker, None)] if marker is not None else []) + todo,
+                                      signed=not allow_unsigned)
+            if not allow_unsigned and self._marker_index is None:
+                self._marker_index = written[0].index
                 self._first_signed_seen = True
-                if cid in self._by_cid:        # the record was the marker itself
-                    return self._entries[self._by_cid[cid]]
-            return self._write(record, content, signed=not allow_unsigned)
+            mine = written[1:] if marker is not None else written
+            return [e if e is not None else mine[k] for e, k in slots], verdict
 
     def _write(self, record: Dict[str, Any], content: Optional[Dict[str, Any]],
                signed: bool = True) -> Entry:
         """Write one record to the file, under the lock; signed unless importing version 0."""
-        raw = dag_cbor(record)
-        cid = cid_of_bytes(raw)
-        sig = (self._key.sign(statement_message(cid))
-               if signed and self._key is not None else None)
-        e = Entry(len(self._entries), cid, raw, sig,
-                  self.meta["key_id"] if sig else None)
-        if content is not None:
-            cdir = self.path / "content"
-            cdir.mkdir(exist_ok=True)
-            (cdir / f"{cid_str(cid)}.json").write_text(json.dumps(content, indent=2))
-        fields: Dict[str, Any] = {"i": e.index, "cid": cid_str(cid), "cbor": b64(raw)}
-        if sig:
-            fields.update(key_id=e.signer, sig=b64(sig))
-        fields["view"] = to_view(decode_dag_cbor(raw))
-        line = json.dumps(fields, separators=(",", ":")) + "\n"
-        with open(self.path / "records.jsonl", "ab") as f:
-            f.write(line.encode())
-            f.flush()
-        self._offset += len(line.encode())
-        self._add(e)
-        return e
+        return self._write_all([(record, content)], signed)[0]
+
+    def _write_all(self, batch: Sequence[Tuple[Dict[str, Any], Optional[Dict[str, Any]]]],
+                   signed: bool = True) -> List[Entry]:
+        """Write records to the file in one write, with the file and index locks held, and
+        only then index them. If the write fails, the partial line is cut and nothing is
+        indexed."""
+        entries: List[Entry] = []
+        data = b""
+        for record, content in batch:
+            raw = dag_cbor(record)
+            cid = cid_of_bytes(raw)
+            sig = (self._key.sign(statement_message(cid))
+                   if signed and self._key is not None else None)
+            e = Entry(len(self._entries) + len(entries), cid, raw, sig,
+                      self.meta["key_id"] if sig else None)
+            if content is not None:
+                cdir = self.path / "content"
+                cdir.mkdir(exist_ok=True)
+                (cdir / f"{cid_str(cid)}.json").write_text(json.dumps(content, indent=2))
+            fields: Dict[str, Any] = {"i": e.index, "cid": cid_str(cid), "cbor": b64(raw)}
+            if sig:
+                fields.update(key_id=e.signer, sig=b64(sig))
+            fields["view"] = to_view(decode_dag_cbor(raw))
+            data += (json.dumps(fields, separators=(",", ":")) + "\n").encode()
+            entries.append(e)
+        try:
+            with open(self.path / "records.jsonl", "ab") as f:
+                f.write(data)
+                f.flush()
+        except BaseException:
+            with contextlib.suppress(OSError):
+                self._drop_partial_line()
+            raise
+        self._offset += len(data)
+        for e in entries:
+            self._add(e)
+        return entries
 
     def checkpoint(self, ts: Optional[int] = None) -> Checkpoint:
         """Sign the current tree head and record it in checkpoints.jsonl."""
@@ -507,17 +618,19 @@ class ActionLog:
 
     def entry(self, ref: str) -> Entry:
         """Look up a record by index or CID string."""
-        self._load_new()
-        if ref.isdigit():
-            return self._entries[int(ref)]
-        return self._entries[self._by_cid[cid_parse(ref)]]
+        with self._index_lock:
+            self._load_new_locked()
+            if ref.isdigit():
+                return self._entries[int(ref)]
+            return self._entries[self._by_cid[cid_parse(ref)]]
 
     def record(self, e: Entry) -> Dict[str, Any]:
         return decode_dag_cbor(e.raw)
 
     def entries(self) -> List[Entry]:
-        self._load_new()
-        return list(self._entries)
+        with self._index_lock:
+            self._load_new_locked()
+            return list(self._entries)
 
     def readable(self) -> List[Tuple[Entry, Dict[str, Any]]]:
         """The records that decode and have the shape of a record. A trail someone has
@@ -559,12 +672,14 @@ class ActionLog:
 
     def consistency_proof(self, old_size: int, new_size: int) -> List[bytes]:
         """Hashes proving the tree of new_size extends the tree of old_size (RFC 9162)."""
-        self._load_new()
-        if not 0 <= old_size <= new_size <= len(self._leaves):
+        with self._index_lock:
+            self._load_new_locked()
+            leaves = list(self._leaves)
+        if not 0 <= old_size <= new_size <= len(leaves):
             raise ValueError("checkpoint sizes are out of range for this log")
         if old_size in (0, new_size):
             return []
-        return merkle.consistency_proof(old_size, self._leaves[:new_size])
+        return merkle.consistency_proof(old_size, leaves[:new_size])
 
     def consistency(self, old: Checkpoint, new: Checkpoint) -> Dict[str, Any]:
         if not old.size <= new.size <= len(self._leaves):
