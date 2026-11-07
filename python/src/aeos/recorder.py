@@ -1,6 +1,6 @@
 """Record agent tool calls from any source: gateways, agent frameworks, or your own code.
 
-`Recorder` turns tool-call events into receipt-log records. The HTTP sink (including its
+`Recorder` turns tool-call events into audit trail records. The HTTP sink (including its
 OpenTelemetry endpoint) and the agent hook command use it, and it can be called directly:
 
     rec = Recorder(log, agent="spiffe://acme.example/agent/ap")
@@ -18,14 +18,14 @@ import threading
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from .canon import cid_parse, json_digest
-from .log import Entry, ReceiptLog, make_record
+from .log import Entry, ActionLog, make_record
 
 _MISSING: Any = object()
 ALLOW_LIST_POLICY = "aeos-allow-list/v0"
 
 
 class Recorder:
-    def __init__(self, log: ReceiptLog, *, agent: str, on_behalf_of: Optional[str] = None,
+    def __init__(self, log: ActionLog, *, agent: str, on_behalf_of: Optional[str] = None,
                  allow_tools: Optional[Iterable[str]] = None, store_content: bool = False,
                  checkpoint_every: int = 0) -> None:
         self.log = log

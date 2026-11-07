@@ -3,8 +3,8 @@
     aeos init LOG [--log-id ID] [--key PATH]
     aeos append LOG --agent ID --kind KIND [--subject S] [--body JSON] [--parent CID]...
     aeos checkpoint LOG
-    aeos receipt LOG REF [-o FILE]
-    aeos verify-receipt FILE --public-key HEX
+    aeos action-record LOG REF [-o FILE]       (old name: receipt)
+    aeos verify-action-record FILE --public-key HEX   (old name: verify-receipt)
     aeos consistency LOG --old N [--new M] [-o FILE]
     aeos verify-consistency FILE --public-key HEX
     aeos verify LOG
@@ -34,7 +34,7 @@ from typing import List, Optional
 from . import (__version__, audit, demo, fulldemo, hooks, mcp_proxy, report, setup, sink,
                status, ui, workspace)
 from .canon import cid_parse, cid_str
-from .log import ReceiptLog, make_record, to_view, verify_consistency_doc, verify_receipt
+from .log import ActionLog, make_record, to_view, verify_consistency_doc, verify_action_record
 from .recorder import Recorder
 from .status import MEANING
 
@@ -77,7 +77,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(prog="aeos",
                                  description="AE-OS on one computer: agent identities, delegated "
                                  "authority, an MCP gateway, rules, books of account, "
-                                 "witnesses and a signed receipt for every action.",
+                                 "witnesses and an action record for every action.",
                                  epilog="New here? Run 'aeos ui' to work in your web browser, or "
                                         "'aeos demo' to see an example here.")
     ap.add_argument("--version", action="version", version=__version__)
@@ -103,14 +103,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("log")
     p.add_argument("--key")
 
-    p = sub.add_parser("receipt", help="export a receipt for one record")
+    p = sub.add_parser("action-record", aliases=["receipt"],
+                       help="export an action record with its proof of inclusion")
     p.add_argument("log")
     p.add_argument("ref", help="record number (as listed by 'show') or CID")
     p.add_argument("--key", help="signing key file, used to sign a fresh checkpoint if the "
                                  "latest one does not yet cover the record")
     p.add_argument("-o", "--out")
 
-    p = sub.add_parser("verify-receipt", help="check a receipt offline")
+    p = sub.add_parser("verify-action-record", aliases=["verify-receipt"],
+                       help="verify an action record offline")
     p.add_argument("file")
     p.add_argument("--public-key", required=True, help="hex, a file holding hex, or log.json")
 
@@ -283,10 +285,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     if a.cmd in ("agents", "decisions", "books"):
         folder, evidence = report.locate(Path(a.folder))
         if not (folder / "log.json").exists():
-            print(f"There is no receipt log in {a.folder}. Give the folder that holds "
+            print(f"There is no audit trail in {a.folder}. Give the folder that holds "
                   "log.json, or an evidence folder.", file=sys.stderr)
             return 2
-        log = ReceiptLog.open(folder, read_only=True)
+        log = ActionLog.open(folder, read_only=True)
         if a.cmd == "agents":
             view, lines = report.agents(log), report.lines_agents
         elif a.cmd == "decisions":
@@ -306,7 +308,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 2
     if a.cmd == "trace":
         folder, evidence = report.locate(Path(a.folder))
-        log = ReceiptLog.open(folder, read_only=True)
+        log = ActionLog.open(folder, read_only=True)
         names = workspace.names_of(evidence) if evidence else {}
         try:
             view = report.trace(log, a.ref, names)
@@ -327,18 +329,20 @@ def main(argv: Optional[List[str]] = None) -> int:
             print("\nSetup cancelled; nothing was created.")
             return 130
     if a.cmd == "init":
-        log = ReceiptLog.create(Path(a.log), log_id=a.log_id,
+        log = ActionLog.create(Path(a.log), log_id=a.log_id,
                                 key_path=Path(a.key) if a.key else None)
         print(json.dumps({"log_id": log.log_id, "public_key": log.public_key.hex(),
                           "key_id": log.meta["key_id"]}, indent=2))
         return 0
 
-    if a.cmd == "verify-receipt":
+    if a.cmd in ("verify-action-record", "verify-receipt"):
         doc = json.loads(Path(a.file).read_text())
-        return _report(verify_receipt(doc, _public_key(a.public_key)),
-                       f"record {doc.get('index')} ({doc.get('cid')}) is in log "
-                       f"{doc.get('log_id')} at checkpoint size {doc['checkpoint']['size']}",
-                       "receipt")
+        problems = verify_action_record(doc, _public_key(a.public_key))
+        size = doc["checkpoint"]["size"] if isinstance(doc.get("checkpoint"), dict) else "?"
+        return _report(problems,
+                       f"action record {doc.get('index')} ({doc.get('cid')}) is verified: it is "
+                       f"in audit trail {doc.get('log_id')} at checkpoint size {size}",
+                       "action-record")
 
     if a.cmd == "verify-consistency":
         doc = json.loads(Path(a.file).read_text())
@@ -349,7 +353,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     key = Path(a.key) if getattr(a, "key", None) else None
 
     def recorder() -> Recorder:
-        return Recorder(ReceiptLog.open(Path(a.log), key_path=key), agent=a.agent,
+        return Recorder(ActionLog.open(Path(a.log), key_path=key), agent=a.agent,
                         on_behalf_of=a.on_behalf_of, allow_tools=a.allow_tool,
                         store_content=a.store_content, checkpoint_every=a.checkpoint_every)
 
@@ -381,7 +385,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
 
     read_only = a.cmd in ("verify", "show", "consistency")
-    log = ReceiptLog.open(Path(a.log), key_path=key, read_only=read_only)
+    log = ActionLog.open(Path(a.log), key_path=key, read_only=read_only)
 
     if a.cmd == "append":
         body = json.loads(a.body)
@@ -393,14 +397,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     if a.cmd == "checkpoint":
         print(json.dumps(log.checkpoint().to_json(), indent=2))
         return 0
-    if a.cmd == "receipt":
+    if a.cmd in ("action-record", "receipt"):
         try:
             e = log.entry(a.ref)
         except (IndexError, KeyError, ValueError):
             print(f"No record {a.ref} in this log ({len(log)} records). "
                   f"See the record numbers with: aeos show {a.log}", file=sys.stderr)
             return 1
-        _write(log.receipt(e), a.out)
+        _write(log.action_record(e), a.out)
         return 0
     if a.cmd == "consistency":
         cps = log.checkpoints()

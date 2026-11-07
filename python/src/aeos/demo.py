@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Callable
 
 from .canon import json_digest
-from .log import ReceiptLog, make_record, verify_consistency_doc, verify_receipt
+from .log import ActionLog, make_record, verify_consistency_doc, verify_action_record
 
 AGENT = "spiffe://acme.example/agent/accounts-payable"
 CONTROLLER = "spiffe://acme.example/human/controller/j-smith"
@@ -35,11 +35,11 @@ def run(folder: Path, out: Callable[[str], None] = print) -> int:
     out("AE-OS demo: an AI agent pays a supplier invoice at Acme, a fictional "
         "company,\nand an auditor checks the evidence.")
 
-    log = ReceiptLog.create(folder / "log", log_id="urn:example:acme:accounts-payable",
+    log = ActionLog.create(folder / "log", log_id="urn:example:acme:accounts-payable",
                             key_path=None)
-    say("A receipt log is created",
+    say("An audit trail is created",
         f"The log lives in {folder / 'log'}. It also holds a signing key (signing.key). "
-        "Anyone with the matching public key can check the log's receipts, and only the "
+        "Anyone with the matching public key can verify the log's action records, and only the "
         "holder of the signing key can issue them. In real use, keep the signing key away "
         "from the log and from the agent.")
 
@@ -73,14 +73,14 @@ def run(folder: Path, out: Callable[[str], None] = print) -> int:
         f"The log then signs a checkpoint: a sealed statement that it held {first.size} "
         "records with this exact content at this moment.")
 
-    receipt = log.receipt(result, first)
-    (folder / "payment-receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
+    record = log.action_record(result, first)
+    (folder / "payment-action-record.json").write_text(json.dumps(record, indent=2) + "\n")
     (folder / "public-key.txt").write_text(log.public_key.hex() + "\n")
-    problems = verify_receipt(receipt, log.public_key)
-    say("The auditor checks a receipt for the payment",
-        "The auditor receives payment-receipt.json and the log's public key "
+    problems = verify_action_record(record, log.public_key)
+    say("The auditor verifies the action record for the payment",
+        "The auditor receives payment-action-record.json and the log's public key "
         "(public-key.txt). With nothing else, they confirm the payment record is in the "
-        "signed log. Result: " + ("VALID" if not problems else "INVALID " + str(problems)))
+        "signed audit trail. Result: " + ("VALID" if not problems else "INVALID " + str(problems)))
 
     log.append(make_record("session.end", AGENT, body={}, parents=[session.cid]))
     second = log.checkpoint()
@@ -105,7 +105,7 @@ def run(folder: Path, out: Callable[[str], None] = print) -> int:
     d["view"]["body"]["decision"] = "allow"
     lines[decision.index] = json.dumps(d)
     (copy / "records.jsonl").write_text("\n".join(lines) + "\n")
-    found = ReceiptLog.open(copy, read_only=True).verify().problems
+    found = ActionLog.open(copy, read_only=True).verify().problems
     say("Someone edits the record afterwards, and verification catches it",
         "In a copy of the log (tampered-copy), the policy decision is changed from "
         "\"escalate\" to \"allow\", as if the payment never needed approval. Checking the "
@@ -115,7 +115,7 @@ def run(folder: Path, out: Callable[[str], None] = print) -> int:
     out("\nThe example files are in " + str(folder) + ". Try:")
     out(f"  aeos status {folder / 'log'}")
     out(f"  aeos show {folder / 'log'}")
-    out(f"  aeos verify-receipt {folder / 'payment-receipt.json'} "
+    out(f"  aeos verify-action-record {folder / 'payment-action-record.json'} "
         f"--public-key {folder / 'public-key.txt'}")
     out(f"  aeos verify {folder / 'tampered-copy'}")
     out("To start a log of your own, run: aeos setup")

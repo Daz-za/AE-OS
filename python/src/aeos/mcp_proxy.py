@@ -1,4 +1,4 @@
-"""Record every MCP tool call an agent makes, with signed receipts.
+"""Record every MCP tool call an agent makes, as action records in a signed audit trail.
 
 The proxy runs between an MCP client (the agent) and an MCP server over stdio:
 
@@ -19,13 +19,13 @@ import threading
 from typing import Any, BinaryIO, Dict, Iterable, List, Optional
 
 from .canon import json_digest
-from .log import Entry, ReceiptLog, make_record
+from .log import Entry, ActionLog, make_record
 
 
 class McpRecorder:
     """Protocol logic, separated from process plumbing so it can be tested directly."""
 
-    def __init__(self, log: ReceiptLog, agent: str, on_behalf_of: Optional[str] = None,
+    def __init__(self, log: ActionLog, agent: str, on_behalf_of: Optional[str] = None,
                  allow_tools: Optional[Iterable[str]] = None, store_content: bool = False,
                  checkpoint_every: int = 0) -> None:
         self.log = log
@@ -119,7 +119,7 @@ def _messages(line: bytes) -> List[Dict[str, Any]]:
     return [m for m in items if isinstance(m, dict)]
 
 
-def run(log: ReceiptLog, command: List[str], *, agent: str, on_behalf_of: Optional[str],
+def run(log: ActionLog, command: List[str], *, agent: str, on_behalf_of: Optional[str],
         allow_tools: Optional[List[str]], store_content: bool, checkpoint_every: int,
         stdin: BinaryIO = sys.stdin.buffer, stdout: BinaryIO = sys.stdout.buffer) -> int:
     rec = McpRecorder(log, agent, on_behalf_of, allow_tools, store_content, checkpoint_every)

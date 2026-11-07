@@ -1,4 +1,4 @@
-"""File-backed, append-only receipt log.
+"""File-backed, append-only audit trail of action records.
 
 A log is a directory:
 
@@ -18,6 +18,7 @@ import contextlib
 import json
 import time
 import uuid
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Sequence
@@ -30,8 +31,13 @@ try:  # POSIX advisory locking; on other platforms only one writer process is su
 except ImportError:  # pragma: no cover
     fcntl = None  # type: ignore[assignment]
 
+# These two strings are part of the signed bytes and the on-disk format, so they keep their
+# original text (spec/action-records-v1.md sections 3 and 6).
 FORMAT = "aeos-receipts/v0"
 CHECKPOINT_CONTEXT = b"aeos-receipts/checkpoint/v0\n"
+
+ACTION_RECORD_TYPE = "aeos-action-record/v1"
+LEGACY_RECEIPT_TYPE = "aeos-receipt/v0"
 
 RECORD_KINDS = {"session.start", "session.end", "tool.call", "tool.result",
                 "policy.decision", "approval", "journal.entry", "period.transition", "note"}
@@ -87,7 +93,7 @@ def to_view(v: Any) -> Any:
 
 
 # --------------------------------------------------------------------------------------
-# Checkpoints and receipts
+# Checkpoints and action records
 # --------------------------------------------------------------------------------------
 
 
@@ -118,19 +124,23 @@ class Checkpoint:
                 and keys.verify(public_key, self.sig, self.message()))
 
 
-def verify_receipt(receipt: Dict[str, Any], public_key: bytes) -> List[str]:
-    """Check a receipt offline. Returns a list of problems; an empty list means valid."""
+def verify_action_record(doc: Dict[str, Any], public_key: bytes) -> List[str]:
+    """Check an action record with its Receipt offline.
+
+    Accepts `aeos-action-record/v1` and the version 0 type `aeos-receipt/v0`. Returns a list of
+    problems; an empty list means the action record is verified.
+    """
     problems: List[str] = []
     try:
-        if receipt.get("type") != "aeos-receipt/v0":
-            return ["not an aeos-receipt/v0 document"]
-        cp = Checkpoint.from_json(receipt["checkpoint"])
-        raw = unb64(receipt["record"])
-        index = int(receipt["index"])
-        proof = [bytes.fromhex(h) for h in receipt["inclusion_proof"]]
+        if doc.get("type") not in (ACTION_RECORD_TYPE, LEGACY_RECEIPT_TYPE):
+            return [f"not an {ACTION_RECORD_TYPE} document (or {LEGACY_RECEIPT_TYPE})"]
+        cp = Checkpoint.from_json(doc["checkpoint"])
+        raw = unb64(doc["record"])
+        index = int(doc["index"])
+        proof = [bytes.fromhex(h) for h in doc["inclusion_proof"]]
     except (KeyError, ValueError, TypeError) as e:
-        return [f"malformed receipt: {e}"]
-    if cp.log_id != receipt.get("log_id"):
+        return [f"malformed action record: {e}"]
+    if cp.log_id != doc.get("log_id"):
         problems.append("checkpoint belongs to a different log")
     if not cp.verify(public_key):
         problems.append("checkpoint signature does not verify with the given public key")
@@ -139,7 +149,7 @@ def verify_receipt(receipt: Dict[str, Any], public_key: bytes) -> List[str]:
     except ValueError as e:
         problems.append(f"record bytes are not canonical: {e}")
     cid = cid_of_bytes(raw)
-    if cid_str(cid) != receipt.get("cid"):
+    if cid_str(cid) != doc.get("cid"):
         problems.append("record CID does not match the record bytes")
     if not merkle.verify_inclusion(merkle.leaf_hash(cid), index, cp.size, proof, cp.root):
         problems.append("inclusion proof does not lead to the checkpoint root")
@@ -188,7 +198,7 @@ class VerifyReport:
         return not self.problems
 
 
-class ReceiptLog:
+class ActionLog:
     def __init__(self, path: Path, meta: Dict[str, Any],
                  key: Optional[keys.Ed25519PrivateKey]) -> None:
         self.path = Path(path)
@@ -205,11 +215,11 @@ class ReceiptLog:
 
     @classmethod
     def create(cls, path: Path, *, log_id: Optional[str] = None,
-               key_path: Optional[Path] = None) -> "ReceiptLog":
+               key_path: Optional[Path] = None) -> "ActionLog":
         path = Path(path)
         path.mkdir(parents=True, exist_ok=True)
         if (path / "log.json").exists():
-            raise FileExistsError(f"{path} already holds a receipt log")
+            raise FileExistsError(f"{path} already holds an audit trail")
         key_path = Path(key_path) if key_path else path / "signing.key"
         key = keys.load_key(key_path) if key_path.exists() else keys.generate_key(key_path)
         pub = keys.public_bytes(key)
@@ -222,7 +232,7 @@ class ReceiptLog:
 
     @classmethod
     def open(cls, path: Path, *, key_path: Optional[Path] = None,
-             read_only: bool = False) -> "ReceiptLog":
+             read_only: bool = False) -> "ActionLog":
         path = Path(path)
         meta = json.loads((path / "log.json").read_text())
         if meta.get("format") != FORMAT:
@@ -342,8 +352,8 @@ class ReceiptLog:
         self._load_new()
         return list(self._entries)
 
-    def receipt(self, e: Entry, checkpoint: Optional[Checkpoint] = None) -> Dict[str, Any]:
-        """Receipt for one record against a checkpoint that covers it.
+    def action_record(self, e: Entry, checkpoint: Optional[Checkpoint] = None) -> Dict[str, Any]:
+        """The record with its Receipt, against a checkpoint that covers it.
 
         Uses the latest checkpoint, signing a new one if none covers the record yet.
         """
@@ -353,10 +363,16 @@ class ReceiptLog:
         if checkpoint.size <= e.index:
             raise ValueError("checkpoint does not cover this record")
         proof = merkle.inclusion_proof(e.index, self._leaves[:checkpoint.size])
-        return {"type": "aeos-receipt/v0", "log_id": self.log_id, "index": e.index,
+        return {"type": ACTION_RECORD_TYPE, "log_id": self.log_id, "index": e.index,
                 "cid": cid_str(e.cid), "record": b64(e.raw),
                 "inclusion_proof": [h.hex() for h in proof],
                 "checkpoint": checkpoint.to_json()}
+
+    def receipt(self, e: Entry, checkpoint: Optional[Checkpoint] = None) -> Dict[str, Any]:
+        """Deprecated name of `action_record`, kept for one release."""
+        warnings.warn("ActionLog.receipt() is renamed action_record()", DeprecationWarning,
+                      stacklevel=2)
+        return self.action_record(e, checkpoint)
 
     def consistency_proof(self, old_size: int, new_size: int) -> List[bytes]:
         """Hashes proving the tree of new_size extends the tree of old_size (RFC 9162)."""
@@ -422,3 +438,16 @@ class ReceiptLog:
                 rep.problems.append(f"{label}: smaller than the checkpoint before it")
             prev = cp
         return rep
+
+
+# Version 0 names, kept for one release so code written against them keeps working.
+DEPRECATED_ALIASES = {"ReceiptLog": "ActionLog", "verify_receipt": "verify_action_record"}
+
+
+def __getattr__(name: str) -> Any:
+    if name in DEPRECATED_ALIASES:
+        new = DEPRECATED_ALIASES[name]
+        warnings.warn(f"aeos.{name} is renamed {new}; the old name is removed after the "
+                      "next release", DeprecationWarning, stacklevel=2)
+        return globals()[new]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

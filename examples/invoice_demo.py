@@ -8,14 +8,14 @@ import json
 import tempfile
 from pathlib import Path
 
-from aeos import ReceiptLog, make_record, verify_consistency_doc, verify_receipt
+from aeos import ActionLog, make_record, verify_consistency_doc, verify_action_record
 from aeos.canon import json_digest
 
 AGENT = "spiffe://acme.example/agent/accounts-payable/7f3a"
 CONTROLLER = "spiffe://acme.example/human/controller/j-smith"
 
 work = Path(tempfile.mkdtemp())
-log = ReceiptLog.create(work / "ap-log", log_id="urn:example:acme:ap")
+log = ActionLog.create(work / "ap-log", log_id="urn:example:acme:ap")
 
 # 1. The agent session starts, acting for the controller.
 session = log.append(make_record("session.start", AGENT, on_behalf_of=CONTROLLER,
@@ -45,9 +45,10 @@ first = log.checkpoint()
 log.append(make_record("session.end", AGENT, body={}, parents=[session.cid]))
 second = log.checkpoint()
 
-# 5. The auditor receives a receipt for the payment and the log's public key.
-receipt = log.receipt(result, first)
-print("Receipt check:", verify_receipt(receipt, log.public_key) or "valid")
+# 5. The auditor receives the action record for the payment, with its Receipt, and the log's
+#    public key.
+record = log.action_record(result, first)
+print("Action record check:", verify_action_record(record, log.public_key) or "verified")
 
 # 6. The auditor kept the first checkpoint and asks for proof the log only grew since then.
 proof = log.consistency(first, second)
@@ -63,4 +64,4 @@ d = json.loads(lines[2])
 d["view"]["body"]["decision"] = "allow"
 lines[2] = json.dumps(d)
 (work / "ap-log" / "records.jsonl").write_text("\n".join(lines) + "\n")
-print("Log after tampering:", ReceiptLog.open(work / "ap-log", read_only=True).verify().problems)
+print("Log after tampering:", ActionLog.open(work / "ap-log", read_only=True).verify().problems)

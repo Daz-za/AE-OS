@@ -1,4 +1,4 @@
-"""A point-and-click view of a workspace, a receipt log or an evidence folder: `aeos ui`.
+"""A point-and-click view of a workspace, an audit trail or an evidence folder: `aeos ui`.
 
 With a workspace (see workspace.py) the page shows the architecture as it runs: it sets
 the company up step by step, plays the film's quarter-end close as real calls, sends tool
@@ -7,7 +7,7 @@ workspace.json.
 
 The page is served only to this computer (127.0.0.1). Each launch makes a fresh access
 code that is part of the address the browser opens. Other websites open in the same
-browser do not have it and cannot use the page's functions. Receipts and growth proofs are checked inside
+browser do not have it and cannot use the page's functions. Action records and growth proofs are verified inside
 the browser by verify.js, the same checker that ae-os.org uses.
 """
 from __future__ import annotations
@@ -24,7 +24,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .. import audit, books, demo, examples, fulldemo, report, setup, status, workspace
 from ..canon import cid_str
-from ..log import ReceiptLog, to_view
+from ..log import ActionLog, to_view
 
 HERE = Path(__file__).parent
 STATIC = {"/": ("index.html", "text/html"), "/app.js": ("app.js", "text/javascript"),
@@ -83,10 +83,10 @@ class App:
         if folder is not None:
             self.open({"folder": str(folder), "key": str(key) if key else ""})
 
-    def _log(self) -> ReceiptLog:
+    def _log(self) -> ActionLog:
         if self.folder is None:
             raise UserError("No log is open yet.")
-        return ReceiptLog.open(self.folder, key_path=self.key)
+        return ActionLog.open(self.folder, key_path=self.key)
 
     def state(self, _: Dict[str, Any]) -> Dict[str, Any]:
         out: Dict[str, Any] = {"folder": str(self.folder) if self.folder else None,
@@ -138,13 +138,13 @@ class App:
         self.close()
         folder, evidence = report.locate(given)
         if not (folder / "log.json").exists():
-            raise UserError(f"There is no receipt log in {folder}. Choose the folder that "
+            raise UserError(f"There is no audit trail in {folder}. Choose the folder that "
                             "holds log.json, or an evidence folder.")
         key = Path(str(req["key"])).expanduser() if req.get("key") else find_key(folder)
         if key is not None and not key.exists():
             raise UserError(f"There is no signing key file at {key}.")
         try:
-            ReceiptLog.open(folder, key_path=key)
+            ActionLog.open(folder, key_path=key)
         except ValueError as e:
             raise UserError(f"This log cannot be opened: {e}.") from None
         self.folder, self.key = folder.resolve(), key.resolve() if key else None
@@ -403,7 +403,7 @@ class App:
         log.checkpoint()
         return self.state({})
 
-    def receipt(self, req: Dict[str, Any]) -> Dict[str, Any]:
+    def action_record(self, req: Dict[str, Any]) -> Dict[str, Any]:
         log = self._log()
         try:
             e = log.entry(str(req.get("index", "")))
@@ -413,7 +413,7 @@ class App:
         if not covered and not log.can_sign:
             raise UserError("No signed checkpoint covers this record yet, and signing one "
                             "needs the log's signing key.")
-        return log.receipt(e)
+        return log.action_record(e)
 
     def growth(self, req: Dict[str, Any]) -> Dict[str, Any]:
         log = self._log()
@@ -429,7 +429,8 @@ ROUTES: Dict[Tuple[str, str], Callable[[App, Dict[str, Any]], Dict[str, Any]]] =
     ("GET", "/api/state"): App.state, ("POST", "/api/open"): App.open,
     ("POST", "/api/demo"): App.demo, ("POST", "/api/create"): App.create,
     ("GET", "/api/records"): App.records, ("POST", "/api/verify"): App.verify,
-    ("POST", "/api/checkpoint"): App.checkpoint, ("GET", "/api/receipt"): App.receipt,
+    ("POST", "/api/checkpoint"): App.checkpoint, ("GET", "/api/action-record"): App.action_record,
+    ("GET", "/api/receipt"): App.action_record,
     ("GET", "/api/growth"): App.growth, ("POST", "/api/full-demo"): App.full_demo,
     ("POST", "/api/audit"): App.audit, ("GET", "/api/agents"): App.agents,
     ("GET", "/api/decisions"): App.decisions, ("GET", "/api/books"): App.books,

@@ -7,7 +7,7 @@ from http.server import ThreadingHTTPServer
 
 import pytest
 
-from aeos import ReceiptLog, Recorder
+from aeos import ActionLog, Recorder
 from aeos.sink import ingest, make_handler, serve
 
 from test_events import otlp, span
@@ -18,7 +18,7 @@ TOKEN = "test-token"
 
 @pytest.fixture
 def server(tmp_path):
-    rec = Recorder(ReceiptLog.create(tmp_path / "log"), agent=AGENT)
+    rec = Recorder(ActionLog.create(tmp_path / "log"), agent=AGENT)
     srv = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(rec, TOKEN))
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     yield rec, f"http://127.0.0.1:{srv.server_port}"
@@ -68,13 +68,13 @@ def test_rejects_bad_token_and_protobuf(server):
 
 
 def test_open_sink_needs_a_token(tmp_path):
-    rec = Recorder(ReceiptLog.create(tmp_path / "log"), agent=AGENT)
+    rec = Recorder(ActionLog.create(tmp_path / "log"), agent=AGENT)
     with pytest.raises(ValueError):
         serve(rec, "0.0.0.0", 0, None)
 
 
 def test_ingest_collector_file(tmp_path):
-    rec = Recorder(ReceiptLog.create(tmp_path / "log"), agent=AGENT)
+    rec = Recorder(ActionLog.create(tmp_path / "log"), agent=AGENT)
     lines = [json.dumps(otlp(span("tools/call t", {"mcp.method.name": "tools/call",
                                                     "gen_ai.tool.name": "t",
                                                     "jsonrpc.request.id": str(i)},

@@ -1,21 +1,21 @@
-//! aeos-verify: check AE-OS Receipts evidence offline.
+//! aeos-verify: verify AE-OS action records offline.
 
 use aeos_verify::canon::{hex, json_digest, unhex};
-use aeos_verify::{verify_consistency_doc, verify_log, verify_receipt, LogFiles};
+use aeos_verify::{verify_action_record, verify_consistency_doc, verify_log, LogFiles};
 use serde_json::Value as Json;
 use std::path::Path;
 use std::process::ExitCode;
 
 const USAGE: &str = "\
-aeos-verify: check AE-OS Receipts evidence offline
+aeos-verify: verify AE-OS action records offline
 
 Usage:
-  aeos-verify receipt FILE --public-key KEY        check one receipt
-  aeos-verify consistency FILE --public-key KEY    check that a log only grew
-  aeos-verify log DIR --public-key KEY             recompute and check a whole log
+  aeos-verify action-record FILE --public-key KEY  verify one action record (old name: receipt)
+  aeos-verify consistency FILE --public-key KEY    check that an audit trail only grew
+  aeos-verify log DIR --public-key KEY             recompute and check a whole audit trail
   aeos-verify digest FILE                          SHA-256 of a JSON file's canonical form
 
-KEY is the log's Ed25519 public key as hex, a file holding the hex, or a log.json file.
+KEY is the audit trail's Ed25519 public key as hex, a file holding the hex, or a log.json file.
 Take the key from a source you trust, not from the evidence under review.
 
 Exit status: 0 valid, 1 invalid, 2 usage or input error.";
@@ -96,16 +96,16 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
     }
     let key = public_key(&key.ok_or("--public-key is required")?)?;
     match cmd.as_str() {
-        "receipt" => {
+        "action-record" | "receipt" => {
             let doc = read_json(target)?;
             let ok = format!(
-                "record {} ({}) is in log {} at checkpoint size {}",
+                "action record {} ({}) is verified: it is in audit trail {} at checkpoint size {}",
                 doc["index"],
                 doc["cid"].as_str().unwrap_or("?"),
                 doc["log_id"].as_str().unwrap_or("?"),
                 doc["checkpoint"]["size"]
             );
-            Ok(report(&verify_receipt(&doc, &key), ok))
+            Ok(report(&verify_action_record(&doc, &key), ok))
         }
         "consistency" => {
             let doc = read_json(target)?;

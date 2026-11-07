@@ -1,4 +1,4 @@
-/* Styles for the "Check a receipt" panel (check.js). Colours come from the host page's
+/* Styles for the "Check an action record" panel (check.js). Colours come from the host page's
    custom properties when it defines them. */
 .chk-drop { display: grid; gap: 4px; padding: 20px; border: 2px dashed var(--line, #c8cdd3);
   border-radius: 10px; cursor: pointer; background: var(--panel, #fff); }

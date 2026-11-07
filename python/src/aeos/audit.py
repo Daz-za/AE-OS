@@ -1,12 +1,12 @@
 """`aeos audit`: check an evidence folder from end to end, as an auditor would.
 
-An evidence folder holds a receipt log plus what is needed to check who acted:
+An evidence folder holds an audit trail plus what is needed to check who acted:
 
     evidence.json   what is where: trust domain, trust bundle, SVID certificates,
                     the log folder, the witnesses' public keys and how many must cosign
     trust/          the trust domain's root certificate (trust bundle)
     svids/          the X.509-SVID certificate chains the agents presented (no keys)
-    log/            the receipt log, with cosignatures.jsonl from the witnesses
+    log/            the audit trail, with cosignatures.jsonl from the witnesses
     intents/        the signed intent envelopes, and tokens/ the capability tokens the
                     agents presented, when the gateway required them
     policies/       the compiled policy modules (<sha256>.wasm) and their data
@@ -39,7 +39,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import books, delegation, identity, policy, witness
 from .canon import cid_str
-from .log import ReceiptLog
+from .log import ActionLog
 
 
 def _load_svids(folder: Path) -> Dict[str, List[Any]]:
@@ -61,7 +61,7 @@ def run(folder: Path, *, bundle: Optional[Path] = None, public_key: Optional[str
     findings: List[str] = []
     problems: List[str] = []
 
-    log = ReceiptLog.open(folder / manifest["log"], read_only=True)
+    log = ActionLog.open(folder / manifest["log"], read_only=True)
     if public_key and public_key.lower() != log.public_key.hex():
         problems.append("the log's public key differs from the one you trust")
     rep = log.verify()
@@ -140,7 +140,7 @@ def run(folder: Path, *, bundle: Optional[Path] = None, public_key: Optional[str
     return findings, problems
 
 
-def _check_capabilities(log: ReceiptLog, folder: Path, manifest: Dict[str, Any],
+def _check_capabilities(log: ActionLog, folder: Path, manifest: Dict[str, Any],
                         authority_key: bytes, principal_keys: Dict[str, bytes],
                         findings: List[str], problems: List[str]) -> None:
     """Replay each capability decision and check that every call that ran was allowed."""
@@ -219,7 +219,7 @@ def _replay(rec: Dict[str, Any], tokens: Dict[str, bytes],
     return True, ""
 
 
-def _check_policies(log: ReceiptLog, folder: Path, principal_keys: Dict[str, bytes],
+def _check_policies(log: ActionLog, folder: Path, principal_keys: Dict[str, bytes],
                     findings: List[str], problems: List[str]) -> None:
     """Replay each policy decision, check approvals, and check that calls that ran were
     allowed by the policy."""
@@ -288,7 +288,7 @@ def _check_policies(log: ReceiptLog, folder: Path, principal_keys: Dict[str, byt
 
 
 
-def _check_books(log: ReceiptLog, principal_keys: Dict[str, bytes], setup: Dict[str, Any],
+def _check_books(log: ActionLog, principal_keys: Dict[str, bytes], setup: Dict[str, Any],
                  findings: List[str], problems: List[str]) -> None:
     """Rebuild the books from the log and check their rules and numbering."""
     records = [(e.index, cid_str(e.cid), log.record(e)) for e in log.entries()]

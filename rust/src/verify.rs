@@ -1,4 +1,4 @@
-//! Checkpoints, receipts, consistency proofs and full log verification (spec sections 3-4).
+//! Checkpoints, action records, consistency proofs and full audit trail verification (spec sections 3-4).
 //!
 //! Every check returns a list of problems in the same words as the Python reference
 //! implementation; an empty list means valid.
@@ -112,25 +112,38 @@ impl Checkpoint {
     }
 }
 
-/// Check an `aeos-receipt/v0` document offline against a trusted public key.
-pub fn verify_receipt(receipt: &Json, public_key: &[u8]) -> Vec<String> {
-    if receipt.get("type").and_then(Json::as_str) != Some("aeos-receipt/v0") {
-        return vec!["not an aeos-receipt/v0 document".into()];
+pub const ACTION_RECORD_TYPE: &str = "aeos-action-record/v1";
+pub const LEGACY_RECEIPT_TYPE: &str = "aeos-receipt/v0";
+
+/// Deprecated version 0 name of [`verify_action_record`], kept for one release.
+#[deprecated(note = "renamed verify_action_record")]
+pub fn verify_receipt(doc: &Json, public_key: &[u8]) -> Vec<String> {
+    verify_action_record(doc, public_key)
+}
+
+/// Check an action record with its Receipt offline against a trusted public key. Reads
+/// `aeos-action-record/v1` and the version 0 type `aeos-receipt/v0`.
+pub fn verify_action_record(doc: &Json, public_key: &[u8]) -> Vec<String> {
+    let doc_type = doc.get("type").and_then(Json::as_str);
+    if doc_type != Some(ACTION_RECORD_TYPE) && doc_type != Some(LEGACY_RECEIPT_TYPE) {
+        return vec![format!(
+            "not an {ACTION_RECORD_TYPE} document (or {LEGACY_RECEIPT_TYPE})"
+        )];
     }
     let parsed = (|| -> Result<_, String> {
         Ok((
-            Checkpoint::from_json(field(receipt, "checkpoint")?)?,
-            unb64(&text(receipt, "record")?)?,
-            uint(receipt, "index")?,
-            hex_list(receipt, "inclusion_proof")?,
+            Checkpoint::from_json(field(doc, "checkpoint")?)?,
+            unb64(&text(doc, "record")?)?,
+            uint(doc, "index")?,
+            hex_list(doc, "inclusion_proof")?,
         ))
     })();
     let (cp, raw, index, proof) = match parsed {
         Ok(x) => x,
-        Err(e) => return vec![format!("malformed receipt: {e}")],
+        Err(e) => return vec![format!("malformed action record: {e}")],
     };
     let mut problems = Vec::new();
-    if Some(cp.log_id.as_str()) != receipt.get("log_id").and_then(Json::as_str) {
+    if Some(cp.log_id.as_str()) != doc.get("log_id").and_then(Json::as_str) {
         problems.push("checkpoint belongs to a different log".into());
     }
     if !cp.verify(public_key) {
@@ -140,7 +153,7 @@ pub fn verify_receipt(receipt: &Json, public_key: &[u8]) -> Vec<String> {
         problems.push(format!("record bytes are not canonical: {e}"));
     }
     let cid = cid_of_bytes(&raw);
-    if Some(cid_str(&cid).as_str()) != receipt.get("cid").and_then(Json::as_str) {
+    if Some(cid_str(&cid).as_str()) != doc.get("cid").and_then(Json::as_str) {
         problems.push("record CID does not match the record bytes".into());
     }
     if !merkle::verify_inclusion(&merkle::leaf_hash(&cid), index, cp.size, &proof, &cp.root) {

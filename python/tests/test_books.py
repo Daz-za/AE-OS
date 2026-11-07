@@ -1,7 +1,7 @@
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from aeos import ReceiptLog, Recorder, audit, books, fulldemo, keys
+from aeos import ActionLog, Recorder, audit, books, fulldemo, keys
 from aeos.canon import cid_str
 from aeos.log import make_record, now_ms
 
@@ -22,7 +22,7 @@ def cr(account, amount):
 
 @pytest.fixture
 def setup(tmp_path):
-    log = ReceiptLog.create(tmp_path / "log", log_id="urn:example:test")
+    log = ActionLog.create(tmp_path / "log", log_id="urn:example:test")
     key, clerk = Ed25519PrivateKey.generate(), Ed25519PrivateKey.generate()
     people = {CONTROLLER: keys.public_bytes(key), CLERK: keys.public_bytes(clerk)}
     b = books.Books(log, agent=SERVICE, entity="ACME", ledger="0L", currency="USD",

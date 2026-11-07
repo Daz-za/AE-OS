@@ -13,7 +13,7 @@ import shlex
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
-from .log import ReceiptLog
+from .log import ActionLog
 
 MODES = {
     "proxy": "The agent runs its MCP servers on this machine (the AE-OS proxy sits in front)",
@@ -70,14 +70,14 @@ def run(wizard: Wizard, *, log: Optional[str] = None, name: Optional[str] = None
         key: Optional[str] = None, agent: Optional[str] = None,
         mode: Optional[str] = None) -> int:
     out = wizard.out
-    out("This sets up an AE-OS receipt log: a tamper-evident record of what your AI agents "
-        "do,\nwith signed receipts an auditor can check. Press Enter to accept a suggestion.\n")
+    out("This sets up an AE-OS audit trail: a tamper-evident record of what your AI agents "
+        "do,\nwith action records an auditor can verify. Press Enter to accept a suggestion.\n")
 
     name = _slug(wizard.ask("A short name for this log, such as your organization and "
                             "process", "acme-accounts-payable", name))
     folder = Path(wizard.ask("Folder for the log", f"./{name}-log", log)).expanduser()
     if (folder / "log.json").exists():
-        out(f"\n{folder} already holds a receipt log. Choose another folder, or see its "
+        out(f"\n{folder} already holds an audit trail. Choose another folder, or see its "
             f"state with:\n  aeos status {folder}")
         return 2
     key_path = Path(wizard.ask(
@@ -93,7 +93,7 @@ def run(wizard: Wizard, *, log: Optional[str] = None, name: Optional[str] = None
         os.chmod(key_path.parent, 0o700)
     except OSError:
         pass
-    created = ReceiptLog.create(folder, log_id=f"urn:aeos:{name}", key_path=key_path)
+    created = ActionLog.create(folder, log_id=f"urn:aeos:{name}", key_path=key_path)
     (folder / "public-key.txt").write_text(created.public_key.hex() + "\n")
 
     q = shlex.quote
@@ -131,7 +131,7 @@ def run(wizard: Wizard, *, log: Optional[str] = None, name: Optional[str] = None
               "", "Give your auditors the public key in "
               f"{folder / 'public-key.txt'} through a channel they trust, such as email "
               "from a known address or your website. Back up the signing key; without it "
-              "no new receipts can be issued for this log."]
+              "no new action records can be signed into this audit trail."]
 
     (folder / "NEXT-STEPS.txt").write_text("\n".join(steps) + "\n")
     out(f"\nCreated the log in {folder} and the signing key at {key_path}.\n")

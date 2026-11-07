@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from aeos import ReceiptLog, Recorder
+from aeos import ActionLog, Recorder
 from aeos.canon import json_digest
 from aeos.events import EventError, apply, otlp_events
 
@@ -49,7 +49,7 @@ def test_mcp_tool_span_becomes_call_and_result(tmp_path):
     assert call["source"]["service"] == "acme-mcp-gateway"
     assert result["outcome"] == "ok" and result["ts"] == 1760000000250
 
-    log = ReceiptLog.create(tmp_path / "log")
+    log = ActionLog.create(tmp_path / "log")
     rec = Recorder(log, agent=AGENT)
     for ev in events:
         apply(rec, ev)
@@ -73,7 +73,7 @@ def test_failed_genai_tool_span():
 
 
 def test_event_validation(tmp_path):
-    rec = Recorder(ReceiptLog.create(tmp_path / "log"), agent=AGENT, allow_tools=["a"])
+    rec = Recorder(ActionLog.create(tmp_path / "log"), agent=AGENT, allow_tools=["a"])
     with pytest.raises(EventError):
         apply(rec, {"event": "tool.call", "call_id": "c1"})
     with pytest.raises(EventError):

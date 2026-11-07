@@ -5,7 +5,7 @@ import shutil
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from aeos import ReceiptLog, audit, delegation, fulldemo, identity, keys
+from aeos import ActionLog, audit, delegation, fulldemo, identity, keys
 from aeos.gateway import AgentClient, Gateway
 from aeos.log import now_ms
 
@@ -89,7 +89,7 @@ def gateway(tmp_path, setup):
             raise ValueError("bank unavailable")
         return {"paid": a["amount_minor"]}
 
-    log = ReceiptLog.create(tmp_path / "log", log_id="urn:example:cap")
+    log = ActionLog.create(tmp_path / "log", log_id="urn:example:cap")
     gw = Gateway(log, {"erp.pay": pay}, permissions={AGENT: ["erp.pay"], OTHER: ["erp.pay"]},
                  trust_domain=DOMAIN, svid_files=files["gw"], bundle_file=bundle,
                  authority_key=auth.public_key, intents={env.cid: env},

@@ -1,4 +1,4 @@
-"""Canonical encodings used by AE-OS Receipts.
+"""Canonical encodings used by AE-OS action records.
 
 * Deterministic DAG-CBOR (the subset AE-OS needs): null, bool, int, text, bytes,
   list, map with text keys, and tag-42 CID links. Floats are rejected so that every

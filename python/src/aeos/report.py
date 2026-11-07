@@ -1,6 +1,6 @@
 """Plain-language views of a log for `aeos agents`, `aeos decisions`, `aeos books` and the GUI.
 
-Each function reads a receipt log and returns a JSON-ready dict; `lines_*` turns the same
+Each function reads an audit trail and returns a JSON-ready dict; `lines_*` turns the same
 dict into text for the terminal. The views only read what the log holds: they do not check
 signatures or replay decisions. `aeos verify` and `aeos audit` do that.
 """
@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from . import books
 from .canon import cid_parse, cid_str
 from .delegation import money
-from .log import ReceiptLog
+from .log import ActionLog
 
 # Which check made a decision, in the reader's words.
 CHECKS = {
@@ -52,11 +52,11 @@ def chart(evidence: Optional[Path]) -> Dict[str, str]:
     return dict((manifest.get("books") or {}).get("accounts") or {})
 
 
-def _records(log: ReceiptLog) -> List[Tuple[int, Dict[str, Any]]]:
+def _records(log: ActionLog) -> List[Tuple[int, Dict[str, Any]]]:
     return [(e.index, log.record(e)) for e in log.entries()]
 
 
-def agents(log: ReceiptLog) -> Dict[str, Any]:
+def agents(log: ActionLog) -> Dict[str, Any]:
     """Who acted: each identity, how it connected, and what it did."""
     seen: Dict[str, Dict[str, Any]] = {}
 
@@ -110,7 +110,7 @@ def agents(log: ReceiptLog) -> Dict[str, Any]:
     return {"identities": out}
 
 
-def decisions(log: ReceiptLog, everything: bool = False) -> Dict[str, Any]:
+def decisions(log: ActionLog, everything: bool = False) -> Dict[str, Any]:
     """Each check's answer to each call. By default only refusals, escalations and approvals."""
     counts: Dict[str, Counter] = {}
     items: List[Dict[str, Any]] = []
@@ -159,7 +159,7 @@ def decisions(log: ReceiptLog, everything: bool = False) -> Dict[str, Any]:
             "everything": everything}
 
 
-def books_view(log: ReceiptLog, accounts: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+def books_view(log: ActionLog, accounts: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """Periods, journal entries, refusals and the trial balance rebuilt from the entries."""
     accounts = accounts or {}
     ledgers: Dict[Tuple[str, str], Dict[str, Any]] = {}
@@ -218,10 +218,10 @@ def books_view(log: ReceiptLog, accounts: Optional[Dict[str, str]] = None) -> Di
 # The checks a gateway call passes, in the order the gateway runs them.
 STEPS = [("identity", "Identity"), ("allow", "Allow list"), ("authority", "Delegated authority"),
          ("rules", "Rules"), ("approval", "Approval"), ("tool", "Tool"),
-         ("books", "Books of account"), ("receipt", "Receipt")]
+         ("books", "Books of account"), ("record", "Action record")]
 
 
-def trace(log: ReceiptLog, ref: str, names: Optional[Dict[str, str]] = None
+def trace(log: ActionLog, ref: str, names: Optional[Dict[str, str]] = None
           ) -> Dict[str, Any]:
     """Each check one tool call passed or failed, from the records linked to it.
 
@@ -338,7 +338,7 @@ def trace(log: ReceiptLog, ref: str, names: Optional[Dict[str, str]] = None
     cps = log.checkpoints()
     last = max([target.index] + [e.index for e, _ in linked])
     sealed = next((c for c in cps if c.size > last), None)
-    put("receipt", "pass", f"Recorded as record {target.index}, with {len(linked)} linked "
+    put("record", "pass", f"Recorded as record {target.index}, with {len(linked)} linked "
         "record" + ("" if len(linked) == 1 else "s") + ("; sealed in a signed checkpoint"
                                                         if sealed else
                                                         "; not sealed yet, and the next checkpoint will seal it"),

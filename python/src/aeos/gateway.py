@@ -4,7 +4,7 @@ Agents send MCP JSON-RPC requests (initialize, tools/list, tools/call) as HTTP P
 /mcp, as in MCP's Streamable HTTP transport, over a TLS connection on which both sides
 present X.509-SVIDs. The gateway takes the agent's identity from its verified
 certificate, never from the request, checks that the identity may use the tool, runs the
-tool, and records the call and its result in the receipt log under that identity. Each
+tool, and records the call and its result in the audit trail under that identity. Each
 session's first record carries the fingerprint of the agent's SVID, so an auditor can
 match the records to the certificate the agent presented.
 
@@ -37,7 +37,7 @@ from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
 from . import books, delegation, identity, policy as policy_mod
 from .canon import canonical_json, cid_str, json_digest
-from .log import ReceiptLog, now_ms
+from .log import ActionLog, now_ms
 from .recorder import Recorder
 
 Tool = Callable[[Dict[str, Any]], Any]
@@ -57,7 +57,7 @@ class Gateway:
     policy_facts    tool name, arguments -> facts the policy needs, such as the invoice
     """
 
-    def __init__(self, log: ReceiptLog, tools: Dict[str, Tool], *,
+    def __init__(self, log: ActionLog, tools: Dict[str, Tool], *,
                  permissions: Dict[str, Iterable[str]], trust_domain: str,
                  svid_files: Tuple[Path, Path], bundle_file: Path,
                  on_behalf_of: Optional[Dict[str, str]] = None,

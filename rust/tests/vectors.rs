@@ -1,5 +1,6 @@
-//! Check this implementation against the shared test vectors in testvectors/receipts-v0.json,
-//! which come from the Python reference implementation.
+//! Check this implementation against the shared test vectors in
+//! testvectors/action-records-v1.json, which come from the Python reference implementation,
+//! and against the frozen version 0 file testvectors/receipts-v0.json.
 
 use aeos_verify::canon::{
     canonical_json, cid_of_bytes, cid_parse, cid_str, dag_cbor, decode_dag_cbor, hex, json_digest,
@@ -7,7 +8,7 @@ use aeos_verify::canon::{
 };
 use aeos_verify::merkle::{self, Hash};
 use aeos_verify::verify::key_id;
-use aeos_verify::{verify_consistency_doc, verify_log, verify_receipt, LogFiles};
+use aeos_verify::{verify_action_record, verify_consistency_doc, verify_log, LogFiles};
 use serde_json::Value as Json;
 use std::sync::OnceLock;
 
@@ -16,9 +17,21 @@ fn vectors() -> &'static Json {
     V.get_or_init(|| {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../testvectors/receipts-v0.json"
+            "/../testvectors/action-records-v1.json"
         );
         serde_json::from_str(&std::fs::read_to_string(path).expect("read test vectors")).unwrap()
+    })
+}
+
+/// The frozen version 0 vectors, whose documents have type `aeos-receipt/v0`.
+fn vectors_v0() -> &'static Json {
+    static V: OnceLock<Json> = OnceLock::new();
+    V.get_or_init(|| {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../testvectors/receipts-v0.json"
+        );
+        serde_json::from_str(&std::fs::read_to_string(path).expect("read v0 vectors")).unwrap()
     })
 }
 
@@ -160,11 +173,71 @@ fn merkle_roots_and_proofs() {
 }
 
 #[test]
-fn receipts_match_reference_problems() {
-    for c in cases("receipts") {
-        let got = verify_receipt(&c["receipt"], &bytes(&c["public_key"]));
+fn action_records_match_reference_problems() {
+    for c in cases("action_records") {
+        let got = verify_action_record(&c["action_record"], &bytes(&c["public_key"]));
         assert_eq!(got, problems(&c["expect_problems"]), "{}", s(&c["name"]));
     }
+}
+
+#[test]
+fn version_0_receipts_in_the_frozen_vectors_still_verify() {
+    const OLD_WRONG_TYPE: &str = "not an aeos-receipt/v0 document";
+    const NEW_WRONG_TYPE: &str = "not an aeos-action-record/v1 document (or aeos-receipt/v0)";
+    let v0 = vectors_v0();
+    let all = v0["receipts"].as_array().unwrap();
+    assert_eq!(s(&all[0]["receipt"]["type"]), "aeos-receipt/v0");
+    for c in all {
+        let expected: Vec<String> = problems(&c["expect_problems"])
+            .into_iter()
+            .map(|p| {
+                if p == OLD_WRONG_TYPE {
+                    NEW_WRONG_TYPE.to_string()
+                } else {
+                    p
+                }
+            })
+            .collect();
+        let got = verify_action_record(&c["receipt"], &bytes(&c["public_key"]));
+        assert_eq!(got, expected, "{}", s(&c["name"]));
+    }
+    let first = &all[0];
+    assert!(verify_action_record(&first["receipt"], &bytes(&first["public_key"])).is_empty());
+}
+
+#[test]
+fn version_0_logs_and_consistency_proofs_in_the_frozen_vectors_still_verify() {
+    let v0 = vectors_v0();
+    for c in v0["consistency"].as_array().unwrap() {
+        let got = verify_consistency_doc(&c["proof"], &bytes(&c["public_key"]));
+        assert_eq!(got, problems(&c["expect_problems"]), "{}", s(&c["name"]));
+    }
+    let logs = &v0["logs"];
+    let key = bytes(&logs["public_key"]);
+    for c in logs["cases"].as_array().unwrap() {
+        let rep = verify_log(
+            &LogFiles {
+                log_json: s(&logs["log_json"]),
+                records: s(&c["records"]),
+                checkpoints: s(&c["checkpoints"]),
+            },
+            &key,
+        );
+        assert_eq!(
+            rep.problems,
+            problems(&c["expect"]["problems"]),
+            "{}",
+            s(&c["name"])
+        );
+    }
+}
+
+#[test]
+#[allow(deprecated)]
+fn deprecated_verify_receipt_still_works() {
+    let c = &cases("action_records")[0];
+    let doc = &c["action_record"];
+    assert!(aeos_verify::verify_receipt(doc, &bytes(&c["public_key"])).is_empty());
 }
 
 #[test]
@@ -207,7 +280,7 @@ fn logs_match_reference_report() {
 fn log_with_untrusted_key_is_reported() {
     let logs = &vectors()["logs"];
     let other = bytes(
-        &cases("receipts")
+        &cases("action_records")
             .iter()
             .find(|c| s(&c["name"]) == "wrong public key")
             .unwrap()["public_key"],

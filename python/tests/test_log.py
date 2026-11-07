@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from aeos import ReceiptLog, make_record, verify_consistency_doc, verify_receipt
+from aeos import ActionLog, make_record, verify_consistency_doc, verify_action_record
 from aeos.canon import json_digest
 
 AGENT = "spiffe://acme.example/agent/ap-clerk/1"
@@ -20,33 +20,34 @@ def _fill(log, n, start=0):
     return out
 
 
-def test_receipt_round_trip(tmp_path):
-    log = ReceiptLog.create(tmp_path / "log")
+def test_action_record_round_trip(tmp_path):
+    log = ActionLog.create(tmp_path / "log")
     entries = _fill(log, 5)
-    receipt = log.receipt(entries[2])
-    assert verify_receipt(receipt, log.public_key) == []
-    # same receipt survives JSON serialisation
-    assert verify_receipt(json.loads(json.dumps(receipt)), log.public_key) == []
+    receipt = log.action_record(entries[2])
+    assert verify_action_record(receipt, log.public_key) == []
+    assert receipt["type"] == "aeos-action-record/v1"
+    # same action record survives JSON serialisation
+    assert verify_action_record(json.loads(json.dumps(receipt)), log.public_key) == []
 
 
-def test_receipt_rejects_wrong_key_and_altered_record(tmp_path):
-    log = ReceiptLog.create(tmp_path / "log")
-    other = ReceiptLog.create(tmp_path / "other")
+def test_action_record_rejects_wrong_key_and_altered_record(tmp_path):
+    log = ActionLog.create(tmp_path / "log")
+    other = ActionLog.create(tmp_path / "other")
     e = _fill(log, 3)[1]
-    receipt = log.receipt(e)
-    assert verify_receipt(receipt, other.public_key)
+    receipt = log.action_record(e)
+    assert verify_action_record(receipt, other.public_key)
     altered = dict(receipt)
     rec = log.record(e)
     rec["body"]["amount"] = 999_999
     from aeos.canon import dag_cbor
     from aeos.log import b64
     altered["record"] = b64(dag_cbor(rec))
-    problems = verify_receipt(altered, log.public_key)
+    problems = verify_action_record(altered, log.public_key)
     assert any("CID" in p for p in problems)
 
 
 def test_append_is_idempotent_and_requires_known_parents(tmp_path):
-    log = ReceiptLog.create(tmp_path / "log")
+    log = ActionLog.create(tmp_path / "log")
     rec = make_record("note", AGENT, ts=1)
     assert log.append(rec).index == log.append(rec).index == 0
     with pytest.raises(KeyError):
@@ -54,12 +55,12 @@ def test_append_is_idempotent_and_requires_known_parents(tmp_path):
 
 
 def test_reopen_and_verify_clean_log(tmp_path):
-    log = ReceiptLog.create(tmp_path / "log")
+    log = ActionLog.create(tmp_path / "log")
     _fill(log, 4)
     log.checkpoint()
     _fill(log, 1, start=4)
     log.checkpoint()
-    again = ReceiptLog.open(tmp_path / "log")
+    again = ActionLog.open(tmp_path / "log")
     assert len(again) == 5
     rep = again.verify()
     assert rep.ok, rep.problems
@@ -68,14 +69,14 @@ def test_reopen_and_verify_clean_log(tmp_path):
 
 def test_verify_detects_edited_deleted_and_reordered_records(tmp_path):
     path = tmp_path / "log"
-    log = ReceiptLog.create(path)
+    log = ActionLog.create(path)
     _fill(log, 6)
     log.checkpoint()
     lines = (path / "records.jsonl").read_text().splitlines()
 
     def check(new_lines, expect):
         (path / "records.jsonl").write_text("\n".join(new_lines) + "\n")
-        problems = ReceiptLog.open(path, read_only=True).verify().problems
+        problems = ActionLog.open(path, read_only=True).verify().problems
         assert any(expect in p for p in problems), problems
 
     # edit the readable view only
@@ -97,7 +98,7 @@ def test_verify_detects_edited_deleted_and_reordered_records(tmp_path):
 
 
 def test_consistency_between_checkpoints(tmp_path):
-    log = ReceiptLog.create(tmp_path / "log")
+    log = ActionLog.create(tmp_path / "log")
     _fill(log, 3)
     old = log.checkpoint()
     _fill(log, 4, start=3)
@@ -109,13 +110,13 @@ def test_consistency_between_checkpoints(tmp_path):
 
 
 def test_open_rejects_mismatched_key(tmp_path):
-    ReceiptLog.create(tmp_path / "a")
-    ReceiptLog.create(tmp_path / "b")
+    ActionLog.create(tmp_path / "a")
+    ActionLog.create(tmp_path / "b")
     with pytest.raises(ValueError):
-        ReceiptLog.open(tmp_path / "a", key_path=tmp_path / "b" / "signing.key")
+        ActionLog.open(tmp_path / "a", key_path=tmp_path / "b" / "signing.key")
 
 
 def test_read_only_log_cannot_sign(tmp_path):
-    ReceiptLog.create(tmp_path / "log")
+    ActionLog.create(tmp_path / "log")
     with pytest.raises(PermissionError):
-        ReceiptLog.open(tmp_path / "log", read_only=True).checkpoint()
+        ActionLog.open(tmp_path / "log", read_only=True).checkpoint()

@@ -10,7 +10,7 @@ export const LAYERS = [
   { id: "agents", label: "Agents", note: "Do the work their credentials allow", y: 126, h: 62 },
   { id: "controls", label: "Controls", note: "Check identity and rules before every call", y: 218, h: 92 },
   { id: "systems", label: "Systems", note: "Provide the tools agents call", y: 340, h: 56 },
-  { id: "ledger", label: "Ledger", note: "Keeps the books and a receipt for every step", y: 426, h: 62 },
+  { id: "ledger", label: "Ledger", note: "Keeps the books and an action record for every step", y: 426, h: 62 },
 ];
 const H = 510;
 // Which gateway check each step of a call's trace lights, in order.
@@ -97,7 +97,7 @@ export function createDiagram(host, { compact = false, onPick = null } = {}) {
     }
     const names = ws.entities || {};
     const ledger = Object.keys(names).map((e) => ({ id: `books:${e}`, title: `Books ${e}`, sub: names[e] !== e ? names[e] : "", step: "books" }));
-    ledger.push({ id: "log", title: "Receipt log", sub: "Merkle tree, signed checkpoints", step: "log" });
+    ledger.push({ id: "log", title: "Audit trail", sub: "Merkle tree, signed checkpoints", step: "log" });
     ledger.push({ id: "witnesses", title: "Witnesses", sub: (d.witnesses.names || []).join(", "), step: "log" });
     for (const l of row(ledger, LEFT, W - 10, 220)) g.append(node(l.id, "ledger", l.step, l.x, Lg.y, l.w, Lg.h, l.title, l.sub));
     root.append(svg("g", { class: "trail" }));
@@ -184,7 +184,7 @@ export function createDiagram(host, { compact = false, onPick = null } = {}) {
       }
     }
     const tail = path.filter(Boolean);
-    tail.push(["log", "pass", steps.receipt ? steps.receipt.text : "Recorded"]);
+    tail.push(["log", "pass", steps.record ? steps.record.text : "Recorded"]);
     let prev = null;
     for (const [id, state, say] of tail) {
       if (gen !== latest) return;

@@ -1,9 +1,11 @@
-// AE-OS Receipts v0 verifier for web browsers and Node.js 20+ (spec/receipts-v0.md).
+// AE-OS action record verifier for web browsers and Node.js 20+ (spec/action-records-v1.md).
 //
-// Checks receipts and consistency proofs offline with the Web Crypto API (SHA-256 and
-// Ed25519); nothing is sent anywhere. Problems are reported in the same words as the
-// Python reference implementation and the Rust verifier; an empty list means valid.
-// Tested against testvectors/receipts-v0.json by verify.test.mjs.
+// Checks action records (with their Receipts) and consistency proofs offline with the Web
+// Crypto API (SHA-256 and Ed25519); nothing is sent anywhere. Problems are reported in the
+// same words as the Python reference implementation and the Rust verifier; an empty list
+// means the action record is verified. Reads both `aeos-action-record/v1` documents and the
+// version 0 `aeos-receipt/v0`. Tested against testvectors/action-records-v1.json and the
+// frozen testvectors/receipts-v0.json by verify.test.mjs.
 
 const subtle = globalThis.crypto.subtle;
 const CHECKPOINT_CONTEXT = new TextEncoder().encode("aeos-receipts/checkpoint/v0\n");
@@ -271,7 +273,7 @@ export async function verifyConsistencyProof(oldSize, newSize, proof, oldRoot, n
 }
 
 // ---------------------------------------------------------------------------------------
-// Checkpoints, receipts and consistency proofs (spec sections 3-4)
+// Checkpoints, action records and consistency proofs (spec sections 3-4)
 // ---------------------------------------------------------------------------------------
 
 function field(d, k) {
@@ -328,22 +330,31 @@ async function checkpointVerifies(cp, publicKey) {
   return verifySignature(publicKey, cp.sig, concat(CHECKPOINT_CONTEXT, dagCbor(body)));
 }
 
-/** Check an aeos-receipt/v0 document offline against a trusted public key (bytes). */
-export async function verifyReceipt(receipt, publicKey) {
-  if (receipt === null || typeof receipt !== "object" || receipt.type !== "aeos-receipt/v0") {
-    return ["not an aeos-receipt/v0 document"];
+export const ACTION_RECORD_TYPE = "aeos-action-record/v1";
+export const LEGACY_RECEIPT_TYPE = "aeos-receipt/v0";
+
+/** True for the document types verifyActionRecord reads. */
+export function isActionRecordDoc(doc) {
+  return doc !== null && typeof doc === "object"
+    && (doc.type === ACTION_RECORD_TYPE || doc.type === LEGACY_RECEIPT_TYPE);
+}
+
+/** Check an action record with its Receipt offline against a trusted public key (bytes). */
+export async function verifyActionRecord(doc, publicKey) {
+  if (!isActionRecordDoc(doc)) {
+    return [`not an ${ACTION_RECORD_TYPE} document (or ${LEGACY_RECEIPT_TYPE})`];
   }
   let cp, raw, index, proof;
   try {
-    cp = checkpointFromJson(field(receipt, "checkpoint"));
-    raw = unb64(text(receipt, "record"));
-    index = uint(receipt, "index");
-    proof = hexList(receipt, "inclusion_proof");
+    cp = checkpointFromJson(field(doc, "checkpoint"));
+    raw = unb64(text(doc, "record"));
+    index = uint(doc, "index");
+    proof = hexList(doc, "inclusion_proof");
   } catch (e) {
-    return [`malformed receipt: ${e.message}`];
+    return [`malformed action record: ${e.message}`];
   }
   const problems = [];
-  if (cp.log !== receipt.log_id) problems.push("checkpoint belongs to a different log");
+  if (cp.log !== doc.log_id) problems.push("checkpoint belongs to a different log");
   if (!(await checkpointVerifies(cp, publicKey))) {
     problems.push("checkpoint signature does not verify with the given public key");
   }
@@ -353,7 +364,7 @@ export async function verifyReceipt(receipt, publicKey) {
     problems.push(`record bytes are not canonical: ${e.message}`);
   }
   const cid = await cidOfBytes(raw);
-  if (cidStr(cid) !== receipt.cid) problems.push("record CID does not match the record bytes");
+  if (cidStr(cid) !== doc.cid) problems.push("record CID does not match the record bytes");
   if (!(await verifyInclusion(await leafHash(cid), index, cp.size, proof, cp.root))) {
     problems.push("inclusion proof does not lead to the checkpoint root");
   }
@@ -383,14 +394,20 @@ export async function verifyConsistency(doc, publicKey) {
   return problems;
 }
 
-/** The readable record inside a receipt, or null if its bytes do not decode. */
-export function receiptRecord(receipt) {
+/** Deprecated version 0 name of verifyActionRecord, kept for one release. */
+export const verifyReceipt = verifyActionRecord;
+
+/** The readable record inside an action record document, or null if its bytes do not decode. */
+export function actionRecordContent(doc) {
   try {
-    return toView(decodeDagCbor(unb64(receipt.record)));
+    return toView(decodeDagCbor(unb64(doc.record)));
   } catch {
     return null;
   }
 }
+
+/** Deprecated version 0 name of actionRecordContent, kept for one release. */
+export const receiptRecord = actionRecordContent;
 
 /** A public key given as hex, or as the text of a log.json file. */
 export function parsePublicKey(input) {

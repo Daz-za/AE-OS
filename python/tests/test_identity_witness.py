@@ -5,7 +5,7 @@ import shutil
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from aeos import ReceiptLog, audit, fulldemo, identity, witness
+from aeos import ActionLog, audit, fulldemo, identity, witness
 from aeos.gateway import AgentClient, Gateway
 from aeos.log import make_record
 
@@ -45,7 +45,7 @@ def gateway(tmp_path, td):
     files = {n: td.issue(i).write(tmp_path / "svid", n)
              for n, i in (("gw", GATEWAY), ("ap", AGENT),
                           ("payroll", f"spiffe://{DOMAIN}/agent/payroll"))}
-    log = ReceiptLog.create(tmp_path / "log", log_id="urn:example:gw")
+    log = ActionLog.create(tmp_path / "log", log_id="urn:example:gw")
     gw = Gateway(log, {"erp.pay": lambda a: {"paid": a["amount"]}},
                  permissions={AGENT: ["erp.pay"]}, trust_domain=DOMAIN,
                  svid_files=files["gw"], bundle_file=bundle)
@@ -94,7 +94,7 @@ def test_gateway_refuses_expired_and_foreign_certificates(gateway, td):
 
 
 def _log_with(tmp_path, name, n):
-    log = ReceiptLog.create(tmp_path / name, log_id="urn:example:w",
+    log = ActionLog.create(tmp_path / name, log_id="urn:example:w",
                             key_path=tmp_path / "log.key")
     for i in range(n):
         log.append(make_record("x-step", AGENT, body={"i": i}))

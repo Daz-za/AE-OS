@@ -4,7 +4,7 @@ import shutil
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from aeos import ReceiptLog, audit, delegation, fulldemo, identity, keys, policy
+from aeos import ActionLog, audit, delegation, fulldemo, identity, keys, policy
 from aeos.canon import json_digest
 from aeos.gateway import AgentClient, Gateway
 from aeos.log import now_ms
@@ -78,7 +78,7 @@ def gateway(tmp_path, rules):
                                     "USD", now_ms() + 3_600_000).sign(person)
     auth = delegation.Authority()
     token = auth.mint(env, keys.public_bytes(person))
-    log = ReceiptLog.create(tmp_path / "log", log_id="urn:example:pol")
+    log = ActionLog.create(tmp_path / "log", log_id="urn:example:pol")
     gw = Gateway(log, {"erp.invoice.pay": lambda a: {"paid": a["invoice"]}},
                  permissions={AGENT: ["erp.invoice.pay"]}, trust_domain=DOMAIN,
                  svid_files=files["gw"], bundle_file=bundle, authority_key=auth.public_key,

@@ -1,6 +1,6 @@
 """The architecture walk-through: `aeos demo --full`.
 
-The simple demo shows receipts. This one runs the parts of the AE-OS architecture that
+The simple demo shows action records. This one runs the parts of the AE-OS architecture that
 are built so far, for real, on one computer:
 
 - workload identity: a SPIFFE trust domain issues short-lived X.509-SVIDs, and the agent
@@ -33,7 +33,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from . import audit, books, delegation, identity, keys, policy, witness
 from .gateway import AgentClient, Gateway, handshake_error
 from .canon import decode_dag_cbor, json_digest
-from .log import ReceiptLog, now_ms
+from .log import ActionLog, now_ms
 
 DOMAIN = "acme.example"
 AP_AGENT = f"spiffe://{DOMAIN}/agent/accounts-payable"
@@ -183,7 +183,7 @@ def run(folder: Path, out: Callable[[str], None] = print) -> int:
         "the call, the invoice it names and the rules' data, with limits on memory and on the work done per "
         "decision.")
 
-    log = ReceiptLog.create(folder / "log", log_id="urn:example:acme:accounts-payable",
+    log = ActionLog.create(folder / "log", log_id="urn:example:acme:accounts-payable",
                             key_path=private / "log-signing.key")
     (folder / "public-key.txt").write_text(log.public_key.hex() + "\n")
     ledger = books.Books(log, agent=BOOKS_SERVICE, entity=ENTITY, ledger=LEDGER,
@@ -405,7 +405,7 @@ def run(folder: Path, out: Callable[[str], None] = print) -> int:
         "checkpoint as the last one they cosigned, and sign it. Their public keys are in "
         "witnesses.json.")
 
-    fork = ReceiptLog.create(private / "forked-log", log_id=log.log_id,
+    fork = ActionLog.create(private / "forked-log", log_id=log.log_id,
                              key_path=private / "log-signing.key")
     for e in log.entries():
         rec = decode_dag_cbor(e.raw)

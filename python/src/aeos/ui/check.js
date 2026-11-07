@@ -1,20 +1,22 @@
-// "Check a receipt": a self-contained panel that checks receipts and growth proofs in
+// "Check an action record": a self-contained panel that verifies action records and growth proofs in
 // the browser with verify.js. Used by `aeos ui` and by ae-os.org/verify.
 //
 //   import { mountCheck } from "./check.js";
 //   const panel = mountCheck(document.getElementById("check"), { publicKey: "hex, optional" });
-//   panel.load(receiptJsonText, publicKeyText, "file name shown");   // e.g. an example
+//   panel.load(actionRecordJsonText, publicKeyText, "file name shown");   // e.g. an example
 
-import { parsePublicKey, receiptRecord, verifyConsistency, verifyReceipt } from "./verify.js";
+import {
+  actionRecordContent, isActionRecordDoc, parsePublicKey, verifyActionRecord, verifyConsistency,
+} from "./verify.js";
 
 const MEANING = {
-  receipt: [
-    "This record is in the log exactly as shown, and the log's owner signed a checkpoint that includes it.",
-    "Do not rely on this receipt. Ask the log's owner for a fresh receipt, and check that you used their public key from a source you trust.",
+  record: [
+    "This action record is in the audit trail exactly as shown, and the trail's owner signed a checkpoint that includes it.",
+    "Do not rely on this action record. Ask the trail's owner for a fresh one, and check that you used their public key from a source you trust.",
   ],
   consistency: [
     "The newer checkpoint contains every record of the older one, unchanged. Nothing was removed or rewritten in between.",
-    "The log's history differs from what you were shown before. Keep both checkpoints as evidence and raise it with the log's owner.",
+    "The audit trail's history differs from what you were shown before. Keep both checkpoints as evidence and raise it with the trail's owner.",
   ],
 };
 
@@ -103,7 +105,7 @@ export function mountCheck(root, opts = {}) {
     "aria-label": "Public key",
   });
   if (opts.publicKey) keyBox.value = opts.publicKey;
-  const doc = dropZone("Receipt or growth proof",
+  const doc = dropZone("Action record or growth proof",
     "Drop the .json file here, or click to choose it", (t) => { docText = t; run(); });
   const keyFile = el("input", { type: "file", accept: ".json,.txt", class: "chk-file", "aria-label": "Public key file" });
   keyFile.addEventListener("change", async () => {
@@ -125,32 +127,32 @@ export function mountCheck(root, opts = {}) {
     try {
       d = JSON.parse(docText);
     } catch {
-      return show(false, "This file is not a receipt or growth proof (it is not valid JSON).");
+      return show(false, "This file is not an action record or growth proof (it is not valid JSON).");
     }
-    if (!keyBox.value.trim()) return show(null, "Now add the log's public key to check the file against.");
+    if (!keyBox.value.trim()) return show(null, "Now add the audit trail's public key to check the file against.");
     try {
       key = parsePublicKey(keyBox.value);
     } catch (e) {
       return show(null, `The public key could not be read: ${e.message}.`);
     }
-    const kind = d && d.type === "aeos-receipt/v0" ? "receipt" : d && d.old && d.new ? "consistency" : null;
-    if (!kind) return show(false, "This file is neither a receipt nor a growth proof from AE-OS.");
+    const kind = isActionRecordDoc(d) ? "record" : d && d.old && d.new ? "consistency" : null;
+    if (!kind) return show(false, "This file is neither an action record nor a growth proof from AE-OS.");
     let problems;
     try {
-      problems = kind === "receipt" ? await verifyReceipt(d, key) : await verifyConsistency(d, key);
+      problems = kind === "record" ? await verifyActionRecord(d, key) : await verifyConsistency(d, key);
     } catch (e) {
       return show(null, e.message);
     }
     const [good, bad] = MEANING[kind];
     const ok = problems.length === 0;
     const title = ok
-      ? (kind === "receipt"
-        ? `Valid. Record ${d.index} is in log ${d.log_id}, covered by a checkpoint of ${d.checkpoint.size} records signed ${when(d.checkpoint.ts)}.`
+      ? (kind === "record"
+        ? `Verified. Action record ${d.index} is in audit trail ${d.log_id}, covered by a checkpoint of ${d.checkpoint.size} records signed ${when(d.checkpoint.ts)}.`
         : `Valid. The checkpoint of ${d.new.size} records extends the earlier one of ${d.old.size}.`)
       : "Not valid.";
     show(ok, title, ok ? good : bad, problems);
-    if (kind === "receipt") {
-      const rec = receiptRecord(d);
+    if (kind === "record") {
+      const rec = actionRecordContent(d);
       if (rec) {
         result.append(el("h4", { text: ok ? "The record" : "The record, as the file shows it (not proven)" }), recordDetails(rec));
       }
@@ -169,10 +171,10 @@ export function mountCheck(root, opts = {}) {
   root.replaceChildren(
     doc.zone,
     el("div", { class: "chk-keyrow" },
-      el("label", { class: "chk-label", text: "The log's public key" }),
+      el("label", { class: "chk-label", text: "The audit trail's public key" }),
       keyBox,
       el("label", { class: "chk-keyfile" }, "Or choose the key file: ", keyFile)),
-    el("p", { class: "chk-note", text: "Get the public key from the log's owner through a channel you trust, such as their website or a known email address. The check runs on this device, and the files stay here." }),
+    el("p", { class: "chk-note", text: "Get the public key from the audit trail's owner through a channel you trust, such as their website or a known email address. The check runs on this device, and the files stay here." }),
     result,
   );
   return {

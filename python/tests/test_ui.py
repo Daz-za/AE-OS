@@ -6,8 +6,8 @@ from http.server import ThreadingHTTPServer
 
 import pytest
 
-from aeos import ReceiptLog, ui
-from aeos.log import verify_receipt
+from aeos import ActionLog, ui
+from aeos.log import verify_action_record
 
 
 @pytest.fixture
@@ -50,18 +50,19 @@ def test_functions_need_the_access_code_and_a_local_host_name(page):
     assert page("/api/state")[0] == 200
 
 
-def test_example_records_receipt_and_checks(page, tmp_path):
+def test_example_records_action_record_and_checks(page, tmp_path):
     status, body = page("/api/demo", {})
     state = json.loads(body)
-    assert status == 200 and state["status"]["records"] == 6 and "1. A receipt log" in state["story"]
+    assert status == 200 and state["status"]["records"] == 6 and "1. An audit trail" in state["story"]
 
     records = json.loads(page("/api/records")[1])
     assert records["total"] == 6 and records["records"][2]["record"]["kind"] == "policy.decision"
 
-    receipt = json.loads(page("/api/receipt?index=4")[1])
+    receipt = json.loads(page("/api/action-record?index=4")[1])
+    assert json.loads(page("/api/receipt?index=4")[1]) == receipt  # version 0 path still served
     key = bytes.fromhex(state["status"]["public_key"])
-    assert verify_receipt(receipt, key) == []
-    assert page("/api/receipt?index=99")[0] == 400
+    assert verify_action_record(receipt, key) == []
+    assert page("/api/action-record?index=99")[0] == 400
 
     check = json.loads(page("/api/verify", {})[1])
     assert check["ok"] and check["checkpoints"] == 2
@@ -83,7 +84,7 @@ def test_create_and_open_a_log(page, tmp_path):
 
 
 def test_find_key_prefers_the_log_folder(tmp_path):
-    log = ReceiptLog.create(tmp_path / "log", log_id="urn:aeos:x", key_path=None)
+    log = ActionLog.create(tmp_path / "log", log_id="urn:aeos:x", key_path=None)
     assert ui.find_key(log.path) == log.path / "signing.key"
 
 
