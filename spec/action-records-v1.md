@@ -232,9 +232,14 @@ records.jsonl       {"i", "cid", "cbor" (base64), "key_id" and "sig" (issuer sig
 checkpoints.jsonl   {"log", "size", "root" (hex), "ts", "key_id", "sig" (base64)}
 signing.key         Ed25519 private key, PKCS#8 PEM (keep elsewhere in production)
 content/<cid>.json  optional full arguments and results
+.lock               the writers' file lock
+.pending            {"offset", "length"}: a batch of records being written to records.jsonl
+torn/<offset>.bin   bytes cut from records.jsonl at that offset, kept for inspection
 ```
 
 `format` keeps its original text so that older audit trails and older tools keep opening each other's directories.
+
+Writers append whole batches of lines under the file lock. A batch is written as a unit: the writer writes `.pending`, naming the byte offset where the batch starts, and flushes it to the disk; then it writes the batch's lines and flushes them; then it removes `.pending`. While `.pending` is present the batch is unfinished, even if every byte of it is there: a reader ignores records.jsonl from that offset on, and the next writer cuts the file back to it (keeping the cut bytes under `torn/`) before writing. The next writer also cuts a last line with no newline. A verifier reports either as an unfinished write rather than as a damaged record. Where the platform has no file locks (one writer process), nothing is cut: a writer ends an unfinished last line with a newline, and the verifier reports that line as unreadable.
 
 ## 7. Compatibility with version 0
 
@@ -320,6 +325,8 @@ Each passkey's life is a record in the trail, so no window of validity rests on 
 - `x-passkey-enrolled`: `{approver, identity, credential_id, public_key (COSE_Key bytes), rp_id, origin}` and, for a root passkey, `identity_evidence` and `registration`; for any other, `evidence`.
 - `x-passkey-revoked`: `{approver, credential_id, evidence}`.
 - `x-approver-rebound`: `{approver, identity, identity_evidence}` and, while a passkey stands, `evidence`.
+
+A registry record or an approval and its `x-approval-evidence` child are written in one batch (section 6), so neither is in the trail without the other. A writer judges the change, or the approval's assertion, at the position the trail will give it, after every earlier record whichever process wrote it. In the reference implementation only `Recorder` with a passkey directory writes these records; the general `append` (and `aeos log append`) refuses them.
 
 `identity_evidence` is `{kind, ref, sha256}`: what identified the person (a sign-in, say). The audit cannot check it: it reports it, and the auditor decides whether to accept it. `registration` is `{client_data_json, attestation_object}`, the response of the registration ceremony with the `none` attestation format. `evidence` is a summary as in section 10.1, with an `x-approval-evidence` child that confirms the change (section 10.2).
 

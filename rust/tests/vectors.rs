@@ -9,7 +9,8 @@ use aeos_verify::canon::{
 use aeos_verify::merkle::{self, Hash};
 use aeos_verify::verify::key_id;
 use aeos_verify::{
-    verify_action_record, verify_action_record_detail, verify_consistency_doc, verify_log, LogFiles,
+    before_pending, verify_action_record, verify_action_record_detail, verify_consistency_doc,
+    verify_log, LogFiles,
 };
 use serde_json::Value as Json;
 use std::sync::OnceLock;
@@ -459,4 +460,45 @@ fn passkey_approval_records_decode_canonically_with_the_same_cids() {
         }
     }
     assert!(records > 400);
+}
+
+#[test]
+fn an_unfinished_write_is_reported_as_one_not_as_a_damaged_record() {
+    let v0 = vectors_v0();
+    let logs = &v0["logs"];
+    let key = bytes(&logs["public_key"]);
+    let clean = logs["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| problems(&c["expect"]["problems"]).is_empty())
+        .expect("a clean log case");
+    let records = s(&clean["records"]);
+    let n = records.matches('\n').count();
+    let torn = format!("{records}{{\"i\":{n},\"cid\":\"bafy");
+    let files = |records| LogFiles {
+        log_json: s(&logs["log_json"]),
+        records,
+        checkpoints: s(&clean["checkpoints"]),
+    };
+    let rep = verify_log(&files(&torn), &key);
+    assert_eq!(
+        rep.problems,
+        vec![format!(
+            "line {}: an unfinished write, not yet recovered",
+            n + 1
+        )]
+    );
+    assert_eq!(rep.records, n);
+    // A batch announced in .pending is unfinished even when every byte of it is there.
+    let first_line = records.find('\n').unwrap() + 1;
+    let pending = format!("{{\"offset\":{first_line},\"length\":1}}");
+    let (kept, problem) = before_pending(records, Some(&pending));
+    assert_eq!(kept, &records[..first_line]);
+    assert_eq!(
+        problem.as_deref(),
+        Some("line 2 on: an unfinished write, not yet recovered (.pending is present)")
+    );
+    assert_eq!(before_pending(records, None), (records, None));
+    assert_eq!(before_pending(records, Some("not json")), (records, None));
 }

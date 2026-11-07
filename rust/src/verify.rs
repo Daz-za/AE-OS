@@ -286,6 +286,29 @@ impl VerifyReport {
     }
 }
 
+/// The records a reader may read while a batch is being written: when `.pending` (its text
+/// given here) names the offset where an unfinished batch starts, everything before it, and
+/// the problem to report (spec section 6).
+pub fn before_pending<'a>(records: &'a str, pending: Option<&str>) -> (&'a str, Option<String>) {
+    let offset = pending
+        .and_then(|p| serde_json::from_str::<Json>(p).ok())
+        .and_then(|d| d.get("offset").and_then(Json::as_u64))
+        .and_then(|o| usize::try_from(o).ok());
+    match offset {
+        Some(o) if o < records.len() && records.is_char_boundary(o) => {
+            let kept = &records[..o];
+            let first = kept.matches('\n').count() + 1;
+            (
+                kept,
+                Some(format!(
+                    "line {first} on: an unfinished write, not yet recovered (.pending is present)"
+                )),
+            )
+        }
+        _ => (records, None),
+    }
+}
+
 fn lines(s: &str) -> impl Iterator<Item = &str> {
     s.split_inclusive('\n')
 }
@@ -327,6 +350,14 @@ pub fn verify_log(files: &LogFiles, public_key: &[u8]) -> VerifyReport {
     let mut seen: HashSet<Vec<u8>> = HashSet::new();
     let mut marker_at: Option<usize> = None;
     for (n, line) in lines(files.records).enumerate() {
+        if !line.ends_with('\n') {
+            // a writer died part way through this line; the next writer cuts it off
+            rep.problems.push(format!(
+                "line {}: an unfinished write, not yet recovered",
+                n + 1
+            ));
+            break;
+        }
         rep.records += 1;
         let parsed = (|| -> Result<_, String> {
             let d: Json = serde_json::from_str(line).map_err(|e| e.to_string())?;
