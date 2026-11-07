@@ -8,13 +8,13 @@ An organization that lets AI agents act in its systems needs evidence of what ea
 
 This document defines:
 
-1. an **action record** for each agent action, with a content address (CID). Its standard name is the **action-record statement**: AE-OS's profile of a SCITT Statement;
+1. an **action record** for each agent action, with a content address (CID) and an issuer signature over it. Its standard name is the **action-record statement**: AE-OS's profile of a SCITT Signed Statement;
 2. an append-only **audit trail** of action records, organized as an RFC 9162 Merkle tree. Its standard name is the Transparency Service's log;
 3. signed **checkpoints** that commit to the whole audit trail at a point in time;
 4. a **Receipt** that proves one action record is in the audit trail, checkable with nothing but the Receipt and the audit trail's public key;
 5. a **consistency proof** that shows a later checkpoint extends an earlier one, so records cannot be removed or rewritten after the fact without detection.
 
-An action record together with its Receipt is a **Transparent Statement**. When the checkpoint signature and the inclusion proof both check out, the action record is **verified**.
+An action record together with its Receipt is a **Transparent Statement**. When the issuer signature (where present), the checkpoint signature and the inclusion proof all check out, the action record is **verified**.
 
 ## Terms
 
@@ -22,11 +22,11 @@ AE-OS uses the vocabulary of the IETF SCITT architecture. Documents say "action 
 
 | Say | Standard term | Meaning here |
 |---|---|---|
-| action record | Statement, profiled as the action-record statement | One recorded fact about what an agent did, as bytes with a CID |
+| action record | Signed Statement, profiled as the action-record statement | One recorded fact about what an agent did, as bytes with a CID and the issuer's signature over it |
 | audit trail | The Transparency Service's log (a Verifiable Data Structure) | The append-only Merkle tree of action records |
 | Receipt | Receipt | The proof that one action record is in the audit trail, with the signed checkpoint that covers it |
 | action record with its Receipt | Transparent Statement | The document an auditor is handed |
-| verified | | The checkpoint signature and the inclusion proof both check out |
+| verified | | The issuer signature (where present), the checkpoint signature and the inclusion proof all check out |
 
 The word "receipt" has one meaning in this specification: the SCITT and COSE Receipt, a proof of inclusion. It never names an action record. In finance and ERP a receipt is a different document.
 
@@ -52,7 +52,7 @@ AE-OS is **SCITT-aligned, not yet SCITT-conformant.** What matches, and what doe
 | Consistency proofs from RFC 9162 | Same algorithm | Matches |
 | A Receipt is a COSE_Sign1 with the root as detached payload | A signed checkpoint: JSON, Ed25519 over DAG-CBOR with a context string | Not COSE |
 | The Receipt's protected header carries `vds` (395) and CWT Claims (15) with `iss` and `sub` | A `log` identifier and `key_id` in the checkpoint | Not built |
-| A Signed Statement is a COSE_Sign1 signed by its Issuer | An action record is DAG-CBOR bytes with no signature of its own. The audit trail operator's checkpoint signature is the only signature | Not built |
+| A Signed Statement is a COSE_Sign1 signed by its Issuer | The gateway signs each action record's CID with its Ed25519 issuer key (section 1.1), in JSON form beside the record. Records written under version 0 have no issuer signature and are reported as "log-signed only" | Issuer-signed statement built; COSE_Sign1 not |
 | A Transparent Statement carries Receipts in the `receipts` (394) unprotected header | One JSON document holding the record, the inclusion proof and the checkpoint | Same pieces, JSON not COSE |
 | Registration policy and statement rules (RFC 9943) | The audit trail accepts what the gateway writes | Not built |
 
@@ -73,7 +73,7 @@ An action record is a map encoded as deterministic DAG-CBOR (section 5). Its fie
 | `parents` | list of links | CIDs of the action records that caused this one | Part of the payload |
 | `ts` | integer | Time the record was made, in milliseconds since the Unix epoch | Issued-at claim of the CWT Claims |
 
-The Issuer (`iss`, label 1) of an action-record statement will be the audit trail operator's gateway, identified by its key. Today that key signs checkpoints only.
+The Issuer (`iss`, label 1) of an action-record statement is the gateway that writes the record, identified by its key id (section 1.1).
 
 Record kinds:
 
@@ -90,6 +90,19 @@ Record kinds:
 | `session.end` | The session ends | `unanswered_calls` |
 
 Numbers in a record are integers. Amounts are stored in minor currency units (cents), which keeps the encoding exact.
+
+### 1.1 Issuer signature
+
+The gateway signs each action record with its issuer key, the audit trail's existing Ed25519 signing key. The signature covers the record's binary CID, which commits to every byte of the record, under a context string that is not the checkpoint's:
+
+```
+message = "aeos-action-record/statement/v1\n" || CID
+sig     = Ed25519(issuer_key, message)
+```
+
+The signature and the issuer's `key_id` (the same 16-hex-digit identifier as in section 3, so a verifier can pick the right key) sit beside the record, outside the record bytes: in the audit trail's `records.jsonl` line, and in the export document as `statement_signature: {"key_id", "sig"}` (base64). The record bytes and CID are therefore the same with or without the signature.
+
+A verifier that finds `statement_signature` must check it against the trusted public key: a `key_id` that is not the trusted key's, or a signature that does not verify, is a problem. A verifier that finds none reports the record as **log-signed only**: the audit trail's checkpoint vouches for it, but its issuer did not sign it. That is the state of every record written under version 0 and is not a failure.
 
 **Digests instead of content.** By default a record holds the SHA-256 digest of a tool's arguments and result, computed over their canonical JSON form (section 5.3). Anyone holding the original arguments can recompute the digest and confirm they match the record. The full content can be kept beside the audit trail, but it stays outside the signed structure so it can be deleted under a retention policy without breaking any proof.
 
@@ -148,6 +161,7 @@ An action record with its Receipt is a JSON document (`type: "aeos-action-record
 |---|---|---|
 | `record` | Statement | The record bytes, base64 |
 | `cid`, `index`, `log_id` | Statement | The record's CID, its position, and the audit trail it belongs to |
+| `statement_signature` | Statement | The issuer signature over the CID (section 1.1); absent on records written under version 0 |
 | `inclusion_proof` | Receipt | An RFC 9162 inclusion proof, as a hex list of hashes |
 | `checkpoint` | Receipt | A signed checkpoint that covers the record; its `size` is the proof's tree size |
 
@@ -157,8 +171,9 @@ To verify with a trusted public key:
 2. Check the record bytes are canonical DAG-CBOR.
 3. Recompute the CID from the bytes and compare it with `cid`.
 4. Verify the inclusion proof from `leaf_hash(CID)` at `index` to the checkpoint root, using RFC 9162 section 2.1.3.2.
+5. If `statement_signature` is present, check its `key_id` and signature against the trusted public key (section 1.1).
 
-If all four hold, the action record is **verified**: this exact record was in the audit trail when the checkpoint was signed. That does not prove the record is true or complete. That depends on the controls around the agent and the audit trail, which is why the audit trail should be written by a component the agent cannot bypass, such as the MCP proxy in this repository.
+If all of these hold, the action record is **verified** (issuer-signed, or log-signed only when step 5 had nothing to check): this exact record was in the audit trail when the checkpoint was signed. That does not prove the record is true or complete. That depends on the controls around the agent and the audit trail, which is why the audit trail should be written by a component the agent cannot bypass, such as the MCP proxy in this repository.
 
 Documents of `type: "aeos-receipt/v0"` have the same fields and the same checks. Verifiers must keep accepting them.
 
@@ -170,7 +185,7 @@ Auditors and counterparties should keep the checkpoints they receive. Requesting
 
 ### 4.3 Full audit trail verification
 
-Anyone with read access to the audit trail directory can recompute every CID, check every causal link points backwards, check each record's readable view matches its signed bytes, and check every checkpoint's signature and root against the records.
+Anyone with read access to the audit trail directory can recompute every CID, check every causal link points backwards, check each record's readable view matches its signed bytes, check each issuer signature that is present, and check every checkpoint's signature and root against the records. Records with no issuer signature are counted as log-signed only, not reported as problems.
 
 ## 5. Encodings
 
@@ -190,7 +205,7 @@ Tool arguments and results are JSON. Their digest is SHA-256 over the RFC 8785 (
 
 ```
 log.json            {"format": "aeos-receipts/v0", "log_id", "public_key", "key_id", "created"}
-records.jsonl       {"i", "cid", "cbor" (base64), "view" (readable JSON, not signed)}
+records.jsonl       {"i", "cid", "cbor" (base64), "key_id" and "sig" (issuer signature, section 1.1; absent in version 0), "view" (readable JSON, not signed)}
 checkpoints.jsonl   {"log", "size", "root" (hex), "ts", "key_id", "sig" (base64)}
 signing.key         Ed25519 private key, PKCS#8 PEM (keep elsewhere in production)
 content/<cid>.json  optional full arguments and results
@@ -200,7 +215,7 @@ content/<cid>.json  optional full arguments and results
 
 ## 7. Compatibility with version 0
 
-Version 0 of this format was called "AE-OS Receipts" (`spec/receipts-v0.md`). Its bytes are unchanged: every record, checkpoint, signature and audit trail directory written under version 0 is valid under version 1. Only the names and the export document changed.
+Version 0 of this format was called "AE-OS Receipts" (`spec/receipts-v0.md`). Its bytes are unchanged: every record, checkpoint, signature and audit trail directory written under version 0 is valid under version 1, and verifies as log-signed only because it has no issuer signature. Version 1 changes the names, the export document, and adds the issuer signature beside each new record.
 
 | Version 0 | Version 1 |
 |---|---|
@@ -213,11 +228,11 @@ Version 0 of this format was called "AE-OS Receipts" (`spec/receipts-v0.md`). It
 
 ## 8. Test vectors
 
-`testvectors/action-records-v1.json` holds test vectors for every part of this format: canonical encodings, CIDs, Merkle roots and proofs, and valid and tampered action records, consistency proofs and audit trails with the problems a verifier reports for each. `testvectors/receipts-v0.json` is the frozen version 0 file, with version 0 documents. The Python, Rust and browser implementations in this repository test against both. A change to this specification needs matching vectors.
+`testvectors/action-records-v1.json` holds test vectors for every part of this format: canonical encodings, CIDs, Merkle roots and proofs, and valid and tampered action records, consistency proofs and audit trails with the problems a verifier reports for each. Action record cases include good, altered, wrong-key, swapped and missing issuer signatures, each with the expected `signature` state (`issuer-signed` or `log-signed only`). `testvectors/receipts-v0.json` is the frozen version 0 file, with version 0 documents. The Python, Rust and browser implementations in this repository test against both. A change to this specification needs matching vectors.
 
 ## 9. Planned for later versions
 
-- The COSE wire format: action-record statements as COSE_Sign1 signed by the gateway, Receipts as COSE Receipts (RFC 9942), Transparent Statements with the `receipts` header.
+- The COSE wire format: action-record statements as COSE_Sign1 (the issuer signature of section 1.1 in COSE form, with CWT Claims), Receipts as COSE Receipts (RFC 9942), Transparent Statements with the `receipts` header.
 - Salted commitments for arguments and results.
 - Independent witnesses that co-sign checkpoints, and C2SP signed-note checkpoint format. A preview of witness cosigning is described in [identity-and-witnesses-draft.md](identity-and-witnesses-draft.md).
 - Agent identity bound to a SPIFFE SVID presented at session start (preview in the same draft), and delegation from a person's digital identity wallet.

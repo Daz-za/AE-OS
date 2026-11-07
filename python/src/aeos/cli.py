@@ -34,7 +34,8 @@ from typing import List, Optional
 from . import (__version__, audit, demo, fulldemo, hooks, mcp_proxy, report, setup, sink,
                status, ui, workspace)
 from .canon import cid_parse, cid_str
-from .log import ActionLog, make_record, to_view, verify_consistency_doc, verify_action_record
+from .log import (ISSUER_SIGNED, ActionLog, make_record, to_view, verify_action_record,
+                  verify_action_record_detail, verify_consistency_doc)
 from .recorder import Recorder
 from .status import MEANING
 
@@ -337,11 +338,16 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if a.cmd in ("verify-action-record", "verify-receipt"):
         doc = json.loads(Path(a.file).read_text())
-        problems = verify_action_record(doc, _public_key(a.public_key))
+        problems, state = verify_action_record_detail(doc, _public_key(a.public_key))
         size = doc["checkpoint"]["size"] if isinstance(doc.get("checkpoint"), dict) else "?"
+        how = ("signed by its issuer and sealed in the audit trail"
+               if state == ISSUER_SIGNED else
+               "log-signed only: it carries no issuer signature, only the audit trail's "
+               "checkpoint vouches for it")
         return _report(problems,
-                       f"action record {doc.get('index')} ({doc.get('cid')}) is verified: it is "
-                       f"in audit trail {doc.get('log_id')} at checkpoint size {size}",
+                       f"action record {doc.get('index')} ({doc.get('cid')}) is verified "
+                       f"({how}): it is in audit trail {doc.get('log_id')} at checkpoint "
+                       f"size {size}",
                        "action-record")
 
     if a.cmd == "verify-consistency":
@@ -417,8 +423,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
     if a.cmd == "verify":
         rep = log.verify()
-        return _report(rep.problems, f"{rep.records} records and {rep.checkpoints} signed "
-                                     f"checkpoints in {log.log_id}", "log")
+        unsigned = rep.records - rep.issuer_signed
+        note = (f", {unsigned} of them log-signed only (no issuer signature)"
+                if unsigned and rep.issuer_signed != rep.records else "")
+        return _report(rep.problems, f"{rep.records} records{note} and {rep.checkpoints} "
+                                     f"signed checkpoints in {log.log_id}", "log")
     if a.cmd == "status":
         print("\n".join(status.describe(status.summary(log), a.log)))
         return 0

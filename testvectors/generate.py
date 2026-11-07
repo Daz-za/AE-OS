@@ -27,11 +27,11 @@ from pathlib import Path
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from aeos import ActionLog, make_record, verify_consistency_doc, verify_action_record
+from aeos import ActionLog, make_record, verify_action_record_detail, verify_consistency_doc
 from aeos import merkle
 from aeos.canon import (Link, canonical_json, cid_of_bytes, cid_str, dag_cbor,
                         decode_dag_cbor, json_digest)
-from aeos.log import b64, to_view
+from aeos.log import b64, statement_message, to_view
 
 OUT = Path(__file__).with_name("action-records-v1.json")
 
@@ -213,8 +213,19 @@ def tampered_logs(log: ActionLog, work: Path):
         d["sig"] = b64(bytes(sig))
         return json.dumps(d, separators=(",", ":")) + "\n"
 
+    def drop_sig(d):
+        d.pop("sig")
+        d.pop("key_id")
+
+    def bad_record_sig(d):
+        sig = bytearray(base64_decode(d["sig"]))
+        sig[0] ^= 1
+        d["sig"] = b64(bytes(sig))
+
     cases = {
         "untouched log": (recs, cps),
+        "issuer signature altered": (edit_record(1, bad_record_sig), cps),
+        "issuer signature removed from one record": (edit_record(1, drop_sig), cps),
         "readable view edited": (edit_record(2, view_edit), cps),
         "record rewritten with a new CID": (edit_record(2, bytes_edit), cps),
         "record removed": (recs[:1] + recs[2:], cps),
@@ -233,6 +244,7 @@ def tampered_logs(log: ActionLog, work: Path):
         rep = ActionLog.open(d, read_only=True).verify()
         out.append({"name": name, "records": "".join(r), "checkpoints": "".join(c),
                     "expect": {"records": rep.records, "checkpoints": rep.checkpoints,
+                               "issuer_signed": rep.issuer_signed,
                                "problems": rep.problems}})
     return base["log_json"], out
 
@@ -264,6 +276,18 @@ def action_record_cases(log, first, second, entry, other_pub):
         doc["record"] = b64(raw + b"\x00")
 
     pub = log.public_key
+    other_key = Ed25519PrivateKey.from_private_bytes(hashlib.sha256(b"another public test key").digest())
+    other_sig = other_key.sign(statement_message(entry.cid))
+
+    def sig_edit(d):
+        sig = bytearray(base64_decode(d["statement_signature"]["sig"]))
+        sig[0] ^= 1
+        d["statement_signature"]["sig"] = b64(bytes(sig))
+
+    def sig_of_other_record(d):
+        other = log.action_record(log.entries()[0], second)
+        d["statement_signature"] = other["statement_signature"]
+
     cases = [
         ("valid action record, latest checkpoint", good, pub),
         ("valid action record, first record", log.action_record(log.entries()[0], first), pub),
@@ -284,9 +308,22 @@ def action_record_cases(log, first, second, entry, other_pub):
         ("checkpoint key id changed",
          variant(lambda d: d["checkpoint"].update(key_id="0" * 16)), pub),
         ("wrong document type", variant(lambda d: d.update(type="aeos-action-record/v9")), pub),
+        ("no issuer signature (log-signed only)",
+         variant(lambda d: d.pop("statement_signature")), pub),
+        ("issuer signature altered", variant(sig_edit), pub),
+        ("issuer signature belongs to another record", variant(sig_of_other_record), pub),
+        ("issuer signature made by a different key under the right key id",
+         variant(lambda d: d["statement_signature"].update(sig=b64(other_sig))), pub),
+        ("issuer signature names another key id",
+         variant(lambda d: d["statement_signature"].update(key_id="0" * 16)), pub),
+        ("issuer signature malformed", variant(lambda d: d.update(statement_signature="x")), pub),
     ]
-    return [{"name": n, "public_key": h(k), "action_record": doc,
-             "expect_problems": verify_action_record(doc, k)} for n, doc, k in cases]
+    out = []
+    for n, doc, k in cases:
+        problems, state = verify_action_record_detail(doc, k)
+        out.append({"name": n, "public_key": h(k), "action_record": doc,
+                    "expect_problems": problems, "expect_signature": state})
+    return out
 
 
 def consistency_cases(log, first, second, other_pub):

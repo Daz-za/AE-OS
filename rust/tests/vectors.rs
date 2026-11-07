@@ -8,7 +8,9 @@ use aeos_verify::canon::{
 };
 use aeos_verify::merkle::{self, Hash};
 use aeos_verify::verify::key_id;
-use aeos_verify::{verify_action_record, verify_consistency_doc, verify_log, LogFiles};
+use aeos_verify::{
+    verify_action_record, verify_action_record_detail, verify_consistency_doc, verify_log, LogFiles,
+};
 use serde_json::Value as Json;
 use std::sync::OnceLock;
 
@@ -175,8 +177,30 @@ fn merkle_roots_and_proofs() {
 #[test]
 fn action_records_match_reference_problems() {
     for c in cases("action_records") {
-        let got = verify_action_record(&c["action_record"], &bytes(&c["public_key"]));
+        let (got, state) =
+            verify_action_record_detail(&c["action_record"], &bytes(&c["public_key"]));
         assert_eq!(got, problems(&c["expect_problems"]), "{}", s(&c["name"]));
+        assert_eq!(
+            state.as_str(),
+            s(&c["expect_signature"]),
+            "{}",
+            s(&c["name"])
+        );
+    }
+}
+
+#[test]
+fn issuer_signature_cases_are_present() {
+    let names: Vec<&str> = cases("action_records")
+        .iter()
+        .map(|c| s(&c["name"]))
+        .collect();
+    for want in [
+        "no issuer signature (log-signed only)",
+        "issuer signature altered",
+        "issuer signature made by a different key under the right key id",
+    ] {
+        assert!(names.contains(&want), "{want}");
     }
 }
 
@@ -198,8 +222,9 @@ fn version_0_receipts_in_the_frozen_vectors_still_verify() {
                 }
             })
             .collect();
-        let got = verify_action_record(&c["receipt"], &bytes(&c["public_key"]));
+        let (got, state) = verify_action_record_detail(&c["receipt"], &bytes(&c["public_key"]));
         assert_eq!(got, expected, "{}", s(&c["name"]));
+        assert_eq!(state.as_str(), "log-signed only", "{}", s(&c["name"]));
     }
     let first = &all[0];
     assert!(verify_action_record(&first["receipt"], &bytes(&first["public_key"])).is_empty());
@@ -271,6 +296,11 @@ fn logs_match_reference_report() {
         assert_eq!(
             rep.checkpoints as u64,
             c["expect"]["checkpoints"].as_u64().unwrap(),
+            "{name}"
+        );
+        assert_eq!(
+            rep.issuer_signed as u64,
+            c["expect"]["issuer_signed"].as_u64().unwrap(),
             "{name}"
         );
     }

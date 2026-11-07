@@ -115,6 +115,29 @@ impl Checkpoint {
 pub const ACTION_RECORD_TYPE: &str = "aeos-action-record/v1";
 pub const LEGACY_RECEIPT_TYPE: &str = "aeos-receipt/v0";
 
+/// The issuer signs the binary CID of each action record under this context, which is
+/// separate from the checkpoint's.
+pub const STATEMENT_CONTEXT: &[u8] = b"aeos-action-record/statement/v1\n";
+
+/// How an action record is vouched for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SignatureState {
+    /// It carries an issuer signature (a wrong one is reported as a problem).
+    IssuerSigned,
+    /// It carries none, as for every record written under version 0.
+    LogSignedOnly,
+}
+
+impl SignatureState {
+    /// The words the Python reference implementation and the test vectors use.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SignatureState::IssuerSigned => "issuer-signed",
+            SignatureState::LogSignedOnly => "log-signed only",
+        }
+    }
+}
+
 /// Deprecated version 0 name of [`verify_action_record`], kept for one release.
 #[deprecated(note = "renamed verify_action_record")]
 pub fn verify_receipt(doc: &Json, public_key: &[u8]) -> Vec<String> {
@@ -122,13 +145,23 @@ pub fn verify_receipt(doc: &Json, public_key: &[u8]) -> Vec<String> {
 }
 
 /// Check an action record with its Receipt offline against a trusted public key. Reads
-/// `aeos-action-record/v1` and the version 0 type `aeos-receipt/v0`.
+/// `aeos-action-record/v1` and the version 0 type `aeos-receipt/v0`. A record with no issuer
+/// signature is not a problem; [`verify_action_record_detail`] tells the two apart.
 pub fn verify_action_record(doc: &Json, public_key: &[u8]) -> Vec<String> {
+    verify_action_record_detail(doc, public_key).0
+}
+
+/// Like [`verify_action_record`], plus how the record is vouched for. A signature that is
+/// present but wrong is a problem, never "log-signed only".
+pub fn verify_action_record_detail(doc: &Json, public_key: &[u8]) -> (Vec<String>, SignatureState) {
     let doc_type = doc.get("type").and_then(Json::as_str);
     if doc_type != Some(ACTION_RECORD_TYPE) && doc_type != Some(LEGACY_RECEIPT_TYPE) {
-        return vec![format!(
-            "not an {ACTION_RECORD_TYPE} document (or {LEGACY_RECEIPT_TYPE})"
-        )];
+        return (
+            vec![format!(
+                "not an {ACTION_RECORD_TYPE} document (or {LEGACY_RECEIPT_TYPE})"
+            )],
+            SignatureState::LogSignedOnly,
+        );
     }
     let parsed = (|| -> Result<_, String> {
         Ok((
@@ -140,7 +173,12 @@ pub fn verify_action_record(doc: &Json, public_key: &[u8]) -> Vec<String> {
     })();
     let (cp, raw, index, proof) = match parsed {
         Ok(x) => x,
-        Err(e) => return vec![format!("malformed action record: {e}")],
+        Err(e) => {
+            return (
+                vec![format!("malformed action record: {e}")],
+                SignatureState::LogSignedOnly,
+            )
+        }
     };
     let mut problems = Vec::new();
     if Some(cp.log_id.as_str()) != doc.get("log_id").and_then(Json::as_str) {
@@ -159,7 +197,33 @@ pub fn verify_action_record(doc: &Json, public_key: &[u8]) -> Vec<String> {
     if !merkle::verify_inclusion(&merkle::leaf_hash(&cid), index, cp.size, &proof, &cp.root) {
         problems.push("inclusion proof does not lead to the checkpoint root".into());
     }
-    problems
+    let mut state = SignatureState::LogSignedOnly;
+    if let Some(sig_doc) = doc.get("statement_signature") {
+        state = SignatureState::IssuerSigned;
+        let parsed = (|| -> Result<_, String> {
+            Ok((text(sig_doc, "key_id")?, unb64(&text(sig_doc, "sig")?)?))
+        })();
+        match parsed {
+            Err(_) => problems.push("issuer signature is malformed".into()),
+            Ok((sig_key_id, sig)) => {
+                if sig_key_id != key_id(public_key) {
+                    problems.push(
+                        "issuer signature names a different key than the given public key".into(),
+                    );
+                } else if !verify_signature(public_key, &sig, &statement_message(&cid)) {
+                    problems
+                        .push("issuer signature does not verify with the given public key".into());
+                }
+            }
+        }
+    }
+    (problems, state)
+}
+
+fn statement_message(cid: &[u8]) -> Vec<u8> {
+    let mut m = STATEMENT_CONTEXT.to_vec();
+    m.extend_from_slice(cid);
+    m
 }
 
 /// Check that a newer checkpoint extends an older one (nothing rewritten or removed).
@@ -202,6 +266,8 @@ pub struct VerifyReport {
     pub log_id: String,
     pub records: usize,
     pub checkpoints: usize,
+    /// Records whose issuer signature verified.
+    pub issuer_signed: usize,
     pub problems: Vec<String>,
 }
 
@@ -294,6 +360,21 @@ pub fn verify_log(files: &LogFiles, public_key: &[u8]) -> VerifyReport {
                     rep.problems
                         .push(format!("record {n}: parent is missing or later in the log"));
                 }
+            }
+        }
+        if d.get("sig").is_some_and(|s| !s.is_null() && s != "") {
+            let good = d.get("key_id").and_then(Json::as_str) == Some(key_id(public_key).as_str())
+                && d.get("sig")
+                    .and_then(Json::as_str)
+                    .and_then(|s| unb64(s).ok())
+                    .is_some_and(|sig| {
+                        verify_signature(public_key, &sig, &statement_message(&cid))
+                    });
+            if good {
+                rep.issuer_signed += 1;
+            } else {
+                rep.problems
+                    .push(format!("record {n}: issuer signature does not verify"));
             }
         }
         seen.insert(cid.clone());

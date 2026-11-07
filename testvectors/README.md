@@ -8,7 +8,7 @@
 | `cbor_reject` | Inputs a decoder must refuse, such as unsorted map keys, floats and trailing bytes |
 | `canonical_json` | JSON values with their canonical form and SHA-256 digest |
 | `merkle` | Leaf hashes, roots for each tree size, and every inclusion and consistency proof up to size 12 |
-| `action_records` | Valid and tampered action records with their Receipts, with the problems a verifier must report |
+| `action_records` | Valid and tampered action records with their Receipts and issuer signatures, with the problems a verifier must report and whether the record is `issuer-signed` or `log-signed only` |
 | `consistency` | Valid and tampered consistency proofs, with the expected problems |
 | `logs` | A small invoice-approval log and tampered copies, with the expected verification report |
 

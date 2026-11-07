@@ -60,7 +60,7 @@ AE-OS follows the IETF SCITT standards (RFC 9943 and RFC 9942) in its vocabulary
 
 ## Roadmap
 
-- **COSE wire format.** Action-record statements as COSE_Sign1 signed by the gateway, Receipts as COSE Receipts (RFC 9942) and Transparent Statements carrying them in the `receipts` header, so a generic SCITT verifier can check AE-OS evidence. The JSON formats stay readable.
+- **COSE wire format.** The gateway's issuer signature on each action record, today in JSON form, as COSE_Sign1 with CWT Claims; Receipts as COSE Receipts (RFC 9942); Transparent Statements carrying them in the `receipts` header, so a generic SCITT verifier can check AE-OS evidence. The JSON formats stay readable.
 
 ## License
 

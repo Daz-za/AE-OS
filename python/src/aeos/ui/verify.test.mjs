@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
   actionRecordContent, cidOfBytes, cidStr, decodeDagCbor, leafHash, parsePublicKey, receiptRecord,
-  toView, unhex, verifyActionRecord, verifyConsistency, verifyConsistencyProof, verifyInclusion,
+  toView, unhex, verifyActionRecord, verifyActionRecordDetail, verifyConsistency, verifyConsistencyProof, verifyInclusion,
   verifyReceipt,
 } from "./verify.js";
 
@@ -49,8 +49,11 @@ test("Merkle inclusion and consistency proofs verify", async () => {
 
 test("action records report the same problems as the reference implementation", async () => {
   for (const c of V.action_records) {
-    assert.deepEqual(await verifyActionRecord(c.action_record, parsePublicKey(c.public_key)),
-      c.expect_problems, c.name);
+    const key = parsePublicKey(c.public_key);
+    const { problems, signature } = await verifyActionRecordDetail(c.action_record, key);
+    assert.deepEqual(problems, c.expect_problems, c.name);
+    assert.equal(signature, c.expect_signature, c.name);
+    assert.deepEqual(await verifyActionRecord(c.action_record, key), c.expect_problems, c.name);
   }
   assert.equal(actionRecordContent(V.action_records[0].action_record).v, 0);
 });
@@ -59,8 +62,10 @@ test("version 0 receipts in the frozen vectors still verify, and the old names s
   assert.equal(V0.receipts[0].receipt.type, "aeos-receipt/v0");
   for (const c of V0.receipts) {
     const expected = c.expect_problems.map((p) => (p === OLD_WRONG_TYPE ? NEW_WRONG_TYPE : p));
-    assert.deepEqual(await verifyActionRecord(c.receipt, parsePublicKey(c.public_key)),
-      expected, c.name);
+    const { problems, signature } = await verifyActionRecordDetail(c.receipt,
+      parsePublicKey(c.public_key));
+    assert.deepEqual(problems, expected, c.name);
+    assert.equal(signature, "log-signed only", c.name);
   }
   const first = V0.receipts[0];
   assert.deepEqual(await verifyReceipt(first.receipt, parsePublicKey(first.public_key)), []);

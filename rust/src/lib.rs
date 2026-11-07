@@ -15,5 +15,6 @@ pub mod verify;
 #[allow(deprecated)]
 pub use verify::verify_receipt;
 pub use verify::{
-    verify_action_record, verify_consistency_doc, verify_log, Checkpoint, LogFiles, VerifyReport,
+    verify_action_record, verify_action_record_detail, verify_consistency_doc, verify_log,
+    Checkpoint, LogFiles, SignatureState, VerifyReport,
 };

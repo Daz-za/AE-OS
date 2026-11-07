@@ -39,6 +39,12 @@ CHECKPOINT_CONTEXT = b"aeos-receipts/checkpoint/v0\n"
 ACTION_RECORD_TYPE = "aeos-action-record/v1"
 LEGACY_RECEIPT_TYPE = "aeos-receipt/v0"
 
+# The issuer signs the binary CID of each action record under this context, which is
+# separate from the checkpoint's. Records without a signature are "log-signed only".
+STATEMENT_CONTEXT = b"aeos-action-record/statement/v1\n"
+ISSUER_SIGNED = "issuer-signed"
+LOG_SIGNED_ONLY = "log-signed only"
+
 RECORD_KINDS = {"session.start", "session.end", "tool.call", "tool.result",
                 "policy.decision", "approval", "journal.entry", "period.transition", "note"}
 
@@ -124,22 +130,37 @@ class Checkpoint:
                 and keys.verify(public_key, self.sig, self.message()))
 
 
+def statement_message(cid: bytes) -> bytes:
+    return STATEMENT_CONTEXT + cid
+
+
 def verify_action_record(doc: Dict[str, Any], public_key: bytes) -> List[str]:
     """Check an action record with its Receipt offline.
 
     Accepts `aeos-action-record/v1` and the version 0 type `aeos-receipt/v0`. Returns a list of
-    problems; an empty list means the action record is verified.
+    problems; an empty list means the action record is verified. A record with no issuer
+    signature (everything written under version 0) is not a problem; see
+    `verify_action_record_detail` to tell the two apart.
     """
+    return verify_action_record_detail(doc, public_key)[0]
+
+
+def verify_action_record_detail(doc: Dict[str, Any], public_key: bytes
+                                ) -> "tuple[List[str], str]":
+    """Like `verify_action_record`, plus how the record is vouched for: ISSUER_SIGNED when it
+    carries an issuer signature that verifies, LOG_SIGNED_ONLY when it carries none. A
+    signature that is present but wrong is a problem, never "log-signed only"."""
     problems: List[str] = []
     try:
         if doc.get("type") not in (ACTION_RECORD_TYPE, LEGACY_RECEIPT_TYPE):
-            return [f"not an {ACTION_RECORD_TYPE} document (or {LEGACY_RECEIPT_TYPE})"]
+            return [f"not an {ACTION_RECORD_TYPE} document (or {LEGACY_RECEIPT_TYPE})"], \
+                LOG_SIGNED_ONLY
         cp = Checkpoint.from_json(doc["checkpoint"])
         raw = unb64(doc["record"])
         index = int(doc["index"])
         proof = [bytes.fromhex(h) for h in doc["inclusion_proof"]]
     except (KeyError, ValueError, TypeError) as e:
-        return [f"malformed action record: {e}"]
+        return [f"malformed action record: {e}"], LOG_SIGNED_ONLY
     if cp.log_id != doc.get("log_id"):
         problems.append("checkpoint belongs to a different log")
     if not cp.verify(public_key):
@@ -153,7 +174,21 @@ def verify_action_record(doc: Dict[str, Any], public_key: bytes) -> List[str]:
         problems.append("record CID does not match the record bytes")
     if not merkle.verify_inclusion(merkle.leaf_hash(cid), index, cp.size, proof, cp.root):
         problems.append("inclusion proof does not lead to the checkpoint root")
-    return problems
+    state = LOG_SIGNED_ONLY
+    if "statement_signature" in doc:
+        state = ISSUER_SIGNED
+        try:
+            sig_doc = doc["statement_signature"]
+            sig_key_id, sig = sig_doc["key_id"], unb64(sig_doc["sig"])
+        except (KeyError, ValueError, TypeError):
+            problems.append("issuer signature is malformed")
+        else:
+            if sig_key_id != keys.key_id(public_key):
+                problems.append("issuer signature names a different key than the given "
+                                "public key")
+            elif not keys.verify(public_key, sig, statement_message(cid)):
+                problems.append("issuer signature does not verify with the given public key")
+    return problems, state
 
 
 def verify_consistency_doc(doc: Dict[str, Any], public_key: bytes) -> List[str]:
@@ -185,12 +220,15 @@ class Entry:
     index: int
     cid: bytes
     raw: bytes
+    sig: Optional[bytes] = None          # issuer signature over the CID, when there is one
+    signer: Optional[str] = None         # key id of that signature
 
 
 @dataclass
 class VerifyReport:
     records: int = 0
     checkpoints: int = 0
+    issuer_signed: int = 0               # records whose issuer signature verified
     problems: List[str] = field(default_factory=list)
 
     @property
@@ -273,7 +311,8 @@ class ActionLog:
                 d = json.loads(line)
                 raw = unb64(d["cbor"])
                 cid = cid_of_bytes(raw)
-                self._add(Entry(int(d["i"]), cid, raw))
+                sig = unb64(d["sig"]) if d.get("sig") else None
+                self._add(Entry(int(d["i"]), cid, raw, sig, d.get("key_id") if sig else None))
 
     def _add(self, e: Entry) -> None:
         self._entries.append(e)
@@ -305,14 +344,18 @@ class ActionLog:
             for p in record.get("parents", []):
                 if bytes(p) not in self._by_cid:
                     raise KeyError(f"parent {cid_str(bytes(p))} is not in this log")
-            e = Entry(len(self._entries), cid, raw)
+            sig = self._key.sign(statement_message(cid)) if self._key is not None else None
+            e = Entry(len(self._entries), cid, raw, sig,
+                      self.meta["key_id"] if sig else None)
             if content is not None:
                 cdir = self.path / "content"
                 cdir.mkdir(exist_ok=True)
                 (cdir / f"{cid_str(cid)}.json").write_text(json.dumps(content, indent=2))
-            line = json.dumps({"i": e.index, "cid": cid_str(cid), "cbor": b64(raw),
-                               "view": to_view(decode_dag_cbor(raw))},
-                              separators=(",", ":")) + "\n"
+            fields: Dict[str, Any] = {"i": e.index, "cid": cid_str(cid), "cbor": b64(raw)}
+            if sig:
+                fields.update(key_id=e.signer, sig=b64(sig))
+            fields["view"] = to_view(decode_dag_cbor(raw))
+            line = json.dumps(fields, separators=(",", ":")) + "\n"
             with open(self.path / "records.jsonl", "ab") as f:
                 f.write(line.encode())
                 f.flush()
@@ -363,10 +406,13 @@ class ActionLog:
         if checkpoint.size <= e.index:
             raise ValueError("checkpoint does not cover this record")
         proof = merkle.inclusion_proof(e.index, self._leaves[:checkpoint.size])
-        return {"type": ACTION_RECORD_TYPE, "log_id": self.log_id, "index": e.index,
-                "cid": cid_str(e.cid), "record": b64(e.raw),
-                "inclusion_proof": [h.hex() for h in proof],
-                "checkpoint": checkpoint.to_json()}
+        doc = {"type": ACTION_RECORD_TYPE, "log_id": self.log_id, "index": e.index,
+               "cid": cid_str(e.cid), "record": b64(e.raw),
+               "inclusion_proof": [h.hex() for h in proof],
+               "checkpoint": checkpoint.to_json()}
+        if e.sig:
+            doc["statement_signature"] = {"key_id": e.signer, "sig": b64(e.sig)}
+        return doc
 
     def receipt(self, e: Entry, checkpoint: Optional[Checkpoint] = None) -> Dict[str, Any]:
         """Deprecated name of `action_record`, kept for one release."""
@@ -419,6 +465,17 @@ class ActionLog:
                 for p in rec.get("parents", []):
                     if bytes(p) not in seen:
                         rep.problems.append(f"record {n}: parent is missing or later in the log")
+                if d.get("sig"):
+                    try:
+                        good = (d.get("key_id") == self.meta["key_id"]
+                                and keys.verify(self.public_key, unb64(d["sig"]),
+                                                statement_message(cid)))
+                    except ValueError:
+                        good = False
+                    if good:
+                        rep.issuer_signed += 1
+                    else:
+                        rep.problems.append(f"record {n}: issuer signature does not verify")
                 seen[cid] = n
                 leaves.append(merkle.leaf_hash(cid))
         prev: Optional[Checkpoint] = None

@@ -1,7 +1,9 @@
 //! aeos-verify: verify AE-OS action records offline.
 
 use aeos_verify::canon::{hex, json_digest, unhex};
-use aeos_verify::{verify_action_record, verify_consistency_doc, verify_log, LogFiles};
+use aeos_verify::{
+    verify_action_record_detail, verify_consistency_doc, verify_log, LogFiles, SignatureState,
+};
 use serde_json::Value as Json;
 use std::path::Path;
 use std::process::ExitCode;
@@ -98,14 +100,25 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
     match cmd.as_str() {
         "action-record" | "receipt" => {
             let doc = read_json(target)?;
+            let (problems, state) = verify_action_record_detail(&doc, &key);
+            let how = match state {
+                SignatureState::IssuerSigned => {
+                    "signed by its issuer and sealed in the audit trail"
+                }
+                SignatureState::LogSignedOnly => {
+                    "log-signed only: it carries no issuer signature, only the audit trail's \
+                     checkpoint vouches for it"
+                }
+            };
             let ok = format!(
-                "action record {} ({}) is verified: it is in audit trail {} at checkpoint size {}",
+                "action record {} ({}) is verified ({how}): it is in audit trail {} at \
+                 checkpoint size {}",
                 doc["index"],
                 doc["cid"].as_str().unwrap_or("?"),
                 doc["log_id"].as_str().unwrap_or("?"),
                 doc["checkpoint"]["size"]
             );
-            Ok(report(&verify_action_record(&doc, &key), ok))
+            Ok(report(&problems, ok))
         }
         "consistency" => {
             let doc = read_json(target)?;

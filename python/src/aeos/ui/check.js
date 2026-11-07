@@ -6,7 +6,8 @@
 //   panel.load(actionRecordJsonText, publicKeyText, "file name shown");   // e.g. an example
 
 import {
-  actionRecordContent, isActionRecordDoc, parsePublicKey, verifyActionRecord, verifyConsistency,
+  actionRecordContent, isActionRecordDoc, ISSUER_SIGNED, parsePublicKey, verifyActionRecordDetail,
+  verifyConsistency,
 } from "./verify.js";
 
 const MEANING = {
@@ -137,9 +138,10 @@ export function mountCheck(root, opts = {}) {
     }
     const kind = isActionRecordDoc(d) ? "record" : d && d.old && d.new ? "consistency" : null;
     if (!kind) return show(false, "This file is neither an action record nor a growth proof from AE-OS.");
-    let problems;
+    let problems, signature = null;
     try {
-      problems = kind === "record" ? await verifyActionRecord(d, key) : await verifyConsistency(d, key);
+      if (kind === "record") ({ problems, signature } = await verifyActionRecordDetail(d, key));
+      else problems = await verifyConsistency(d, key);
     } catch (e) {
       return show(null, e.message);
     }
@@ -147,7 +149,7 @@ export function mountCheck(root, opts = {}) {
     const ok = problems.length === 0;
     const title = ok
       ? (kind === "record"
-        ? `Verified. Action record ${d.index} is in audit trail ${d.log_id}, covered by a checkpoint of ${d.checkpoint.size} records signed ${when(d.checkpoint.ts)}.`
+        ? `Verified. Action record ${d.index} is in audit trail ${d.log_id}, covered by a checkpoint of ${d.checkpoint.size} records signed ${when(d.checkpoint.ts)}. ${signature === ISSUER_SIGNED ? "It is also signed by its issuer." : "It carries no issuer signature, so only the audit trail's checkpoint vouches for it (log-signed only)."}`
         : `Valid. The checkpoint of ${d.new.size} records extends the earlier one of ${d.old.size}.`)
       : "Not valid.";
     show(ok, title, ok ? good : bad, problems);

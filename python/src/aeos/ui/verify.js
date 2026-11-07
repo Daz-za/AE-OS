@@ -9,6 +9,8 @@
 
 const subtle = globalThis.crypto.subtle;
 const CHECKPOINT_CONTEXT = new TextEncoder().encode("aeos-receipts/checkpoint/v0\n");
+// The issuer signs the binary CID of each action record under this context.
+const STATEMENT_CONTEXT = new TextEncoder().encode("aeos-action-record/statement/v1\n");
 const CID_PREFIX = [0x01, 0x71, 0x12, 0x20];
 const BASE32 = "abcdefghijklmnopqrstuvwxyz234567";
 
@@ -339,10 +341,24 @@ export function isActionRecordDoc(doc) {
     && (doc.type === ACTION_RECORD_TYPE || doc.type === LEGACY_RECEIPT_TYPE);
 }
 
-/** Check an action record with its Receipt offline against a trusted public key (bytes). */
+export const ISSUER_SIGNED = "issuer-signed";
+export const LOG_SIGNED_ONLY = "log-signed only";
+
+/** Check an action record with its Receipt offline against a trusted public key (bytes).
+ *  Returns the list of problems; an empty list means verified. */
 export async function verifyActionRecord(doc, publicKey) {
+  return (await verifyActionRecordDetail(doc, publicKey)).problems;
+}
+
+/** Like verifyActionRecord, plus how the record is vouched for: { problems, signature } where
+ *  signature is ISSUER_SIGNED (an issuer signature is present; a wrong one is a problem) or
+ *  LOG_SIGNED_ONLY (none, as for every record written under version 0). */
+export async function verifyActionRecordDetail(doc, publicKey) {
   if (!isActionRecordDoc(doc)) {
-    return [`not an ${ACTION_RECORD_TYPE} document (or ${LEGACY_RECEIPT_TYPE})`];
+    return {
+      problems: [`not an ${ACTION_RECORD_TYPE} document (or ${LEGACY_RECEIPT_TYPE})`],
+      signature: LOG_SIGNED_ONLY,
+    };
   }
   let cp, raw, index, proof;
   try {
@@ -351,7 +367,7 @@ export async function verifyActionRecord(doc, publicKey) {
     index = uint(doc, "index");
     proof = hexList(doc, "inclusion_proof");
   } catch (e) {
-    return [`malformed action record: ${e.message}`];
+    return { problems: [`malformed action record: ${e.message}`], signature: LOG_SIGNED_ONLY };
   }
   const problems = [];
   if (cp.log !== doc.log_id) problems.push("checkpoint belongs to a different log");
@@ -368,7 +384,26 @@ export async function verifyActionRecord(doc, publicKey) {
   if (!(await verifyInclusion(await leafHash(cid), index, cp.size, proof, cp.root))) {
     problems.push("inclusion proof does not lead to the checkpoint root");
   }
-  return problems;
+  let signature = LOG_SIGNED_ONLY;
+  if ("statement_signature" in doc) {
+    signature = ISSUER_SIGNED;
+    let sigKeyId, sig;
+    try {
+      const s = doc.statement_signature;
+      sigKeyId = text(s, "key_id");
+      sig = unb64(text(s, "sig"));
+    } catch {
+      problems.push("issuer signature is malformed");
+    }
+    if (sig !== undefined) {
+      if (sigKeyId !== (await keyId(publicKey))) {
+        problems.push("issuer signature names a different key than the given public key");
+      } else if (!(await verifySignature(publicKey, sig, concat(STATEMENT_CONTEXT, cid)))) {
+        problems.push("issuer signature does not verify with the given public key");
+      }
+    }
+  }
+  return { problems, signature };
 }
 
 /** Check that a newer checkpoint extends an older one (nothing rewritten or removed). */
