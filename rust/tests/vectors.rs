@@ -432,3 +432,31 @@ fn a_tampered_trail_is_reported_and_never_crashes_the_verifier() {
         STANDARD.decode(d["cbor"].as_str().unwrap()).unwrap()
     }
 }
+
+/// The passkey approval vectors (spec section 10). This verifier does not check approvals; it
+/// does have to read their records, with byte strings and nested batches, as the same
+/// canonical DAG-CBOR with the same CIDs the Python implementation wrote.
+#[test]
+fn passkey_approval_records_decode_canonically_with_the_same_cids() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../testvectors/passkey-approvals-v1.json"
+    );
+    let doc: Json = serde_json::from_str(&std::fs::read_to_string(path).expect("read")).unwrap();
+    let mut records = 0;
+    for case in doc["cases"].as_array().unwrap() {
+        for r in case["records"].as_array().unwrap() {
+            let raw = unhex(s(&r["cbor"])).unwrap();
+            let value = decode_dag_cbor(&raw).expect("canonical record");
+            assert_eq!(dag_cbor(&value), raw, "{}", s(&case["name"]));
+            assert_eq!(
+                cid_str(&cid_of_bytes(&raw)),
+                s(&r["cid"]),
+                "{}",
+                s(&case["name"])
+            );
+            records += 1;
+        }
+    }
+    assert!(records > 400);
+}

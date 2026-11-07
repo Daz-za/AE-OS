@@ -4,6 +4,10 @@ Every implementation of the format checks itself against action-records-v1.json.
 results (CIDs, roots, proofs, and the problems a verifier reports) come from the Python
 reference implementation, so a second implementation that passes agrees with it.
 
+testvectors/passkey-approvals-v1.json holds the passkey approval vectors (spec section 10); its
+trails and keys are built by python/tests/passkey_scenarios.py from fixed seeds and a
+deterministic software authenticator, never from a real key.
+
 Run from the repository root after `pip install -e python`:
 
     python testvectors/generate.py            # rewrite action-records-v1.json
@@ -34,6 +38,7 @@ from aeos.canon import (Link, canonical_json, cid_of_bytes, cid_str, dag_cbor,
 from aeos.log import b64, statement_message, to_view
 
 OUT = Path(__file__).with_name("action-records-v1.json")
+PASSKEY_OUT = Path(__file__).with_name("passkey-approvals-v1.json")
 
 # The seed phrase is unchanged from version 0 so both vector files share one test key.
 TEST_SEED = hashlib.sha256(b"aeos-receipts public test key; never use for a real log").digest()
@@ -523,22 +528,131 @@ def generate():
         }
 
 
+def passkey_vectors():
+    """The passkey approval vectors: constructions, COSE keys, assertions and whole trails."""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python" / "tests"))
+    import passkey_scenarios as ps
+    import webauthn_support as ws
+    from aeos import audit, webauthn
+
+    def hx(b):
+        return b.hex()
+
+    args = json_digest(ps.ARGS)
+    items = [(ps.TOOL, json_digest(a)) for _, a in ps._batch_items(4)]
+    n = ws.nonce(1)
+    cons = {
+        "contexts": {"challenge": webauthn.CHALLENGE_CONTEXT.decode(),
+                     "request": webauthn.REQUEST_CONTEXT.decode(),
+                     "batch": webauthn.BATCH_CONTEXT.decode()},
+        "tool": ps.TOOL, "args_sha256": hx(args), "nonce": hx(n),
+        "request_digest": hx(webauthn.request_digest(ps.TOOL, args)),
+        "challenge": hx(webauthn.challenge_for(n, webauthn.request_digest(ps.TOOL, args))),
+        "batch_items": [{"tool": t, "args_sha256": hx(a)} for t, a in items],
+        "batch_digest": hx(webauthn.batch_digest(items)),
+        "batch_challenge": hx(webauthn.challenge_for(n, webauthn.batch_digest(items))),
+    }
+    def cose_case(name, key):
+        try:
+            webauthn.parse_cose_key(key)
+            err = None
+        except webauthn.WebAuthnError as e:
+            err = str(e)
+        return {"name": name, "cose_key": hx(key), "expect_error": err}
+
+    keys_ = [cose_case("valid ES256 key", ps.A.cose_key),
+             cose_case("valid EdDSA key", ps.E.cose_key)]
+    keys_ += [cose_case(c["name"], bytes.fromhex(c["key"])) for c in _key_cases(ps, ws)]
+
+    def assertion_case(name, auth, ev_fn=None, **wrong):
+        digest = webauthn.request_digest(ps.TOOL, args)
+        ch = webauthn.challenge_for(n, digest)
+        ad, cdj, sig = auth.assertion(ch, **wrong)
+        if ev_fn:
+            ad, cdj, sig = ev_fn(ad, cdj, sig)
+        try:
+            webauthn.verify_assertion(webauthn.parse_cose_key(auth.cose_key), ad, cdj, sig,
+                                      rp_id=auth.rp_id, origin=auth.origin, challenge=ch)
+            err = None
+        except webauthn.WebAuthnError as e:
+            err = str(e)
+        return {"name": name, "cose_key": hx(auth.cose_key), "rp_id": auth.rp_id,
+                "origin": auth.origin, "challenge": hx(ch), "authenticator_data": hx(ad),
+                "client_data_json": hx(cdj), "signature": hx(sig), "expect_error": err}
+
+    flip = ps._flip
+    assertions = [
+        assertion_case("valid ES256 assertion", ps.A),
+        assertion_case("valid EdDSA assertion", ps.E),
+        assertion_case("signature changed", ps.A, lambda a, c, s: (a, c, flip(s, 10))),
+        assertion_case("authenticator data changed", ps.A, lambda a, c, s: (flip(a, 34), c, s)),
+        assertion_case("client data changed", ps.A, lambda a, c, s: (a, flip(c, 30), s)),
+        assertion_case("EdDSA signature changed", ps.E, lambda a, c, s: (a, c, flip(s, 3))),
+        assertion_case("another origin", ps.A, origin="https://evil.example"),
+        assertion_case("another relying party", ps.A, rp_id="evil.example"),
+        assertion_case("no user verification", ps.A, uv=False),
+        assertion_case("no user presence", ps.A, up=False),
+        assertion_case("sign counter that never moves (a synced passkey) is accepted", ps.A),
+    ]
+    cases = []
+    for name, trail, pr, expect in ps.scenarios():
+        findings, problems = audit.check_approvals(trail.triples(), pr)
+        assert len(problems) == len(expect) and all(x in y for x, y in zip(expect, problems)), \
+            (name, expect, problems)
+        cases.append({"name": name, "principals": pr,
+                      "records": [{"cid": cid_str(c), "cbor": hx(dag_cbor(r))}
+                                  for _, c, r in trail.triples()],
+                      "expect_problems": problems})
+    return {
+        "format": "aeos-passkey-approvals/test-vectors/v1",
+        "about": "Test vectors for passkey approvals (spec/action-records-v1.md, section 10). "
+                 "Generated by testvectors/generate.py from the Python reference implementation "
+                 "with a deterministic software authenticator; every key is derived from a "
+                 "public seed, never use one for real. A case is a trail (records in order, "
+                 "each with its CID), the principals file the auditor trusts, and the problems "
+                 "a verifier must report, in order; none means the approvals verify.",
+        "constructions": cons, "cose_keys": keys_, "assertions": assertions, "cases": cases,
+    }
+
+
+def _key_cases(ps, ws):
+    """The bent COSE keys of the scenarios, by name."""
+    return [{"name": n, "key": k.hex()} for n, k in (
+        ("wrong curve", ws.cose_es256(ps.A.cose_key[-70:-38], ps.A.cose_key[-32:], crv=2)),
+        ("not on the curve", ws.cose_es256(b"\x01" * 32, b"\x02" * 32)),
+        ("coordinates not reduced", ws.cose_es256(b"\xff" * 32, b"\xff" * 32)),
+        ("EdDSA small order", ws.cose_eddsa(b"\x01" + b"\x00" * 31)),
+        ("EdDSA on Ed448", ws.cose_eddsa(ps.E.cose_key[-32:], crv=7)),
+        ("unsupported algorithm", ws.cose_es256(ps.A.cose_key[-70:-38], ps.A.cose_key[-32:],
+                                                alg=-257)),
+        ("trailing bytes", ps.A.cose_key + b"\x00"),
+        ("truncated", ps.A.cose_key[:-1]),
+        ("empty", b""))]
+
+
 def render() -> str:
     return json.dumps(generate(), indent=1, ensure_ascii=False) + "\n"
+
+
+def render_passkey() -> str:
+    return json.dumps(passkey_vectors(), indent=1, ensure_ascii=False) + "\n"
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--check", action="store_true", help="fail if the file is out of date")
-    text = render()
+    files = ((OUT, render()), (PASSKEY_OUT, render_passkey()))
     if ap.parse_args().check:
-        if not OUT.exists() or OUT.read_text(encoding="utf-8") != text:
-            print(f"{OUT} is out of date; run python testvectors/generate.py", file=sys.stderr)
-            return 1
-        print(f"{OUT.name} is up to date")
-        return 0
-    OUT.write_text(text, encoding="utf-8")
-    print(f"wrote {OUT}")
+        stale = [f for f, text in files if not f.exists()
+                 or f.read_text(encoding="utf-8") != text]
+        for f in stale:
+            print(f"{f} is out of date; run python testvectors/generate.py", file=sys.stderr)
+        if not stale:
+            print(" and ".join(f.name for f, _ in files) + " are up to date")
+        return 1 if stale else 0
+    for f, text in files:
+        f.write_text(text, encoding="utf-8")
+        print(f"wrote {f}")
     return 0
 
 
