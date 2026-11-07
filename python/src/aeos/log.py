@@ -21,7 +21,7 @@ import uuid
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Sequence
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from . import keys, merkle
 from .canon import (Link, cid_of_bytes, cid_parse, cid_str, dag_cbor, decode_dag_cbor)
@@ -130,12 +130,58 @@ class Checkpoint:
 
     @classmethod
     def from_json(cls, d: Dict[str, Any]) -> "Checkpoint":
-        return cls(d["log"], int(d["size"]), bytes.fromhex(d["root"]), int(d["ts"]),
-                   d["key_id"], unb64(d["sig"]))
+        # Checked field by field in the order, and with the messages, the Rust verifier uses.
+        def get(k: str) -> Any:
+            if not isinstance(d, dict) or k not in d:
+                raise ValueError(f"missing field '{k}'")
+            return d[k]
+
+        def text(k: str) -> str:
+            v = get(k)
+            if not isinstance(v, str):
+                raise ValueError(f"field '{k}' must be text")
+            return v
+
+        def integer(k: str, what: str, minimum: Optional[int] = None) -> int:
+            v = get(k)
+            if not isinstance(v, int) or isinstance(v, bool) or (minimum is not None
+                                                                 and v < minimum):
+                raise ValueError(f"field '{k}' must be {what}")
+            return v
+
+        log_id = text("log")
+        size = integer("size", "a non-negative integer", 0)
+        root = bytes.fromhex(text("root"))
+        ts = integer("ts", "an integer")
+        return cls(log_id, size, root, ts, text("key_id"), unb64(text("sig")))
 
     def verify(self, public_key: bytes) -> bool:
         return (self.key_id == keys.key_id(public_key)
                 and keys.verify(public_key, self.sig, self.message()))
+
+
+def _read_line(line: bytes) -> Tuple[Dict[str, Any], bytes]:
+    """One records.jsonl line as (its JSON object, its record bytes); ValueError when the
+    line cannot be read. The messages for a missing or mistyped field are the ones the
+    Rust verifier gives."""
+    try:
+        d = json.loads(line)
+    except RecursionError:
+        raise ValueError("JSON nested too deeply") from None
+    if not isinstance(d, dict) or "cbor" not in d:
+        raise ValueError("missing field 'cbor'")
+    if not isinstance(d["cbor"], str):
+        raise ValueError("field 'cbor' must be text")
+    return d, unb64(d["cbor"])
+
+
+def is_record(rec: Any) -> bool:
+    """Whether a decoded record has the shape every reader of the trail relies on."""
+    return (isinstance(rec, dict) and isinstance(rec.get("kind"), str)
+            and isinstance(rec.get("agent"), str) and isinstance(rec.get("body"), dict)
+            and isinstance(rec.get("ts"), int) and not isinstance(rec.get("ts"), bool)
+            and isinstance(rec.get("parents"), list)
+            and all(isinstance(p, Link) for p in rec["parents"]))
 
 
 def _present(value: Any) -> bool:
@@ -327,8 +373,11 @@ class ActionLog:
                 if not line.endswith(b"\n"):
                     break                      # partial write in progress
                 self._offset += len(line)
-                d = json.loads(line)
-                raw = unb64(d["cbor"])
+                position = len(self._entries)
+                try:
+                    d, raw = _read_line(line)
+                except ValueError:
+                    d, raw = {}, b""           # reported by verify(); the trail still opens
                 cid = cid_of_bytes(raw)
                 try:
                     sig = unb64(d["sig"]) if _present(d.get("sig")) else None
@@ -340,11 +389,11 @@ class ActionLog:
                     try:
                         first = decode_dag_cbor(raw)
                         is_marker = isinstance(first, dict) and first.get("kind") == MARKER_KIND
-                    except (ValueError, KeyError):
+                    except ValueError:
                         is_marker = False        # verify() reports the unreadable record
                     if is_marker:
-                        self._marker_index = int(d["i"])
-                self._add(Entry(int(d["i"]), cid, raw, sig, d.get("key_id") if sig else None))
+                        self._marker_index = position
+                self._add(Entry(position, cid, raw, sig, d.get("key_id") if sig else None))
 
     def _add(self, e: Entry) -> None:
         self._entries.append(e)
@@ -461,6 +510,19 @@ class ActionLog:
         self._load_new()
         return list(self._entries)
 
+    def readable(self) -> List[Tuple[Entry, Dict[str, Any]]]:
+        """The records that decode and have the shape of a record. A trail someone has
+        tampered with can hold others; verify() reports each of them."""
+        out = []
+        for e in self.entries():
+            try:
+                rec = decode_dag_cbor(e.raw)
+            except ValueError:
+                continue
+            if is_record(rec):
+                out.append((e, rec))
+        return out
+
     def action_record(self, e: Entry, checkpoint: Optional[Checkpoint] = None) -> Dict[str, Any]:
         """The record with its Receipt, against a checkpoint that covers it.
 
@@ -515,22 +577,25 @@ class ActionLog:
             for n, line in enumerate(f):
                 rep.records += 1
                 try:
-                    d = json.loads(line)
-                    raw = unb64(d["cbor"])
+                    d, raw = _read_line(line)
                     rec = decode_dag_cbor(raw)
-                except (ValueError, KeyError) as ex:
+                    if not isinstance(rec, dict):
+                        raise ValueError("not a map")
+                except ValueError as ex:
                     rep.problems.append(f"line {n + 1}: unreadable record ({ex})")
                     leaves.append(b"")
                     continue
                 cid = cid_of_bytes(raw)
-                if d.get("i") != n:
+                i = d.get("i")
+                if not (isinstance(i, int) and not isinstance(i, bool) and i == n):
                     rep.problems.append(f"line {n + 1}: index {d.get('i')} out of sequence")
                 if d.get("cid") != cid_str(cid):
                     rep.problems.append(f"record {n}: stored CID does not match its bytes")
                 if d.get("view") != to_view(rec):
                     rep.problems.append(f"record {n}: readable view differs from signed bytes")
-                for p in rec.get("parents", []):
-                    if bytes(p) not in seen:
+                parents = rec.get("parents")
+                for p in parents if isinstance(parents, list) else []:
+                    if not (isinstance(p, Link) and bytes(p) in seen):
                         rep.problems.append(f"record {n}: parent is missing or later in the log")
                 if marker_at is None and rec.get("kind") == MARKER_KIND:
                     # From the marker on, every record must carry a valid issuer signature.
@@ -560,8 +625,15 @@ class ActionLog:
                 seen[cid] = n
                 leaves.append(merkle.leaf_hash(cid))
         prev: Optional[Checkpoint] = None
-        for cp in self.checkpoints():
+        with open(self.path / "checkpoints.jsonl", "rb") as f:
+            checkpoint_lines = [(n, line) for n, line in enumerate(f) if line.strip()]
+        for n, line in checkpoint_lines:
             rep.checkpoints += 1
+            try:
+                cp = Checkpoint.from_json(json.loads(line))
+            except (KeyError, ValueError, TypeError, RecursionError) as ex:
+                rep.problems.append(f"checkpoints line {n + 1}: unreadable checkpoint ({ex})")
+                continue
             label = f"checkpoint size {cp.size}"
             if cp.log_id != self.log_id:
                 rep.problems.append(f"{label}: belongs to a different log")

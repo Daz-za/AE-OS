@@ -225,6 +225,17 @@ def tampered_logs(log: ActionLog, work: Path):
     def corrupt_bytes(d):
         d["cbor"] = b64(base64_decode(d["cbor"]) + b"\x00")       # not canonical: trailing byte
 
+    def swap_cbor(value):
+        def swap(d):
+            d["cbor"] = b64(dag_cbor(value))
+        return swap
+
+    def truncated(d):
+        d["cbor"] = b64(base64_decode(d["cbor"])[:-3])
+
+    def replace_line(i, text):
+        return recs[:i] + [text + "\n"] + recs[i + 1:]
+
     def empty_sig(d):
         d["sig"] = ""
 
@@ -261,6 +272,17 @@ def tampered_logs(log: ActionLog, work: Path):
                                                                cps),
         "marker removed": (recs[1:], cps),
         "marker bytes corrupted": (edit_record(0, corrupt_bytes), cps),
+        "first record is not a map": (edit_record(0, swap_cbor([1, 2])), cps),
+        "middle record is not a map": (edit_record(2, swap_cbor("x")), cps),
+        "record nested too deep": (edit_record(2, lambda d: d.update(
+            cbor=b64(b"\x81" * 300 + b"\x00"))), cps),
+        "record is an empty map": (edit_record(2, swap_cbor({})), cps),
+        "record bytes truncated": (edit_record(2, truncated), cps),
+        "record line is not a JSON object": (replace_line(2, "[]"), cps),
+        "record line has no cbor field": (replace_line(2, "{}"), cps),
+        "record cbor is not text": (replace_line(2, '{"cbor":5}'), cps),
+        "checkpoint line is not a JSON object": (recs, [cps[0], "[]\n"]),
+        "checkpoint size is negative": (recs, [cps[0], cps[1].replace('"size":8', '"size":-8')]),
         "version 0 trail with no marker and no signatures": (
             v0_files["records"].splitlines(keepends=True),
             v0_files["checkpoints"].splitlines(keepends=True)),

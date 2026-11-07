@@ -458,8 +458,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     if a.cmd == "show":
         entries = [log.entry(a.ref)] if a.ref else log.entries()
         for e in entries:
-            print(json.dumps({"index": e.index, "cid": cid_str(e.cid),
-                              "record": to_view(log.record(e))}))
+            try:
+                view = to_view(log.record(e))
+            except ValueError as ex:        # a record that cannot be read is shown as such
+                view = {"unreadable": str(ex)}
+            print(json.dumps({"index": e.index, "cid": cid_str(e.cid), "record": view}))
         return 0
     if a.cmd == "mcp-proxy":
         if not server_cmd:

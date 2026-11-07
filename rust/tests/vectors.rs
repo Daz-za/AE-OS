@@ -333,3 +333,102 @@ fn log_with_untrusted_key_is_reported() {
         .iter()
         .any(|p| p.ends_with("signature does not verify")));
 }
+
+/// A verifier must report a tampered trail, never crash on it. Each record's bytes are
+/// swapped, one at a time, for something that is not a record: other CBOR values, a map with
+/// nothing in it, the record cut short, and pseudo-random bytes. Every swap must come back as
+/// problems, and so must lines that are not JSON objects at all.
+#[test]
+fn a_tampered_trail_is_reported_and_never_crashes_the_verifier() {
+    use aeos_verify::canon::Value;
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
+    let logs = &vectors()["logs"];
+    let key = bytes(&logs["public_key"]);
+    let log_json = s(&logs["log_json"]);
+    let base = logs["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "untouched log")
+        .unwrap();
+    let records_text = s(&base["records"]);
+    let records: Vec<&str> = records_text.lines().collect();
+    let checkpoints = s(&base["checkpoints"]);
+
+    let mut seed = 0x2545_f491_4f6c_dd1du64;
+    let mut random = |n: usize| -> Vec<u8> {
+        (0..n)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                seed as u8
+            })
+            .collect()
+    };
+
+    let deep = {
+        let mut v = vec![0x81u8; 300];
+        v.push(0x00);
+        v
+    };
+    for i in 0..records.len() {
+        let original = unb64_cbor(records[i]);
+        let swaps: Vec<Vec<u8>> = vec![
+            dag_cbor(&Value::Array(vec![])),
+            dag_cbor(&Value::Int(0)),
+            dag_cbor(&Value::Text("x".into())),
+            dag_cbor(&Value::Map(vec![])),
+            original[..original.len() / 2].to_vec(),
+            original[..original.len() - 1].to_vec(),
+            Vec::new(),
+            deep.clone(),
+            random(1),
+            random(40),
+            random(400),
+        ];
+        for (n, bytes) in swaps.iter().enumerate() {
+            let mut line: Json = serde_json::from_str(records[i]).unwrap();
+            line["cbor"] = Json::String(STANDARD.encode(bytes));
+            let mut lines: Vec<String> = records.iter().map(|l| l.to_string()).collect();
+            lines[i] = line.to_string();
+            let rep = verify_log(
+                &LogFiles {
+                    log_json,
+                    records: &(lines.join("\n") + "\n"),
+                    checkpoints,
+                },
+                &key,
+            );
+            assert!(!rep.problems.is_empty(), "record {i}, swap {n}");
+        }
+        for text in [
+            "[]",
+            "0",
+            "\"x\"",
+            "null",
+            "{}",
+            "{\"cbor\":5}",
+            "\u{0}",
+            "{",
+        ] {
+            let mut lines: Vec<String> = records.iter().map(|l| l.to_string()).collect();
+            lines[i] = text.to_string();
+            let rep = verify_log(
+                &LogFiles {
+                    log_json,
+                    records: &(lines.join("\n") + "\n"),
+                    checkpoints,
+                },
+                &key,
+            );
+            assert!(!rep.problems.is_empty(), "record {i}, line {text:?}");
+        }
+    }
+
+    fn unb64_cbor(line: &str) -> Vec<u8> {
+        let d: Json = serde_json::from_str(line).unwrap();
+        STANDARD.decode(d["cbor"].as_str().unwrap()).unwrap()
+    }
+}

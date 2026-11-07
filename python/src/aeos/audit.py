@@ -29,6 +29,10 @@ signed by a controller. In a real audit the auditor takes
 the trust bundle, the log's public key, the witnesses' keys, the authorization service's
 key and each person's key from sources they trust,
 not from the folder under review; `audit` accepts them as options for that reason.
+
+An audit of a tampered trail fails and says why; it does not stop. A record that cannot be read
+is a problem from the log check and is left out of the later checks, and a check that meets
+contents it cannot make sense of reports that as a problem too.
 """
 from __future__ import annotations
 
@@ -70,13 +74,61 @@ def run(folder: Path, *, bundle: Optional[Path] = None, public_key: Optional[str
                     f"{rep.checkpoints} checkpoint signatures verified"
                     + ("" if rep.ok else ", with problems"))
 
+    records = log.readable()
     roots = identity.load_chain((Path(bundle) if bundle else folder / manifest["bundle"])
                                 .read_bytes())
     svids = _load_svids(folder / manifest["svids"])
     domain = manifest["trust_domain"]
+    _guarded("the session certificates", _check_sessions, records, roots, svids, domain,
+             findings, problems)
+
+    if manifest.get("authority"):
+        key = bytes.fromhex(authority_key or (folder / manifest["authority"]).read_text().strip())
+        pdoc = json.loads((Path(principals) if principals else folder / manifest["principals"])
+                          .read_text())
+        _guarded("the capability decisions", _check_capabilities, records, folder, manifest, key,
+                 {k: bytes.fromhex(v) for k, v in pdoc.items()}, findings, problems)
+
+    if manifest.get("policies"):
+        pkeys = {}
+        if manifest.get("principals"):
+            pdoc = json.loads((Path(principals) if principals else folder / manifest["principals"])
+                              .read_text())
+            pkeys = {k: bytes.fromhex(v) for k, v in pdoc.items()}
+        _guarded("the policy decisions", _check_policies, records, folder / manifest["policies"],
+                 pkeys, findings, problems)
+
+    if manifest.get("books"):
+        pdoc = json.loads((Path(principals) if principals else folder / manifest["principals"])
+                          .read_text())
+        setup = manifest["books"] if isinstance(manifest["books"], dict) else {}
+        _guarded("the books", _check_books, records,
+                 {k: bytes.fromhex(v) for k, v in pdoc.items()}, setup, findings, problems)
+
+    wfile = Path(witnesses) if witnesses else folder / manifest["witnesses"]
+    wdoc = json.loads(wfile.read_text())
+    wkeys = {n: bytes.fromhex(k) for n, k in wdoc["keys"].items()}
+    _guarded("the witness cosignatures", _check_witnesses, log, wkeys, wdoc, findings, problems)
+    return findings, problems
+
+
+def _guarded(what: str, check: Any, *args: Any) -> None:
+    """Run one check. Evidence that someone tampered with can break a check's assumptions;
+    that must end in a problem, never a crash, so an audit of it can only fail."""
+    problems = args[-1]
+    try:
+        check(*args)
+    except Exception as ex:              # noqa: BLE001 - fail closed on any malformed evidence
+        problems.append(f"{what} could not be checked because the evidence is malformed "
+                        f"({type(ex).__name__}: {ex})")
+
+
+def _check_sessions(records: List[Tuple[Any, Dict[str, Any]]], roots: List[Any],
+                    svids: Dict[str, List[Any]], domain: str, findings: List[str],
+                    problems: List[str]) -> None:
+    """Each session was opened with a certificate that chained to the trust bundle."""
     sessions = 0
-    for e in log.entries():
-        rec = log.record(e)
+    for e, rec in records:
         if rec["kind"] != "session.start" or "svid_sha256" not in rec["body"]:
             continue
         sessions += 1
@@ -100,47 +152,25 @@ def run(folder: Path, *, bundle: Optional[Path] = None, public_key: Optional[str
                     "started" + ("" if not any(p.startswith("record") for p in problems)
                                  else " (except as listed below)"))
 
-    if manifest.get("authority"):
-        key = bytes.fromhex(authority_key or (folder / manifest["authority"]).read_text().strip())
-        pdoc = json.loads((Path(principals) if principals else folder / manifest["principals"])
-                          .read_text())
-        _check_capabilities(log, folder, manifest, key,
-                            {k: bytes.fromhex(v) for k, v in pdoc.items()}, findings, problems)
 
-    if manifest.get("policies"):
-        pkeys = {}
-        if manifest.get("principals"):
-            pdoc = json.loads((Path(principals) if principals else folder / manifest["principals"])
-                              .read_text())
-            pkeys = {k: bytes.fromhex(v) for k, v in pdoc.items()}
-        _check_policies(log, folder / manifest["policies"], pkeys, findings, problems)
-
-    if manifest.get("books"):
-        pdoc = json.loads((Path(principals) if principals else folder / manifest["principals"])
-                          .read_text())
-        setup = manifest["books"] if isinstance(manifest["books"], dict) else {}
-        _check_books(log, {k: bytes.fromhex(v) for k, v in pdoc.items()}, setup, findings,
-                     problems)
-
-    wfile = Path(witnesses) if witnesses else folder / manifest["witnesses"]
-    wdoc = json.loads(wfile.read_text())
-    wkeys = {n: bytes.fromhex(k) for n, k in wdoc["keys"].items()}
+def _check_witnesses(log: ActionLog, wkeys: Dict[str, bytes], wdoc: Dict[str, Any],
+                     findings: List[str], problems: List[str]) -> None:
+    """The latest checkpoint carries enough valid cosignatures."""
     cps = log.checkpoints()
     if not cps:
         problems.append("the log has no signed checkpoint")
-    else:
-        cp = cps[-1]
-        wp = witness.verify_cosignatures(cp, witness.load_cosignatures(log.path), wkeys,
-                                         int(wdoc["required"]))
-        problems += [f"witnesses: {p}" for p in wp]
-        if not wp:
-            findings.append(f"The latest checkpoint (size {cp.size}) is cosigned by "
-                            f"{wdoc['required']} of the {len(wkeys)} trusted witnesses; each has "
-                            "cosigned only this history of the log")
-    return findings, problems
+        return
+    cp = cps[-1]
+    wp = witness.verify_cosignatures(cp, witness.load_cosignatures(log.path), wkeys,
+                                     int(wdoc["required"]))
+    problems += [f"witnesses: {p}" for p in wp]
+    if not wp:
+        findings.append(f"The latest checkpoint (size {cp.size}) is cosigned by "
+                        f"{wdoc['required']} of the {len(wkeys)} trusted witnesses; each has "
+                        "cosigned only this history of the log")
 
 
-def _check_capabilities(log: ActionLog, folder: Path, manifest: Dict[str, Any],
+def _check_capabilities(records: List[Tuple[Any, Dict[str, Any]]], folder: Path, manifest: Dict[str, Any],
                         authority_key: bytes, principal_keys: Dict[str, bytes],
                         findings: List[str], problems: List[str]) -> None:
     """Replay each capability decision and check that every call that ran was allowed."""
@@ -149,7 +179,6 @@ def _check_capabilities(log: ActionLog, folder: Path, manifest: Dict[str, Any],
     for f in (folder / manifest["intents"]).glob("*.json"):
         env = delegation.IntentEnvelope.from_json(json.loads(f.read_text()))
         intents[env.cid] = env
-    records = [(e, log.record(e)) for e in log.entries()]
     results = [(cid_str(r["parents"][0]), r["body"].get("outcome")) for _, r in records
                if r["kind"] == "tool.result" and r["parents"]]
     ran_calls = {c for c, outcome in results if outcome != "error"}
@@ -219,7 +248,7 @@ def _replay(rec: Dict[str, Any], tokens: Dict[str, bytes],
     return True, ""
 
 
-def _check_policies(log: ActionLog, folder: Path, principal_keys: Dict[str, bytes],
+def _check_policies(records: List[Tuple[Any, Dict[str, Any]]], folder: Path, principal_keys: Dict[str, bytes],
                     findings: List[str], problems: List[str]) -> None:
     """Replay each policy decision, check approvals, and check that calls that ran were
     allowed by the policy."""
@@ -228,7 +257,6 @@ def _check_policies(log: ActionLog, folder: Path, principal_keys: Dict[str, byte
     for f in folder.glob("data-*.json"):
         doc = json.loads(f.read_text())
         data[policy.data_sha256(doc).hex()] = doc
-    records = [(e, log.record(e)) for e in log.entries()]
     by_cid = {cid_str(e.cid): r for e, r in records}
     ran = {cid_str(r["parents"][0]) for _, r in records if r["kind"] == "tool.result"
            and r["parents"] and r["body"].get("outcome") != "error"}
@@ -288,14 +316,14 @@ def _check_policies(log: ActionLog, folder: Path, principal_keys: Dict[str, byte
 
 
 
-def _check_books(log: ActionLog, principal_keys: Dict[str, bytes], setup: Dict[str, Any],
+def _check_books(records: List[Tuple[Any, Dict[str, Any]]], principal_keys: Dict[str, bytes], setup: Dict[str, Any],
                  findings: List[str], problems: List[str]) -> None:
     """Rebuild the books from the log and check their rules and numbering."""
-    records = [(e.index, cid_str(e.cid), log.record(e)) for e in log.entries()]
-    s, found = books.replay(records, principal_keys, controllers=setup.get("controllers"),
+    triples = [(e.index, cid_str(e.cid), r) for e, r in records]
+    s, found = books.replay(triples, principal_keys, controllers=setup.get("controllers"),
                             accounts=setup.get("accounts"), service=setup.get("service"))
     problems += found
-    currencies = {r["body"].get("currency") for _, _, r in records if r["kind"] == "journal.entry"}
+    currencies = {r["body"].get("currency") for _, _, r in triples if r["kind"] == "journal.entry"}
     cur = currencies.pop() if len(currencies) == 1 else ""
     docs, n = s["documents"], s["entries"]
     if not n:
@@ -343,7 +371,7 @@ def _check_approval(rec: Dict[str, Any], by_cid: Dict[str, Dict[str, Any]],
     if rec["agent"] != a.approver or not a.verify(principal_keys.get(a.approver, b"")):
         out.append(f"the approval is not signed by {a.approver}")
     esc = by_cid.get(a.escalation)
-    if esc is None or esc["body"].get("decision") != "escalate" or esc["subject"] != a.tool:
+    if esc is None or esc["body"].get("decision") != "escalate" or esc.get("subject") != a.tool:
         out.append("the approval does not answer an escalation in this log")
     else:
         call = by_cid.get(cid_str(esc["parents"][0])) if esc["parents"] else None

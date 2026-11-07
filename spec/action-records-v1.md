@@ -206,13 +206,13 @@ Auditors and counterparties should keep the checkpoints they receive. Requesting
 
 ### 4.3 Full audit trail verification
 
-Anyone with read access to the audit trail directory can recompute every CID, check every causal link points backwards, check each record's readable view matches its signed bytes, check each issuer signature that is present, and check every checkpoint's signature and root against the records. From the signing marker on, an unsigned record is a problem, and a key id without a signature is a problem (section 1.1). A trail with no marker is a version 0 trail, counted as log-signed only and not reported as a problem. The Python and Rust verifiers check whole trails; the browser verifier checks single documents and consistency proofs only.
+Anyone with read access to the audit trail directory can recompute every CID, check every causal link points backwards, check each record's readable view matches its signed bytes, check each issuer signature that is present, and check every checkpoint's signature and root against the records. From the signing marker on, an unsigned record is a problem, and a key id without a signature is a problem (section 1.1). A trail with no marker is a version 0 trail, counted as log-signed only and not reported as a problem. A verifier reports a tampered trail and never fails on one: a line that is not a JSON object with a text `cbor` field, bytes that are not canonical DAG-CBOR, a record that is not a map, and a checkpoint line that cannot be read are each a problem naming the line, and checking carries on with the rest. The Python and Rust verifiers check whole trails; the browser verifier checks single documents and consistency proofs only.
 
 ## 5. Encodings
 
 ### 5.1 DAG-CBOR subset
 
-Records use deterministic CBOR (RFC 8949 section 4.2.1) restricted to: null, booleans, integers, byte strings, text strings, arrays, maps with text keys, and tag 42 links. Map keys are sorted by encoded length, then bytewise. Floating-point values are not allowed. Decoders must reject any input that is not the canonical encoding of the value it decodes to.
+Records use deterministic CBOR (RFC 8949 section 4.2.1) restricted to: null, booleans, integers, byte strings, text strings, arrays, maps with text keys, and tag 42 links. Map keys are sorted by encoded length, then bytewise. Floating-point values are not allowed. Decoders must reject any input that is not the canonical encoding of the value it decodes to, and any value nested more than 256 levels deep.
 
 ### 5.2 Links
 

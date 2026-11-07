@@ -332,6 +332,9 @@ pub fn verify_log(files: &LogFiles, public_key: &[u8]) -> VerifyReport {
             let d: Json = serde_json::from_str(line).map_err(|e| e.to_string())?;
             let raw = unb64(&text(&d, "cbor")?)?;
             let rec = decode_dag_cbor(&raw).map_err(|e| e.to_string())?;
+            if !matches!(rec, Value::Map(_)) {
+                return Err("not a map".to_string());
+            }
             Ok((d, raw, rec))
         })();
         let (d, raw, rec) = match parsed {
