@@ -43,7 +43,7 @@ import logging
 
 from cryptography import x509
 
-from . import books, delegation, identity, policy as policy_mod
+from . import books, delegation, identity, passkeys, policy as policy_mod
 from .canon import canonical_json, cid_str, json_digest
 from .log import ActionLog, now_ms
 from .recorder import Recorder
@@ -64,6 +64,9 @@ class Gateway:
                     and approvals
     policy          a compiled policy to run on every call that passes the other checks
     policy_facts    tool name, arguments -> facts the policy needs, such as the invoice
+    passkey_directory  the registry of passkey approvers (passkeys.Directory), a snapshot
+                    taken when the gateway starts; an approval by one of them needs a valid
+                    assertion, and each nonce and assertion is accepted once
     """
 
     def __init__(self, log: ActionLog, tools: Dict[str, Tool], *,
@@ -74,7 +77,8 @@ class Gateway:
                  intents: Optional[Dict[str, delegation.IntentEnvelope]] = None,
                  principal_keys: Optional[Dict[str, bytes]] = None,
                  policy: Optional[policy_mod.Policy] = None,
-                 policy_facts: Optional[Callable[[str, Dict[str, Any]], Dict[str, Any]]] = None
+                 policy_facts: Optional[Callable[[str, Dict[str, Any]], Dict[str, Any]]] = None,
+                 passkey_directory: Optional[passkeys.Directory] = None
                  ) -> None:
         log.require_signing()
         self.log, self.tools, self.trust_domain = log, tools, trust_domain
@@ -89,6 +93,7 @@ class Gateway:
         self.budget = delegation.Budget()
         self.tokens: Dict[str, bytes] = {}                 # SHA-256 hex -> token presented
         self.policy, self.policy_facts = policy, policy_facts
+        self.passkey_directory = passkey_directory
         self.escalations: Dict[str, Tuple[str, str, bytes]] = {}  # CID -> agent, tool, args
         self._lock = threading.Lock()
         self.server: Optional[ThreadingHTTPServer] = None
@@ -274,6 +279,7 @@ class Gateway:
                 text + "=" * (-len(text) % 4))))
         except (ValueError, KeyError, TypeError):
             return {}, "the approval could not be read"
+        pk = self.passkey_directory and self.passkey_directory.principals.get(a.approver)
         with self._lock:
             asked = self.escalations.get(a.escalation)
             if asked is None:
@@ -281,11 +287,30 @@ class Gateway:
             if asked != (peer, tool, json_digest(args)) or a.tool != tool or \
                     a.args_sha256 != asked[2]:
                 return {}, "the approval is for a different call"
-            if not a.verify(self.principal_keys.get(a.approver, b"")):
+            if pk is not None:
+                problem = self._passkey_problem(a, args)
+                if problem:
+                    return {}, problem
+            elif not a.verify(self.principal_keys.get(a.approver, b"")):
                 return {}, "the approval's signature does not verify"
         rec.approval(call, a, ts=at)
         return {"approver": a.approver, "decision": a.decision, "escalation": a.escalation}, \
             None
+
+    def _passkey_problem(self, a: Any, args: Dict[str, Any]) -> Optional[str]:
+        """A passkey approver's answer: an approval needs a valid assertion for this exact
+        call; a rejection carries none. Called with the gateway's lock held."""
+        assert self.passkey_directory is not None
+        if a.decision == "reject":
+            return "a rejection carries a passkey assertion" if a.evidence else None
+        if a.decision != "approve" or a.evidence is None:
+            return "the approval carries no passkey assertion"
+        errs = self.passkey_directory.check(approver=a.approver, position=sys.maxsize,
+                                            key=a.escalation, tool=a.tool,
+                                            args_sha256=a.args_sha256, ev=a.evidence,
+                                            label="approved")
+        return (errs and "the passkey's assertion was refused: " + errs[0]) or \
+            passkeys.document_problem(a.evidence, args)
 
     def _authorize(self, peer: str, tool: str, args: Dict[str, Any], token: Optional[str],
                    at: int) -> Dict[str, Any]:

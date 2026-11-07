@@ -35,7 +35,7 @@ from biscuit_auth import (Algorithm, AuthorizationError, AuthorizerBuilder, Bisc
                           BlockBuilder, KeyPair, PrivateKey, PublicKey, Rule)
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from . import keys
+from . import keys, passkeys
 from .canon import cid_of_bytes, cid_str, dag_cbor
 from .log import b64, unb64
 
@@ -118,6 +118,10 @@ class Approval:
     args_sha256: bytes
     time: int                 # ms since the epoch
     signature: bytes = field(default=b"", repr=False)
+    # A passkey approver's proof: the WebAuthn assertion. The approval record holds only its
+    # summary and the assertion goes in a child record (see `passkeys`). For a passkey approver
+    # the signature is optional; a gateway's witness signature is a convenience, never the proof.
+    evidence: Optional[passkeys.Evidence] = field(default=None, repr=False)
 
     def fields(self) -> Dict[str, Any]:
         return {"escalation": self.escalation, "approver": self.approver,
@@ -135,14 +139,23 @@ class Approval:
         return keys.verify(public_key, self.signature, self.message())
 
     def to_json(self) -> Dict[str, Any]:
-        return {**self.fields(), "args_sha256": self.args_sha256.hex(),
-                "signature": b64(self.signature)}
+        out = {**self.fields(), "args_sha256": self.args_sha256.hex()}
+        if self.signature:
+            out["signature"] = b64(self.signature)
+        if self.evidence is not None:
+            out["evidence"] = self.evidence.to_json()
+        return out
 
     @classmethod
     def from_json(cls, d: Dict[str, Any]) -> "Approval":
+        try:
+            evidence = passkeys.Evidence.from_json(d["evidence"]) if d.get("evidence") else None
+        except passkeys.WebAuthnError as e:
+            raise ValueError(str(e)) from None
         return cls(escalation=d["escalation"], approver=d["approver"], decision=d["decision"],
                    tool=d["tool"], args_sha256=bytes.fromhex(d["args_sha256"]),
-                   time=int(d["time"]), signature=unb64(d["signature"]))
+                   time=int(d["time"]), signature=unb64(d["signature"]) if d.get("signature")
+                   else b"", evidence=evidence)
 
 
 class Authority:

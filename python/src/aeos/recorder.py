@@ -149,10 +149,61 @@ class Recorder:
     def approval(self, call: Entry, approval: Any, ts: Optional[int] = None) -> Entry:
         """Record a person's signed approval, linked to the escalation and the call."""
         with self._lock:
-            body = {**approval.fields(), "signature": approval.signature}
-            return self._append("approval", agent=approval.approver, obo=None,
-                                subject=approval.tool, body=body,
-                                parents=[cid_parse(approval.escalation), call.cid], ts=ts)
+            body = dict(approval.fields())
+            if approval.signature:
+                body["signature"] = approval.signature
+            if approval.evidence is not None:
+                body["evidence"] = approval.evidence.summary()
+            entry = self._append("approval", agent=approval.approver, obo=None,
+                                 subject=approval.tool, body=body,
+                                 parents=[cid_parse(approval.escalation), call.cid], ts=ts)
+            if approval.evidence is not None:
+                self._append("x-approval-evidence", agent=approval.approver, obo=None,
+                             subject=approval.tool, body=approval.evidence.body(),
+                             parents=[entry.cid], ts=ts)
+            return entry
+
+    def passkey_enrolled(self, approver: str, *, identity: str, credential_id: bytes,
+                         public_key: bytes, rp_id: str, origin: str,
+                         identity_evidence: Optional[Dict[str, Any]] = None,
+                         confirmation: Any = None, ts: Optional[int] = None) -> Entry:
+        """A passkey joins an approver's registry. The approver's first passkey cites the
+        evidence of the sign-in that identified the person; every later one is confirmed by
+        an assertion (passkeys.Evidence) from a registered passkey."""
+        body: Dict[str, Any] = {"approver": approver, "identity": identity,
+                                "credential_id": credential_id, "public_key": public_key,
+                                "rp_id": rp_id, "origin": origin}
+        return self._registry("x-passkey-enrolled", approver, body, identity_evidence,
+                              confirmation, ts)
+
+    def passkey_revoked(self, approver: str, *, credential_id: bytes, confirmation: Any,
+                        ts: Optional[int] = None) -> Entry:
+        """A passkey leaves the registry, confirmed by an assertion from a registered one."""
+        return self._registry("x-passkey-revoked", approver,
+                              {"approver": approver, "credential_id": credential_id}, None,
+                              confirmation, ts)
+
+    def approver_rebound(self, approver: str, *, identity: str,
+                         identity_evidence: Dict[str, Any], ts: Optional[int] = None) -> Entry:
+        """The approver's identity changed; passkeys enrolled under the old one end here."""
+        return self._registry("x-approver-rebound", approver,
+                              {"approver": approver, "identity": identity}, identity_evidence,
+                              None, ts)
+
+    def _registry(self, kind: str, approver: str, body: Dict[str, Any],
+                  identity_evidence: Optional[Dict[str, Any]], confirmation: Any,
+                  ts: Optional[int]) -> Entry:
+        with self._lock:
+            if identity_evidence is not None:
+                body["identity_evidence"] = identity_evidence
+            if confirmation is not None:
+                body["evidence"] = confirmation.summary()
+            entry = self._append(kind, agent=approver, obo=None, subject=None, body=body,
+                                 parents=[], ts=ts)
+            if confirmation is not None:
+                self._append("x-approval-evidence", agent=approver, obo=None, subject=None,
+                             body=confirmation.body(), parents=[entry.cid], ts=ts)
+            return entry
 
     def _refusal(self, tool: str) -> Optional[str]:
         if self.allow is not None and tool not in self.allow:
