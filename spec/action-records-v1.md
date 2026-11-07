@@ -267,13 +267,13 @@ Version 0 of this format was called "AE-OS Receipts" (`spec/receipts-v0.md`). It
 
 ## 10. Passkey approvals
 
-An approval (section 1) is a person's answer to an escalated call. Until now `aeos audit` checked it only against one Ed25519 key per person. A person who approves with a passkey holds no such key, so a gateway that verified the passkey would have signed the approval with its own key, and an auditor would have had to trust that key. This section puts the person's own proof in the audit trail, so `aeos audit` checks it with nothing but the trail and the principals file the auditor trusts. A gateway signature, where present, is a convenience and never the proof.
+An approval (section 1) is a person's answer to an escalated call. `aeos audit` checks an approval against one Ed25519 key per person. A person who approves with a passkey holds no such key, so a gateway that verified the passkey would sign the approval with its own key, and an auditor would have to trust that key. This section puts the person's own proof in the audit trail, so `aeos audit` checks it with nothing but the trail and the principals file the auditor trusts. A gateway signature, where present, is a convenience and never the proof.
 
-The terms are those of W3C Web Authentication Level 3 (WebAuthn), checked at w3.org/TR/webauthn-3/ (Candidate Recommendation Snapshot of 26 May 2026): relying party, RP ID, origin, authenticator data (`rpIdHash`, `flags`, `signCount`), the UP, UV, BE, BS, AT and ED flags (section 6.1), client data (section 5.8.1), authentication ceremony and the steps of section 7.2 "Verifying an Authentication Assertion", the credential public key as a COSE_Key in the CTAP2 canonical CBOR encoding form (section 6.5.1), and the DER `Ecdsa-Sig-Value` of ES256 (section 6.5.5).
+The terms are those of W3C Web Authentication Level 3 (WebAuthn), a W3C Recommendation of 25 August 2026 (w3.org/TR/webauthn-3/, checked there): relying party, RP ID, origin, authenticator data (`rpIdHash`, `flags`, `signCount`), the UP, UV, BE, BS, AT and ED flags (section 6.1), client data (section 5.8.1), the authentication ceremony and the steps of section 7.2 "Verifying an Authentication Assertion", the signature counter (section 6.1.1), the credential public key as a COSE_Key in the CTAP2 canonical CBOR encoding form (section 6.5.1), and the DER `Ecdsa-Sig-Value` of ES256 (section 6.5.5).
 
 ### 10.1 The approval and its evidence
 
-For an approver whose principals entry is of type `webauthn` (section 10.3), the `approval` record body is `{escalation, approver, decision, tool, args_sha256, time, evidence, signature?}`. `evidence` is the summary `{kind: "passkey-assertion", assertion_sha256}`. `signature` is optional: the assertion is the signature, and any `signature` is the gateway's own.
+For an approver whose principals entry is of type `webauthn` (section 10.3), the `approval` record body is `{escalation, approver, decision, tool, args_sha256, time, evidence, signature?}`. For a yes, `evidence` is the summary `{kind: "passkey-assertion", assertion_sha256}`. `signature` is optional: the assertion is the signature, and any `signature` is the gateway's own.
 
 The assertion sits in a child record of kind `x-approval-evidence`, whose `parents` is `[the approval]` and whose body is:
 
@@ -286,79 +286,95 @@ The assertion sits in a child record of kind `x-approval-evidence`, whose `paren
 | `rp_id`, `origin` | text | What the evidence claims. They are compared with the values enrolled for the credential and never used in their place |
 | `request_digest` | bytes (32) | The digest the challenge was built from (section 10.2) |
 | `assertion_sha256` | bytes (32) | SHA-256(`authenticator_data` ‖ SHA-256(`client_data_json`) ‖ `signature`) |
-| `batch` | map, optional | `{context: "aeos/approval-batch/v1", items: [{tool, args_sha256}, ...]}` (section 10.2) |
+| `batch` | map, optional | `{context: "aeos/approval-batch/v2", items: [{tool, args_sha256, escalation}, ...]}` (section 10.2); the document item has no `escalation` |
 
 Each approval of a batch has its own child record, and every one of them carries the same assertion. In JSON exports bytes are unpadded base64url.
 
-An assertion means one thing: **approve this request**. There is no assertion for declining. A `reject` approval by a passkey approver carries none and authorises nothing; one that carries an assertion is contradictory and fails.
+An assertion means one thing: **approve this request**. There is no assertion for declining. A `reject` by a passkey approver authorises nothing and rests on the sign-in that identified the person: its `evidence` is the summary `{kind, ref, sha256}` of that sign-in (a kind other than `passkey-assertion`, a reference, and the SHA-256 of the evidence), which the audit reports and cannot check. A rejection with no such evidence is refused, so no rejection is made anonymously under an approver's name. A rejection that carries an assertion is contradictory and fails.
 
 ### 10.2 What the passkey signs
 
 ```
-request_digest = SHA-256("aeos/request/v1\n" || tool || "\n" || args_sha256)
-batch_digest   = SHA-256("aeos/approval-batch/v1\n" || item_1 || "\n" || item_2 || ... || item_n)
-                 where item = tool || 0x00 || args_sha256, in the order shown to the person
+request_digest = SHA-256("aeos/request/v2\n" || tool || "\n" || args_sha256 || escalation)
+batch_digest   = SHA-256("aeos/approval-batch/v2\n" || item_1 || "\n" || item_2 || ... || item_n)
+                 where item = tool || 0x00 || args_sha256 || escalation, in the order shown to the person
 challenge      = SHA-256("aeos/approval-challenge/v1\n" || nonce || digest)
 ```
 
-`tool` is UTF-8 and `args_sha256` is the 32-byte digest of the call's arguments (section 5.3), exactly as the approval record names them. `digest` is `request_digest`, or `batch_digest` when `batch` is present. The authenticator is asked to sign `challenge`, so `client_data_json.challenge` is its unpadded base64url. A batch holds 1 to 256 items, a tool name in a batch has no NUL byte, and no item repeats. A batch of one still uses `batch_digest`; the two constructions are separate so one can never stand for the other. A batch that signs a document starts with the single item `(aeos/document, SHA-256 of the document)`, and each approval citing it must be for a call whose recorded arguments hold `document_sha256`, the same digest in hex.
+`tool` is UTF-8, `args_sha256` is the 32-byte digest of the call's arguments (section 5.3), and `escalation` is the 36-byte binary CID of the escalating `policy.decision`, all as the approval record names them. The escalation is in the digest so that a yes binds to one escalation and cannot answer another one for the same call. `digest` is `request_digest`, or `batch_digest` when `batch` is present. The authenticator is asked to sign `challenge`, so `client_data_json.challenge` is its unpadded base64url. A batch holds 1 to 256 items, a tool name in a batch has no NUL byte, and no item repeats. A batch of one still uses `batch_digest`; the two constructions are separate so one can never stand for the other. A batch that signs a document starts with the single item `(aeos/document, SHA-256 of the document)` with no escalation, and each approval citing it must be for a call whose recorded arguments hold `document_sha256`, the same digest in hex.
 
-Registry changes (section 10.4) are signed as requests too: the tool is `aeos/passkey-enrol` or `aeos/passkey-revoke`, and `args_sha256` is the digest (section 5.3) of `{approver, identity, credential_id, public_key, rp_id, origin}` for an enrolment (the three byte values as unpadded base64url) or of `{approver, credential_id}` for a revocation.
+Names that start with `aeos/` are reserved: an approval is refused for such a tool, and so is a batch item, except the leading `aeos/document`. This keeps a person's yes to a payment from standing for a registry change.
+
+A registry change (section 10.4) is confirmed by an assertion over a request that answers no escalation, so one single request and never a batch: `request_digest = SHA-256("aeos/request/v1\n" || tool || "\n" || args_sha256)`, where `tool` is `aeos/passkey-enrol`, `aeos/passkey-revoke` or `aeos/approver-rebind`, and `args_sha256` is the digest (section 5.3) of `{approver, identity, credential_id, public_key, rp_id, origin}` for an enrolment (`credential_id` and `public_key` as unpadded base64url), of `{approver, credential_id}` for a revocation, or of `{approver, identity, identity_evidence}` for a rebinding (`identity_evidence` as `{kind, ref, sha256}` with `sha256` in unpadded base64url).
+
+A root passkey's registration response (section 10.4) is made for the challenge `SHA-256("aeos/enrol-challenge/v1\n" || approver || "\n" || SHA-256 of the identity evidence)`.
 
 ### 10.3 Principals
 
-`trust/principals.json` maps a principal to an Ed25519 public key (hex), as before, or to `{"type": "webauthn", "credentials": [...], "witness_key": hex?}`. `credentials` pins the approver's first passkey: entries of `{credential_id, public_key, rp_id, origin, identity}` (the bytes as unpadded base64url), where other fields an exporter adds, such as `created_at_ms` and `revoked_at_ms`, are a cache that the audit ignores. `witness_key` is the gateway key that may have signed the approval, so a verifier can say whether that signature holds. The auditor takes this file from a source they trust.
+`trust/principals.json` maps a principal to an Ed25519 public key (hex), as before, or to `{"type": "webauthn", "credentials": [...], "witness_key": hex?}`. `credentials` pins the approver's root passkeys: entries of `{credential_id, public_key, rp_id, origin, identity}` (the bytes as unpadded base64url), all five required, so that a pin names the person it was made for. Other fields an exporter adds, such as `created_at_ms` and `revoked_at_ms`, are a cache that the audit ignores. `witness_key` is the gateway key that may have signed the approval, so a verifier can say whether that signature holds. The auditor takes this file from a source they trust.
 
 ### 10.4 The registry, kept in the audit trail
 
 Each passkey's life is a record in the trail, so no window of validity rests on the writer's word:
 
-- `x-passkey-enrolled`: `{approver, identity, credential_id, public_key (COSE_Key bytes), rp_id, origin}`, with `identity_evidence` or `evidence`.
+- `x-passkey-enrolled`: `{approver, identity, credential_id, public_key (COSE_Key bytes), rp_id, origin}` and, for a root passkey, `identity_evidence` and `registration`; for any other, `evidence`.
 - `x-passkey-revoked`: `{approver, credential_id, evidence}`.
-- `x-approver-rebound`: `{approver, identity, identity_evidence}`: the approver's identity (for example an email) is now `identity`.
+- `x-approver-rebound`: `{approver, identity, identity_evidence}` and, while a passkey stands, `evidence`.
 
-`identity_evidence` is `{kind, ref, sha256}`: what identified the person (a sign-in, say), as a kind, a reference and the SHA-256 of that evidence. The audit cannot check it: it reports the evidence and the person it binds, and the auditor decides whether to accept it. `evidence` is a summary as in section 10.1, with an `x-approval-evidence` child that confirms the change (section 10.2).
+`identity_evidence` is `{kind, ref, sha256}`: what identified the person (a sign-in, say). The audit cannot check it: it reports it, and the auditor decides whether to accept it. `registration` is `{client_data_json, attestation_object}`, the response of the registration ceremony with the `none` attestation format. `evidence` is a summary as in section 10.1, with an `x-approval-evidence` child that confirms the change (section 10.2).
 
-The audit rebuilds the registry by walking the trail in order, with the principals the auditor trusts:
+Each approver has an **epoch**, a count that every root passkey and every rebinding raises by one. The audit rebuilds the registry by walking the trail once, in order, applying each registry record and checking each approval at its own position, with the principals the auditor trusts:
 
 1. A change for a principal that is not of type `webauthn` is a problem.
-2. An enrolment made when the approver has no valid passkey is a **root**: it must carry `identity_evidence`; if the principals pin credentials for the approver it must be one of them (same id, key, RP ID, origin and identity); it binds the approver to its `identity`. Otherwise the audit reports that the root rests on the trail's identity evidence alone.
+2. An enrolment made when the approver has no valid passkey is a **root**. It starts a new epoch, binds the approver to its `identity`, and must carry `identity_evidence` and a `registration` whose client data is `webauthn.create` for the challenge of section 10.2, at the enrolled origin, with an attestation object of format `none` whose authenticator data has the UP, UV and AT flags, the enrolled RP ID hash, credential id and public key. If the principals pin credentials for the approver it must be one of them (same id, key, RP ID, origin and identity); otherwise the audit reports that the root rests on the trail's identity evidence alone.
 3. Any other enrolment must name the approver's current identity and carry a confirmation: an assertion from a passkey valid for that approver at that position. So must every revocation (a passkey may revoke itself).
-4. A rebinding needs `identity_evidence`. From its position, every passkey enrolled under the earlier identity is no longer valid.
+4. A rebinding needs `identity_evidence`, starts a new epoch and binds the approver to its `identity`. While the approver has a valid passkey, one of them must confirm it, so the writer alone cannot rebind. A rebinding that is not confirmed is a problem and does not take effect.
 5. A credential id enrols once. Its COSE_Key, RP ID and origin must pass section 10.5.
 
-A passkey is **valid for an approver at a position** (a record's index in the trail) when it was enrolled at an earlier position, was not revoked at an earlier position, and was enrolled under the approver's current identity at that position. Position, not time, decides: the trail's checkpoints commit to the order of records, while a timestamp is whatever the writer wrote. Approvals before a revocation or rebinding still verify; approvals after it fail.
+A passkey is **valid for an approver at a position** (a record's index in the trail) when it was enrolled at an earlier position, was not revoked at an earlier position, and was enrolled in the epoch the approver is in at that position and under its identity. A rebinding therefore ends every earlier passkey for good: binding back to an earlier identity does not revive them, because the epoch has moved on. Position, not time, decides: the trail's checkpoints commit to the order of records, while a timestamp is whatever the writer wrote. Approvals before a revocation or rebinding still verify; approvals after it fail.
 
 ### 10.5 Keys and the assertion
 
-A credential public key is a COSE_Key in the CTAP2 canonical CBOR encoding form with exactly the fields of an ES256 key (`kty` 2, `alg` -7, `crv` 1, `x`, `y`) or an EdDSA key (`kty` 1, `alg` -8, `crv` 6, `x`), nothing else. A key is refused when it is not canonical CBOR (non-shortest integers, labels out of order or repeated, trailing bytes), is on another curve or algorithm, has coordinates that are not 32 bytes or not reduced, is not a point on P-256, or is an Ed25519 point that is not canonical or is of small order. A declared origin must be a web origin, `https` (or `http` on `localhost`), whose host is the RP ID or a subdomain of it.
+A credential public key is a COSE_Key in the CTAP2 canonical CBOR encoding form with exactly the fields of an ES256 key (`kty` 2, `alg` -7, `crv` 1, `x`, `y`) or an EdDSA key (`kty` 1, `alg` -8, `crv` 6, `x`), nothing else. CBOR is canonical when its integers are in shortest form, its lengths are definite, and map keys are in order by encoded length then bytewise with none repeated; floats and tags are refused. A key is refused when it is not canonical, is on another curve or algorithm, has coordinates that are not 32 bytes or not reduced, is not a point on P-256, or is an Ed25519 point that is not canonical or is of small order.
 
-The assertion is verified as in WebAuthn section 7.2 with the values enrolled for the credential: `type` is `webauthn.get`; `challenge` is the section 10.2 challenge; `origin` equals the enrolled origin; `crossOrigin` is absent or false and `topOrigin` is absent; `rpIdHash` is SHA-256 of the enrolled RP ID; the UP flag and the UV flag are set (AE-OS always requires user verification); BS is not set without BE; and the signature is valid over `authenticator_data` ‖ SHA-256(`client_data_json`) with the enrolled key, for ES256 as an ASN.1 DER `Ecdsa-Sig-Value` and for EdDSA as Ed25519 under the strict rules of section 1.2. AE-OS also refuses an assertion with the AT flag set, or with the ED flag set and no extension data after the 37 bytes, or the reverse. `signCount` is advisory: synced passkeys report 0, and a counter that does not rise is not a problem.
+A relying party id is a lower-case domain of two or more labels of `a-z`, `0-9` and `-` (or `localhost`), not an IP address and not a public suffix; the audit holds a short list of suffixes under which anyone registers names (such as `co.za`, `github.io`, `herokuapp.com`), not the Public Suffix List. A declared origin is in its browser serialisation: `https` (or `http` on `localhost`), lower case, `scheme://host[:port]`, no path and no default port, with a host that is the RP ID or a subdomain of it.
+
+The assertion is verified as in WebAuthn section 7.2 with the values enrolled for the credential:
+- `client_data_json` is UTF-8, decoded with one leading byte order mark stripped as section 7.2 requires, and parsed as JSON with no repeated key;
+- `type` is `webauthn.get`; `challenge` is the section 10.2 challenge; `origin` equals the enrolled origin; `crossOrigin` is absent or false and `topOrigin` is absent;
+- `rpIdHash` is SHA-256 of the enrolled RP ID; the UP flag and the UV flag are set (AE-OS always requires user verification); BS is not set without BE;
+- the AT flag is not set (an AE-OS rule: an assertion carries no attested credential data);
+- the bytes after the first 37 of the authenticator data are empty unless the ED flag is set, and then they are exactly one canonical CBOR map with nothing after it;
+- the signature is valid over `authenticator_data` ‖ SHA-256(`client_data_json`) with the enrolled key, for ES256 as an ASN.1 DER `Ecdsa-Sig-Value` and for EdDSA as Ed25519 under the strict rules of section 1.2.
+
+`signCount` is advisory: synced passkeys report 0, and a counter that does not rise is not a problem. As section 7.2 describes, when it or the stored counter is non-zero and it is not greater than the stored counter, the audit reports a note that the passkey may have been cloned, and it carries on.
 
 ### 10.6 Verifying an approval
 
 For each `approval` by a passkey approver, a verifier reports a problem unless every check holds:
 
 1. The record is by the approver, and answers an escalation of the same call (as for any approval).
-2. `decision` is `approve` (a `reject` is accepted unevidenced and counts as no approval; another value fails).
+2. `decision` is `approve`, or `reject` with sign-in evidence (section 10.1); another value fails. A rejection verifies nothing and is counted as no approval.
 3. `evidence` names an `x-approval-evidence` child whose `assertion_sha256` matches, whose digest matches its bytes, and which parses.
 4. The credential is valid for the approver at the approval's position (section 10.4).
 5. The evidence's `rp_id` and `origin` equal those enrolled for the credential.
-6. The approval's own `(tool, args_sha256)` is the request signed: it is `request_digest` of them, or it is an item of `batch` and the batch's digest is `request_digest`. A mismatch is "the passkey signed a different request".
+6. The request the passkey signed is the approval's own: `request_digest` is the digest of the approval's `tool`, `args_sha256` and escalation, or the approval's own item is one of the batch's items and `request_digest` is the batch's digest. If not, the passkey signed a different request.
 7. The assertion verifies (section 10.5) over the challenge of section 10.2.
 8. If a document is signed, it is the one the call's arguments name.
 9. Single use (section 10.7).
 
-A gateway signature, if present and a `witness_key` is given, must verify or the approval fails; if it verifies the audit says so. Nothing else depends on it.
+A gateway signature, if present and a `witness_key` is given, must verify or the approval fails; if it verifies the audit says so. Without a `witness_key` the audit says that a gateway signature was not checked. Nothing else depends on it.
+
+**A decision rests on its approval.** For every `policy.decision` whose input carries `approval`, the trail holds an earlier `approval` record with parents `[escalation, the decision's call]`, by the same approver with the same answer, that passed these checks (for an Ed25519 approver, its signature check), and whose tool and arguments are the call's. One approval of one escalation allows at most one call: a second allowed decision on the same escalation is a problem, so one tap never authorises two payments. This holds for Ed25519 approvals too.
 
 ### 10.7 Single use
 
-Each nonce and each assertion is used once in a trail, except an assertion shared by the approvals of its own batch (each for a different item), and an answer recorded again for the same escalation. Any other later use of an assertion, or of a nonce with another assertion, is a problem naming the first use. That the server issued the nonce, and issued it only once across trails, cannot be checked from a trail: the audit says that the nonce was bound to the request and checked for reuse inside this trail only.
+The audit walks the trail once, in order, and checks registry changes and approvals in the same pass. Each nonce and each assertion is used once, except an assertion shared by the approvals of its own batch (each for a different item), and an answer recorded again for the same escalation. Any other later use of an assertion, or of a nonce with another assertion, is a problem naming the first use; a confirmation that reuses an approval's nonce, or the reverse, is such a use. That the server issued the nonce, and issued it only once across trails, cannot be checked from a trail: the audit says that the nonce was bound to the request and checked for reuse inside this trail only.
 
 ### 10.8 What is and is not proven
 
-Proven, from the trail and the trusted principals alone: a credential that was registered for the approver at that point in the trail, and was enrolled under the approver's identity then, signed, with user verification, a challenge bound to this exact call (or to a batch that includes it), at the enrolled RP ID and origin, and no assertion was used twice.
+Proven, from the trail and the trusted principals alone: a credential that was registered for the approver at that point in the trail, in the epoch the approver was then in, signed, with user verification, a challenge bound to this exact call and escalation (or to a batch that includes it), at the enrolled RP ID and origin, and no assertion was used twice.
 
-Not proven: a passkey proves possession of the credential, not who holds it. Identity comes from the evidence at enrolment: the audit shows each `identity_evidence` and which credential it made the root of the registry, and the auditor accepts or rejects it, or pins the root in the principals file. Not proven either: that a person saw what the call does (only that the digest of it was signed), that the device was not shared, that the server issued the nonce, and who the principal is outside the records.
+Not proven: a passkey proves possession of the credential, not who holds it. Identity comes from the evidence at enrolment: the audit shows each `identity_evidence` and which credential it made the root of the registry, and the auditor accepts or rejects it, or pins the root in the principals file; the audit splits its finding into approvals that rest on a pinned root and approvals that rest on evidence it cannot check. The root's registration response uses the `none` attestation format, which carries no signature: it ties the credential id, public key, origin, user verification and the identity evidence together in one recorded response, so a mismatch is caught, but a writer who holds the public key could fabricate it. It does not prove possession of the key. Not proven either: that a person saw what the call does (only that the digest of it was signed), that the device was not shared, that the server issued the nonce, and who the principal is outside the records.
 
 Only the Python verifier (`aeos audit`) checks approvals today. The Rust verifier and the browser verifier check whole trails and documents (sections 4.1 and 4.3), which include these records as ordinary action records, but do not check approvals of either kind. They are on the roadmap.
