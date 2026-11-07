@@ -24,6 +24,8 @@ A, B, C = (SoftAuthenticator(s) for s in ("cfo-laptop", "cfo-phone", "cfo-key"))
 E = SoftAuthenticator("cfo-ed25519", alg=webauthn.COSE_EDDSA)
 
 Scenario = Tuple[str, Trail, Dict[str, Any], List[str]]
+LOCAL = SoftAuthenticator("cfo-laptop", rp_id="localhost", origin="http://localhost:8443")
+DEMO_CASES = {"demo: approval for a passkey made at http://localhost"}   # run with --demo
 
 
 def flip(b: bytes, i: int = 0) -> bytes:
@@ -260,6 +262,16 @@ def scenarios() -> List[Scenario]:
         t.enrol(A, rp_id=rp, origin=origin)
         add(name, t, [why])
 
+    t = Trail()
+    t.enrol(LOCAL)
+    add("passkey made at http://localhost, audit run without --demo", t,
+        ["localhost is not a relying party id this audit accepts"])
+    t = Trail()
+    t.enrol(LOCAL)
+    _, c, e = t.escalated_call(ARGS)
+    t.approve(c, e, TOOL, ARGS, ev_for(LOCAL, 1, e))
+    add("demo: approval for a passkey made at http://localhost", t, [])
+
     # 5. tampering
     for name, fn in (
             ("signature bit flipped, digest refreshed",
@@ -356,6 +368,15 @@ def scenarios() -> List[Scenario]:
     t.enrol(B, confirmed_by=C, n=2)
     add("second passkey confirmed by an unregistered passkey", t,
         ["not confirmed by a registered passkey: the passkey is not in the registry"])
+    t = Trail()
+    t.enrol(A)
+    ev = A.evidence(nonce(2), passkeys.ENROL_TOOL, json_digest({"another": "change"}))
+    t.add(passkeys.KIND_ENROLLED, APPROVER, body={
+        "approver": APPROVER, "identity": "a@acme.example", "credential_id": B.credential_id,
+        "public_key": B.cose_key, "rp_id": RP_ID, "origin": ORIGIN, "evidence": ev.summary()})
+    t.evidence_child(t.cids[-1], APPROVER, ev)
+    add("confirmation signed for another change", t,
+        ["signed a different request from the change it confirms"])
     t = Trail()
     t.enrol(A)
     t.revoke(A, by=C, n=2)
@@ -548,6 +569,15 @@ def scenarios() -> List[Scenario]:
     # a decision rests on a verified approval, and one approval allows one call
     add("decision rests on no approval record", _decided(omit_approval=True),
         ["not an earlier, verified approval of this call"])
+    t = Trail()
+    t.enrol(A)
+    _, c0, e = t.escalated_call(ARGS)
+    rogue = t.add("tool.call", "spiffe://acme.example/agent/rogue/1", subject=TOOL, body={
+        "args_sha256": json_digest(ARGS), "call_id": "rogue"})
+    t.approve(rogue, e, TOOL, ARGS, ev_for(A, 1, e))
+    t.decide(rogue, TOOL, ARGS, "allow", approver=APPROVER)
+    add("another agent's call rides the escalation", t,
+        ["attached to a call by another agent", "not an earlier, verified approval of this call"])
     add("approval attached to another call than the one decided", _decided(wrong_call=True),
         ["not an earlier, verified approval of this call"])
     add("one approval allows two calls", _decided(allow_twice=True),

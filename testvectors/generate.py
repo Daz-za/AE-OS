@@ -613,12 +613,14 @@ def passkey_vectors():
     ]
     cases = []
     for name, trail, pr, expect in ps.scenarios():
-        findings, problems, notes = audit.check_approvals(trail.triples(), pr)
+        findings, problems, notes = audit.check_approvals(trail.triples(), pr,
+                                                          demo=name in ps.DEMO_CASES)
         assert len(problems) == len(expect) and all(x in y for x, y in zip(expect, problems)), \
             (name, expect, problems)
         cases.append({"name": name, "principals": pr,
                       "records": [{"cid": cid_str(c), "cbor": hx(dag_cbor(r))}
                                   for _, c, r in trail.triples()],
+                      **({"demo": True} if name in ps.DEMO_CASES else {}),
                       "expect_problems": problems, "expect_notes": notes})
     return {
         "format": "aeos-passkey-approvals/test-vectors/v1",
@@ -628,6 +630,7 @@ def passkey_vectors():
                  "public seed, never use one for real. A case is a trail (records in order, "
                  "each with its CID), the principals file the auditor trusts, and the problems "
                  "a verifier must report, in order (none means the approvals verify), and the notes it makes.",
+        "public_suffixes": sorted(webauthn.PUBLIC_SUFFIXES),
         "constructions": cons, "cose_keys": keys_, "assertions": assertions, "cases": cases,
     }
 

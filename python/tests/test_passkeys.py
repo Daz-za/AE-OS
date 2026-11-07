@@ -12,7 +12,7 @@ from aeos import ActionLog, audit, delegation, fulldemo, identity, keys, passkey
 from aeos.canon import cid_of_bytes, cid_str, dag_cbor, decode_dag_cbor, json_digest
 from aeos.gateway import AgentClient, Gateway
 from aeos.log import now_ms
-from passkey_scenarios import ARGS, TOOL, A, B, E, scenarios
+from passkey_scenarios import ARGS, DEMO_CASES, TOOL, A, B, E, scenarios
 from webauthn_support import (APPROVER, WITNESS_PUBLIC, SoftAuthenticator, Trail, cose_es256,
                               nonce, pin, principals, sign_in_of)
 
@@ -22,7 +22,8 @@ CASES = scenarios()
 
 @pytest.mark.parametrize("name,trail,pr,expect", CASES, ids=[c[0] for c in CASES])
 def test_each_scenario_gives_its_verdict(name, trail, pr, expect):
-    findings, problems, notes = audit.check_approvals(trail.triples(), pr)
+    findings, problems, notes = audit.check_approvals(trail.triples(), pr,
+                                                      demo=name in DEMO_CASES)
     assert len(problems) == len(expect), problems
     for want, got in zip(expect, problems):
         assert want in got
@@ -53,8 +54,11 @@ def test_the_vectors_replay_from_their_bytes():
             raw = bytes.fromhex(r["cbor"])
             assert cid_str(cid_of_bytes(raw)) == r["cid"]
             triples.append((i, cid_of_bytes(raw), decode_dag_cbor(raw)))
-        _, problems, notes = audit.check_approvals(triples, c["principals"])
+        _, problems, notes = audit.check_approvals(triples, c["principals"],
+                                                   demo=c.get("demo", False))
         assert problems == c["expect_problems"] and notes == c["expect_notes"], c["name"]
+    assert doc["public_suffixes"] == sorted(webauthn.PUBLIC_SUFFIXES) and \
+        "co.za" in doc["public_suffixes"]
     for k in doc["cose_keys"]:
         try:
             webauthn.parse_cose_key(bytes.fromhex(k["cose_key"]))
@@ -150,7 +154,10 @@ def test_the_keys_of_a_real_authenticator_shape_parse_and_bent_ones_do_not():
 
 def test_origins_a_credential_may_declare():
     webauthn.check_origin("acme.example", "https://approve.acme.example")
-    webauthn.check_origin("localhost", "http://localhost:8443")
+    webauthn.check_origin("localhost", "http://localhost:8443", demo=True)
+    for demo_only in (("localhost", "http://localhost:8443"), ("localhost", "https://localhost")):
+        with pytest.raises(webauthn.WebAuthnError):          # localhost only with --demo
+            webauthn.check_origin(*demo_only)
     for rp, origin in (("acme.example", "http://acme.example"), ("acme.example", "https://x.example"),
                        ("acme.example", "https://acme.example/path"),
                        ("acme.example", "https://evilacme.example"), ("", "https://acme.example"),
@@ -210,7 +217,10 @@ def test_evidence_that_is_not_what_it_says_is_refused():
 
 def test_origins_a_credential_may_declare():
     webauthn.check_origin("acme.example", "https://approve.acme.example")
-    webauthn.check_origin("localhost", "http://localhost:8443")
+    webauthn.check_origin("localhost", "http://localhost:8443", demo=True)
+    for demo_only in (("localhost", "http://localhost:8443"), ("localhost", "https://localhost")):
+        with pytest.raises(webauthn.WebAuthnError):          # localhost only with --demo
+            webauthn.check_origin(*demo_only)
     webauthn.check_origin("acme.example", "https://acme.example:8443")
     for rp, origin in (("acme.example", "http://acme.example"), ("acme.example", "https://x.example"),
                        ("acme.example", "https://acme.example/path"),
@@ -372,10 +382,81 @@ def test_a_revoked_passkey_is_refused_at_once_without_a_restart(gateway):
 
 def test_the_recorder_refuses_a_registry_change_the_directory_refuses(gateway):
     gw, log, c, rec, _ = gateway
+    before = len(log)
     with pytest.raises(webauthn.WebAuthnError, match="no confirmation"):
         rec.passkey_enrolled(CFO, identity=IDENTITY, credential_id=B.credential_id,
                              public_key=B.cose_key, rp_id=B.rp_id, origin=B.origin)
-    assert B.credential_id not in gw.passkey_directory.creds
+    wrong = A.evidence(nonce(1), passkeys.ENROL_TOOL, b"\x00" * 32)
+    with pytest.raises(webauthn.WebAuthnError, match="different request"):
+        rec.passkey_enrolled(CFO, identity=IDENTITY, credential_id=B.credential_id,
+                             public_key=B.cose_key, rp_id=B.rp_id, origin=B.origin,
+                             confirmation=wrong)
+    with pytest.raises(webauthn.WebAuthnError):
+        rec.passkey_revoked(CFO, credential_id=B.credential_id, confirmation=wrong)
+    # nothing was written, neither the record nor its confirming assertion, and the trail audits
+    assert len(log) == before and B.credential_id not in gw.passkey_directory.creds
+    recs = [(e.index, bytes(e.cid), log.record(e)) for e in log.entries()]
+    assert audit.check_approvals(recs, principals())[1] == []
+
+
+def test_a_trail_refuses_before_it_writes_anything(tmp_path):
+    from aeos import make_record
+    log = ActionLog.create(tmp_path / "log", log_id="urn:example:before")
+
+    def refuse(index):
+        raise ValueError(f"refused at {index}")
+
+    with pytest.raises(ValueError, match="refused at 1"):       # position 1: the marker is 0
+        log.append(make_record("note", AGENT, body={"i": 1}), before=refuse)
+    assert len(log) == 0                                        # not even the marker
+    seen = []
+    log.append(make_record("note", AGENT, body={"i": 1}), before=seen.append)
+    log.append(make_record("note", AGENT, body={"i": 2}), before=seen.append)
+    assert seen == [1, 2] and len(log) == 3
+
+
+def test_a_revocation_cannot_fall_between_the_check_and_the_approval(gateway):
+    import threading
+    gw, log, c, rec, _ = gateway
+    args = {"invoice": "I2", "amount_minor": 900}
+    rec.passkey_enrolled(CFO, identity=IDENTITY, credential_id=B.credential_id,
+                         public_key=B.cose_key, rp_id=B.rp_id, origin=B.origin,
+                         confirmation=A.evidence(nonce(7), passkeys.ENROL_TOOL,
+                                                 passkeys.enrol_args_sha256(
+                                                     CFO, IDENTITY, B.credential_id, B.cose_key,
+                                                     B.rp_id, B.origin)))
+    esc = c.call(TOOL, args)["result"]["structuredContent"]["escalation"]
+    d = gw.passkey_directory
+    real, checked, done = d.check, threading.Event(), threading.Event()
+
+    def paused(**kw):
+        got = real(**kw)
+        if kw["tool"] == TOOL:          # the approval's check: pause before it is recorded
+            checked.set()
+            done.wait(timeout=1.0)
+        return got
+
+    d.check = paused
+
+    def revoke():
+        checked.wait(10)
+        rec.passkey_revoked(CFO, credential_id=B.credential_id,
+                            confirmation=A.evidence(nonce(8), passkeys.REVOKE_TOOL,
+                                                    passkeys.revoke_args_sha256(
+                                                        CFO, B.credential_id)))
+        done.set()
+
+    other = threading.Thread(target=revoke)
+    other.start()
+    reply = c.call(TOOL, args, approval=_approval(esc, B, 3, args))
+    other.join(20)
+    assert not other.is_alive() and done.is_set()
+    recs = [(e.index, bytes(e.cid), log.record(e)) for e in log.entries()]
+    kinds = [r["kind"] for _, _, r in recs]
+    # either the gateway refused, or the approval was recorded before the revocation
+    if reply["result"]["structuredContent"] == {"paid": "I2"}:
+        assert kinds.index("approval") < kinds.index("x-passkey-revoked")
+    assert audit.check_approvals(recs, principals())[1] == []
 
 
 def _folder(g, tmp_path, pr):
@@ -421,16 +502,16 @@ def test_a_full_folder_audit_checks_a_passkey_approval_and_names_the_caveat(gate
     assert problems == []
     text = " | ".join(findings)
     assert "1 approval by passkey was checked from the evidence in the trail alone" in text
-    assert "rest on identity evidence that this audit cannot check (" + CFO + " on oidc-sign-in" \
-        in text and "pin the first passkey" in text
+    assert "1 of them rests on a first passkey that is not pinned; the trail's writer could " \
+        "have created it" in text
     assert "each of the 1 approvals is signed by its approver" in text
     assert "(not pinned in your principals)" in text
     # pinning the first passkey removes that trust, and says so
     (folder / "trust" / "principals.json").write_text(json.dumps(principals(pins=[pin(A)])))
     findings, problems = audit.run(folder)
     text = " | ".join(findings)
-    assert problems == [] and "1 of them rest on a first passkey that you pinned" in text
-    assert "cannot check (" + CFO not in text
+    assert problems == [] and "1 of them rests on a first passkey that you pinned" in text
+    assert "is not pinned" not in text
     # a pin for another passkey makes the registry, and so the audit, fail
     (folder / "trust" / "principals.json").write_text(json.dumps(principals(pins=[pin(B)])))
     assert any("is not one you pinned" in p for p in audit.run(folder)[1])
@@ -504,11 +585,16 @@ def test_a_counter_that_does_not_rise_is_a_note_and_a_synced_zero_is_not():
 def test_a_trail_with_a_pinned_and_an_unpinned_root_splits_the_finding():
     _, trail, pr, _ = _find("valid approval, first passkey pinned in the principals")
     findings, _, _ = audit.check_approvals(trail.triples(), pr)
-    assert any("rest on a first passkey that you pinned" in f for f in findings)
-    assert not any("cannot check (" in f for f in findings)
+    assert any("rests on a first passkey that you pinned" in f for f in findings)
+    assert not any("is not pinned" in f for f in findings)
+    _, trail, pr, _ = _find("rejection by a passkey approver on its sign-in evidence")
+    findings, _, _ = audit.check_approvals(trail.triples(), pr)
+    assert any(f.startswith("1 rejection by a passkey approver authorises nothing and rests on")
+               for f in findings)
     _, trail, pr, _ = _find("valid single approval (ES256)")
     findings, _, notes = audit.check_approvals(trail.triples(), pr)
-    assert any("rest on identity evidence that this audit cannot check (" in f for f in findings)
+    assert any("rests on a first passkey that is not pinned; the trail's writer could have "
+               "created it" in f for f in findings)
     assert any("not pinned in your principals" in n for n in notes)
 
 
