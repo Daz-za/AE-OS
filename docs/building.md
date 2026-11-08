@@ -132,6 +132,8 @@ The rules call a supplier a vendor: `invoice.vendor`, and `data.sanctioned_vendo
 {"decision": "allow" | "deny" | "escalate", "reasons": ["plain words for each reason"]}
 ```
 
+An escalation may add `"requires": "hardware-key"`: then only an approval made with a hardware security key answers it, never a synced passkey. The built-in payment rules do this above `hardware_key_above_minor` when the data sets it.
+
 Compile it and point the workspace at it:
 
 ```
@@ -195,6 +197,6 @@ To give an auditor the evidence, copy the folder without `private/`. They run `a
 
 ## Limits
 
-- The people's signing keys are files in `private/people/`, so the platform can sign an authority or an approval for a person when you ask it to. In production each person signs with their own passkey or smart card.
+- The people's signing keys are files in `private/people/`, so the platform can sign an authority or an approval for a person when you ask it to. In production each person approves with their own passkey, and an escalation that requires a hardware security key is answered only with one.
 - The local identity service stands in for SPIRE and does no machine or workload attestation.
 - One computer runs everything. The budget spent and open escalations are rebuilt from the log when the platform starts.

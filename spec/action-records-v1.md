@@ -84,15 +84,15 @@ Record kinds:
 | `session.start` | An agent session begins | `allow_list`, `session_id` |
 | `tool.call` | An agent asks to use a tool | `args_sha256`, `rpc_id` or `call_id`, `session_id` |
 | `tool.result` | The tool answers | `outcome` (`ok`, `error`, `rpc-error`), `result_sha256`, `call_id` |
-| `policy.decision` | A policy allows, denies or escalates an action | `decision`, `reasons` |
+| `policy.decision` | A policy allows, denies or escalates an action | `decision`, `reasons`, and on an escalation that needs a hardware security key `requires` (section 10.9) |
 | `approval` | A person approves or rejects an escalated action | `decision`, `approver`, `signature` or, for a passkey approver, `evidence` (section 10) |
 | `journal.entry` | The books record an entry in the accounts | `document`, `date`, `lines` |
 | `period.transition` | A controller opens or closes a posting period | `period`, `state`, `by` |
 | `note` | Anything else worth recording | free form |
 | `session.end` | The session ends | `unanswered_calls` |
 | `x-issuer-signing` | The first signed append to an audit trail (section 1.1) | `key_id` |
-| `x-approval-evidence` | A passkey assertion that proves an approval, or confirms a registry change (section 10) | `credential_id`, `authenticator_data`, `client_data_json`, `signature`, `nonce`, `rp_id`, `origin`, `request_digest`, `assertion_sha256`, `batch` |
-| `x-passkey-enrolled`, `x-passkey-revoked`, `x-approver-rebound` | A passkey joins, leaves, or loses its standing with an approver's registry (section 10.4) | `approver`, `identity`, `credential_id`, `public_key`, `rp_id`, `origin` |
+| `x-approval-evidence` | A passkey assertion that proves an approval, or confirms a registry change (section 10) | `credential_id`, `authenticator_data`, `client_data_json`, `signature`, `nonce`, `rp_id`, `origin`, `request_digest`, `assertion_sha256`, `batch`, `key_class`, `backup_eligible`, `backup_state` |
+| `x-passkey-enrolled`, `x-passkey-revoked`, `x-approver-rebound` | A passkey joins, leaves, or loses its standing with an approver's registry (section 10.4) | `approver`, `identity`, `credential_id`, `public_key`, `rp_id`, `origin`, `registration`, `key_class` |
 
 Numbers in a record are integers. Amounts are stored in minor currency units (cents), which keeps the encoding exact.
 
@@ -260,7 +260,7 @@ Version 0 of this format was called "AE-OS Receipts" (`spec/receipts-v0.md`). It
 
 ## 8. Test vectors
 
-`testvectors/action-records-v1.json` holds test vectors for every part of this format: canonical encodings, CIDs, Merkle roots and proofs, and valid and tampered action records, consistency proofs and audit trails with the problems a verifier reports for each. Action record cases include good, altered, wrong-key, swapped and missing issuer signatures, each with the expected `signature` state (`issuer-signed` or `log-signed only`). Audit trail cases include signatures stripped from a prefix, from one record and from every record, a removed marker, and a version 0 trail with no marker. `testvectors/receipts-v0.json` is the frozen version 0 file, with version 0 documents. The Python, Rust and browser implementations in this repository test against both. `testvectors/passkey-approvals-v1.json` holds the vectors for section 10: the constructions with worked values, COSE keys, assertions, and whole trails with the problems a verifier must report. Only Python verifies approvals (section 10.8); Rust and the browser check that those trails decode to the same bytes and CIDs. A change to this specification needs matching vectors.
+`testvectors/action-records-v1.json` holds test vectors for every part of this format: canonical encodings, CIDs, Merkle roots and proofs, and valid and tampered action records, consistency proofs and audit trails with the problems a verifier reports for each. Action record cases include good, altered, wrong-key, swapped and missing issuer signatures, each with the expected `signature` state (`issuer-signed` or `log-signed only`). Audit trail cases include signatures stripped from a prefix, from one record and from every record, a removed marker, and a version 0 trail with no marker. `testvectors/receipts-v0.json` is the frozen version 0 file, with version 0 documents. The Python, Rust and browser implementations in this repository test against both. `testvectors/passkey-approvals-v1.json` holds the vectors for section 10: the constructions with worked values, COSE keys, assertions, single registration responses with the error or the key class a verifier must give (`attestations`, against `authenticator_trust`), and whole trails with the problems a verifier must report. Only Python verifies approvals (section 10.8); Rust and the browser check that those trails decode to the same bytes and CIDs. A change to this specification needs matching vectors.
 
 ## 9. Planned for later versions
 
@@ -269,7 +269,8 @@ Version 0 of this format was called "AE-OS Receipts" (`spec/receipts-v0.md`). It
 - Writers emit `aeos-action-record/v1` instead of `aeos-receipt/v0` once the verifier deployed at ae-os.org/verify reads it.
 - A `kid` in the issuer signature's protected header (with the COSE form).
 - Salted commitments for arguments and results.
-- Passkey approvals checked by the Rust and browser verifiers (section 10.8), and RS256 passkeys (Windows Hello on some hardware), which the Python verifier refuses today.
+- Passkey approvals, attestations and key classes checked by the Rust and browser verifiers (sections 10.8 and 10.9), and RS256 passkeys (Windows Hello on some hardware), which the Python verifier refuses today.
+- Approvals signed with a PIV or other smart card, beside passkeys.
 - Independent witnesses that co-sign checkpoints, and C2SP signed-note checkpoint format. A preview of witness cosigning is described in [identity-and-witnesses-draft.md](identity-and-witnesses-draft.md).
 - Agent identity bound to a SPIFFE SVID presented at session start (preview in the same draft), and delegation from a person's digital identity wallet.
 - Hardware or cloud KMS keys for checkpoint signing.
@@ -296,8 +297,10 @@ The assertion sits in a child record of kind `x-approval-evidence`, whose `paren
 | `request_digest` | bytes (32) | The digest the challenge was built from (section 10.2) |
 | `assertion_sha256` | bytes (32) | SHA-256(`authenticator_data` ‖ SHA-256(`client_data_json`) ‖ `signature`) |
 | `batch` | map, optional | `{context: "aeos/approval-batch/v2", items: [{tool, args_sha256, escalation}, ...]}` (section 10.2); the document item has no `escalation` |
+| `key_class` | text | `hardware`, `synced` or `unknown`: the class of key the writer found made the assertion (section 10.9) |
+| `backup_eligible`, `backup_state` | boolean | The BE and BS flags of `authenticator_data`, as the writer read them |
 
-Each approval of a batch has its own child record, and every one of them carries the same assertion. In JSON exports bytes are unpadded base64url.
+Each approval of a batch has its own child record, and every one of them carries the same assertion. In JSON exports bytes are unpadded base64url. `key_class`, `backup_eligible` and `backup_state` are written together; a record without them (written before they existed) states no class, and the audit decides the class itself.
 
 An assertion means one thing: **approve this request**. There is no assertion for declining. A `reject` by a passkey approver authorises nothing and rests on the sign-in that identified the person: its `evidence` is the summary `{kind, ref, sha256}` of that sign-in (a kind other than `passkey-assertion`, a reference, and the SHA-256 of the evidence), which the audit reports and cannot check. A rejection with no such evidence is refused, so no rejection is made anonymously under an approver's name. A rejection that carries an assertion is contradictory and fails.
 
@@ -316,7 +319,7 @@ Names that start with `aeos/` are reserved: an approval is refused for such a to
 
 A registry change (section 10.4) is confirmed by an assertion over a request that answers no escalation, so one single request and never a batch: `request_digest = SHA-256("aeos/request/v1\n" || tool || "\n" || args_sha256)`, where `tool` is `aeos/passkey-enrol`, `aeos/passkey-revoke` or `aeos/approver-rebind`, and `args_sha256` is the digest (section 5.3) of `{approver, identity, credential_id, public_key, rp_id, origin}` for an enrolment (`credential_id` and `public_key` as unpadded base64url), of `{approver, credential_id}` for a revocation, or of `{approver, identity, identity_evidence}` for a rebinding (`identity_evidence` as `{kind, ref, sha256}` with `sha256` in unpadded base64url).
 
-A root passkey's registration response (section 10.4) is made for the challenge `SHA-256("aeos/enrol-challenge/v1\n" || approver || "\n" || SHA-256 of the identity evidence)`.
+A root passkey's registration response (section 10.4) is made for the challenge `SHA-256("aeos/enrol-challenge/v1\n" || approver || "\n" || SHA-256 of the identity evidence)`. The registration response of a passkey added by a registered one is made for `SHA-256("aeos/add-challenge/v1\n" || approver || "\n" || identity)`, with the identity the enrolment names.
 
 ### 10.3 Principals
 
@@ -326,19 +329,19 @@ A root passkey's registration response (section 10.4) is made for the challenge 
 
 Each passkey's life is a record in the trail, so no window of validity rests on the writer's word:
 
-- `x-passkey-enrolled`: `{approver, identity, credential_id, public_key (COSE_Key bytes), rp_id, origin}` and, for a root passkey, `identity_evidence` and `registration`; for any other, `evidence`.
+- `x-passkey-enrolled`: `{approver, identity, credential_id, public_key (COSE_Key bytes), rp_id, origin, key_class}` and, for a root passkey, `identity_evidence` and `registration`; for any other, `evidence`, and `registration` when the writer has it.
 - `x-passkey-revoked`: `{approver, credential_id, evidence}`.
 - `x-approver-rebound`: `{approver, identity, identity_evidence}` and, while a passkey stands, `evidence`.
 
 A registry record or an approval and its `x-approval-evidence` child are written in one batch (section 6), so neither is in the trail without the other. A writer judges the change, or the approval's assertion, at the position the trail will give it, after every earlier record whichever process wrote it. In the reference implementation only `Recorder` with a passkey directory writes these records; the general `append` (and `aeos log append`) refuses them.
 
-`identity_evidence` is `{kind, ref, sha256}`: what identified the person (a sign-in, say). The audit cannot check it: it reports it, and the auditor decides whether to accept it. `registration` is `{client_data_json, attestation_object}`, the response of the registration ceremony with the `none` attestation format. `evidence` is a summary as in section 10.1, with an `x-approval-evidence` child that confirms the change (section 10.2).
+`identity_evidence` is `{kind, ref, sha256}`: what identified the person (a sign-in, say). The audit cannot check it: it reports it, and the auditor decides whether to accept it. `registration` is `{client_data_json, attestation_object}`, the response of the registration ceremony, verbatim, with its attestation statement and certificate chain, so the attestation can be checked again offline (section 10.9). `key_class` is the class the writer found for the passkey (section 10.9). `evidence` is a summary as in section 10.1, with an `x-approval-evidence` child that confirms the change (section 10.2).
 
 Each approver has an **epoch**, a count that every root passkey and every rebinding raises by one. The audit rebuilds the registry by walking the trail once, in order, applying each registry record and checking each approval at its own position, with the principals the auditor trusts:
 
 1. A change for a principal that is not of type `webauthn` is a problem.
-2. An enrolment made when the approver has no valid passkey is a **root**. It starts a new epoch, binds the approver to its `identity`, and must carry `identity_evidence` and a `registration` whose client data is `webauthn.create` for the challenge of section 10.2, at the enrolled origin, with an attestation object of format `none` whose authenticator data has the UP, UV and AT flags, the enrolled RP ID hash, credential id and public key. If the principals pin credentials for the approver it must be one of them (same id, key, RP ID, origin and identity); otherwise the audit reports that the root rests on the trail's identity evidence alone.
-3. Any other enrolment must name the approver's current identity and carry a confirmation: an assertion from a passkey valid for that approver at that position. So must every revocation (a passkey may revoke itself).
+2. An enrolment made when the approver has no valid passkey is a **root**. It starts a new epoch, binds the approver to its `identity`, and must carry `identity_evidence` and a `registration` whose client data is `webauthn.create` for the enrol challenge of section 10.2, at the enrolled origin, with an attestation object whose authenticator data has the UP, UV and AT flags, the enrolled RP ID hash, credential id and public key, and whose attestation statement verifies (section 10.9). If the principals pin credentials for the approver it must be one of them (same id, key, RP ID, origin and identity); otherwise the audit reports that the root rests on the trail's identity evidence alone.
+3. Any other enrolment must name the approver's current identity and carry a confirmation: an assertion from a passkey valid for that approver at that position. So must every revocation (a passkey may revoke itself). Its `registration`, when present, is checked as a root's is, for the add challenge of section 10.2.
 4. A rebinding needs `identity_evidence`, starts a new epoch and binds the approver to its `identity`. While the approver has a valid passkey, one of them must confirm it, so the writer alone cannot rebind. A rebinding that is not confirmed is a problem and does not take effect.
 5. A credential id enrols once. Its COSE_Key, RP ID and origin must pass section 10.5.
 
@@ -350,6 +353,8 @@ A credential public key is a COSE_Key in the CTAP2 canonical CBOR encoding form 
 
 A relying party id is a lower-case domain of two or more labels of `a-z`, `0-9` and `-`, not an IP address and not a public suffix. The public suffixes are exactly the list in `public_suffixes` in `testvectors/passkey-approvals-v1.json`, a short list of suffixes under which anyone registers names (such as `co.za`, `github.io`, `herokuapp.com`); it is not the Public Suffix List, and a verifier must refuse these and may refuse more. A declared origin is in its browser serialisation: `https`, lower case, `scheme://host[:port]`, no path and no default port, with a host that is the RP ID or a subdomain of it. `localhost` over `http` is refused, unless the audit runs with the explicit `--demo` option (`aeos audit --demo`): then it is accepted and the audit reports a note that it was.
 
+The attestation object of a registration is decoded as CTAP2 canonical CBOR, except that its map keys may come in any order (a browser encodes it); a key is never repeated.
+
 The assertion is verified as in WebAuthn section 7.2 with the values enrolled for the credential:
 - `client_data_json` is UTF-8, decoded with one leading byte order mark stripped as section 7.2 requires, and parsed as JSON with no repeated key;
 - `type` is `webauthn.get`; `challenge` is the section 10.2 challenge; `origin` equals the enrolled origin; `crossOrigin` is absent or false and `topOrigin` is absent;
@@ -359,6 +364,8 @@ The assertion is verified as in WebAuthn section 7.2 with the values enrolled fo
 - the signature is valid over `authenticator_data` ‖ SHA-256(`client_data_json`) with the enrolled key, for ES256 as an ASN.1 DER `Ecdsa-Sig-Value` and for EdDSA as Ed25519 under the strict rules of section 1.2.
 
 `signCount` is advisory: synced passkeys report 0, and a counter that does not rise is not a problem. As section 7.2 describes, when it or the stored counter is non-zero and it is not greater than the stored counter, the audit reports a note that the passkey may have been cloned, and it carries on.
+
+The BE flag of a credential never changes (WebAuthn section 6.1.3). An assertion whose BE differs from the credential's registration, or, for a credential enrolled without one, from its first assertion, fails; for a credential registered as `hardware` the problem says it may have been copied.
 
 ### 10.6 Verifying an approval
 
@@ -373,6 +380,8 @@ For each `approval` by a passkey approver, a verifier reports a problem unless e
 7. The assertion verifies (section 10.5) over the challenge of section 10.2.
 8. If a document is signed, it is the one the call's arguments name.
 9. Single use (section 10.7).
+10. What the evidence states holds: `backup_eligible` and `backup_state` are the flags of `authenticator_data`, `key_class` is `synced` exactly when `backup_eligible` is true, and a `key_class` of `hardware` is the audit's own class for the assertion (section 10.9).
+11. The escalation's step-up requirement, if it has one, is met (section 10.9).
 
 A gateway signature, if present and a `witness_key` is given, must verify or the approval fails; if it verifies the audit says so. Without a `witness_key` the audit says that a gateway signature was not checked. Nothing else depends on it.
 
@@ -384,8 +393,42 @@ The audit walks the trail once, in order, and checks registry changes and approv
 
 ### 10.8 What is and is not proven
 
-Proven, from the trail and the trusted principals alone: a credential that was registered for the approver at that point in the trail, in the epoch the approver was then in, signed, with user verification, a challenge bound to this exact call and escalation (or to a batch that includes it), at the enrolled RP ID and origin, and no assertion was used twice.
+Proven, from the trail and the trusted principals alone: a credential that was registered for the approver at that point in the trail, in the epoch the approver was then in, signed, with user verification, a challenge bound to this exact call and escalation (or to a batch that includes it), at the enrolled RP ID and origin, and no assertion was used twice. With the authenticator trust file as well (section 10.9): which approvals were made with a hardware security key, and that every escalation that required one was answered by one.
 
-Not proven: a passkey proves possession of the credential, not who holds it. Identity comes from the evidence at enrolment: the audit shows each `identity_evidence` and which credential it made the root of the registry, and the auditor accepts or rejects it, or pins the root in the principals file. Without a pin, the root passkey rests on the trail writer's word: the writer could have made a passkey of its own, recorded it as the root, and approved with it, and nothing in the trail rules that out. The registration response only shows that the recorded parts agree. Pin each approver's root in the principals file wherever the writer is not trusted. The audit splits its finding into approvals that rest on a pinned root and approvals that rest on a first passkey that is not pinned. The registration response uses the `none` attestation format, which carries no signature: it ties the credential id, public key, origin, user verification and the identity evidence together in one recorded response, so a mismatch is caught, but a writer who holds the public key could fabricate it. It does not prove possession of the key. Not proven either: that a person saw what the call does (only that the digest of it was signed), that the device was not shared, that the server issued the nonce, and who the principal is outside the records.
+Not proven: a passkey proves possession of the credential, not who holds it. Identity comes from the evidence at enrolment: the audit shows each `identity_evidence` and which credential it made the root of the registry, and the auditor accepts or rejects it, or pins the root in the principals file. Without a pin, the root passkey rests on the trail writer's word: the writer could have made a passkey of its own, recorded it as the root, and approved with it, and nothing in the trail rules that out. The registration response only shows that the recorded parts agree. Pin each approver's root in the principals file wherever the writer is not trusted. The audit splits its finding into approvals that rest on a pinned root and approvals that rest on a first passkey that is not pinned. A registration response with the `none` attestation format, or self attestation, carries no maker's signature: it ties the credential id, public key, origin, user verification and the identity evidence together in one recorded response, so a mismatch is caught, but a writer who holds the public key could fabricate it. An attestation that chains to a trusted root proves that a key of that maker's model holds the credential; it says nothing about whose it is. Not proven either: that a person saw what the call does (only that the digest of it was signed), that the device was not shared, that the server issued the nonce, and who the principal is outside the records.
 
-Only the Python verifier (`aeos audit`) checks approvals today. The Rust verifier and the browser verifier check whole trails and documents (sections 4.1 and 4.3), which include these records as ordinary action records, but do not check approvals of either kind. They are on the roadmap.
+Only the Python verifier (`aeos audit`) checks approvals, attestations and key classes today. The Rust verifier and the browser verifier check whole trails and documents (sections 4.1 and 4.3), which include these records as ordinary action records whose extra fields they read and ignore, but do not check approvals of either kind. They are on the roadmap.
+
+### 10.9 Key classes and the hardware-key step-up
+
+Every passkey has a **key class**, decided by code from its registration response and the authenticator trust file the auditor gives, never by the writer's word:
+
+| Class | When |
+|---|---|
+| `hardware` | The attestation statement verifies and its certificate chain leads to a root the trust file lists for the authenticator's model, that model is listed as device-bound, and the registration's BE flag is 0 |
+| `synced` | The registration's BE flag is 1: the credential can be copied to other devices (a multi-device credential, WebAuthn section 6.1.3) |
+| `unknown` | Anything else: no registration response, format `none`, self attestation, a model or root the trust file does not list, a chain that does not stand, or a model not listed as device-bound |
+
+An assertion's class is `synced` when its own BE flag is 1, `hardware` when its credential is of class `hardware` (and, by section 10.5, its BE flag is then 0), and `unknown` otherwise.
+
+`hardware` is the trail's evidence that the key cannot leave the authenticator, which NIST SP 800-63B asks of an authenticator at AAL3; a synced passkey cannot give it. AAL3 asks more than a trail can show (of the sign-in, the device and the organization), so the class is evidence for an assessor, not a claim of AAL3.
+
+**Attestation statements.** A registration's statement is verified offline as WebAuthn Level 3 section 8 defines each format: `none` (an empty statement), `packed` (full, with `x5c`, or self, signed by the credential key with its algorithm), `tpm` (version 2.0; `pubArea` holds the credential public key, `certInfo` is `TPM_ST_ATTEST_CERTIFY` with `extraData` the digest of authenticator data ‖ client data hash and `attested.name` naming `pubArea`, signed by the attestation key; the certificate has an empty subject, a subject alternative name with the TPM manufacturer, model and version, and the `tcg-kp-AIKCertificate` key usage), `android-key` (the certificate's key is the credential key; the key description's challenge is the client data hash, `allApplications` is absent, and the key was generated in, and for signing by, the trusted execution environment), `apple` (the certificate's nonce extension is SHA-256 of authenticator data ‖ client data hash, and its key is the credential key) and `fido-u2f` (one P-256 certificate, an ES256 credential, and the U2F signature over `0x00 ‖ rpIdHash ‖ clientDataHash ‖ credentialId ‖ public key point`). A `packed` attestation certificate is version 3 with a subject of C, O, OU `Authenticator Attestation` and CN, and is not a CA. An AAGUID extension (OID 1.3.6.1.4.1.45724.1.1.4), where present, is not critical and names the authenticator data's AAGUID. Statement signatures may be ES256, ES384, ES512, EdDSA, RS256, RS384, RS512, PS256, PS384 or PS512, with RSA keys of at least 2048 bits. Other formats, `compound` and `android-safetynet` among them, are refused, and so is a statement with a field its format does not define. A statement that does not verify makes the registration, and so the enrolment, fail.
+
+**The chain.** `x5c` is leaf first, at most five certificates, and may end with the root. Each certificate is valid at the enrolment record's `ts` (a time the writer states, so an auditor who doubts it compares it with the checkpoints around the record); each issuer is a CA certificate allowed to sign certificates, within its path length, and signs the one below it; the last is signed by, or is, a root the trust file lists for that model. A chain that does not stand does not fail the registration: it makes the class `unknown`, and the audit says why. Revocation lists are not consulted.
+
+**The trust file** is JSON the auditor supplies (`aeos audit --authenticators FILE`, or the `authenticators` entry of `evidence.json` when the auditor accepts the folder's own); nothing is fetched at audit time:
+
+```
+{"format": "aeos-authenticator-trust/v1", "source": text,
+ "authenticators": [{"description": text, "device_bound": bool,
+                     "aaguid": lower-case UUID text,                          (FIDO2 models)
+                     "attestation_certificate_key_identifiers": [40 hex],     (U2F models)
+                     "attestation_root_certificates": [standard base64 DER, ...]}]}
+```
+
+A model is found by the authenticator data's AAGUID, or, for `fido-u2f`, by the SHA-1 key identifier of the attestation certificate's public key (or its subject key identifier extension), as the FIDO Metadata Service lists U2F models. No two entries name the same model, and the all-zero AAGUID names none. `aeos authenticator-trust` makes this file from a FIDO Metadata Service (MDS3) BLOB the deployer downloads: it checks the BLOB's signature and chain against the FIDO root certificate the deployer gives, leaves out entries whose latest status report withdraws trust (`USER_VERIFICATION_BYPASS`, `ATTESTATION_KEY_COMPROMISE`, `USER_KEY_REMOTE_COMPROMISE`, `USER_KEY_PHYSICAL_COMPROMISE`, `REVOKED`), and marks a model device-bound when its `keyProtection` includes `hardware` or `secure_element` and neither `software` nor `remote_handle`.
+
+**What the records state.** A writer states the class it finds: `key_class` on each enrolment, and `key_class` with `backup_eligible` and `backup_state` on each `x-approval-evidence`. The audit compares them with its own: a statement of `hardware` the audit does not find, or a statement that contradicts the BE flag, is a problem; a statement of `unknown` for what the audit finds to be `hardware` (a writer with older trust) is a note.
+
+**The step-up.** An escalating `policy.decision` may carry `requires: "hardware-key"`, which the policy's answer gives (`{"decision": "escalate", "reasons": [...], "requires": "hardware-key"}`; `requires` on any other decision is a policy error). An approval of that escalation stands only when it is a passkey approval whose assertion is of class `hardware`; an Ed25519 approval never meets it. A `requires` value the verifier does not know is a requirement no approval meets. The gateway refuses an approval that does not meet the requirement before anything is written; the audit runs the policy again on the recorded input and reports a recorded `requires` that differs from the policy's, so a writer cannot drop the requirement.
