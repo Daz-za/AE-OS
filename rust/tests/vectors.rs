@@ -4,7 +4,7 @@
 
 use aeos_verify::canon::{
     canonical_json, cid_of_bytes, cid_parse, cid_str, dag_cbor, decode_dag_cbor, hex, json_digest,
-    to_view, unhex,
+    to_view, unhex, Value,
 };
 use aeos_verify::merkle::{self, Hash};
 use aeos_verify::verify::key_id;
@@ -440,8 +440,9 @@ fn a_tampered_trail_is_reported_and_never_crashes_the_verifier() {
 }
 
 /// The passkey approval vectors (spec section 10). This verifier does not check approvals; it
-/// does have to read their records, with byte strings and nested batches, as the same
-/// canonical DAG-CBOR with the same CIDs the Python implementation wrote.
+/// does have to read their records, with byte strings, nested batches, attestation
+/// statements and the key class and backup flags an assertion states (section 10.9), as the
+/// same canonical DAG-CBOR with the same CIDs the Python implementation wrote.
 #[test]
 fn passkey_approval_records_decode_canonically_with_the_same_cids() {
     let path = concat!(
@@ -449,7 +450,7 @@ fn passkey_approval_records_decode_canonically_with_the_same_cids() {
         "/../testvectors/passkey-approvals-v1.json"
     );
     let doc: Json = serde_json::from_str(&std::fs::read_to_string(path).expect("read")).unwrap();
-    let mut records = 0;
+    let (mut records, mut stated) = (0, 0);
     for case in doc["cases"].as_array().unwrap() {
         for r in case["records"].as_array().unwrap() {
             let raw = unhex(s(&r["cbor"])).unwrap();
@@ -461,10 +462,24 @@ fn passkey_approval_records_decode_canonically_with_the_same_cids() {
                 "{}",
                 s(&case["name"])
             );
+            if states_a_key_class(&value) {
+                stated += 1;
+            }
             records += 1;
         }
     }
     assert!(records > 400);
+    assert!(stated >= 15, "only {stated} records state a key class");
+}
+
+/// Whether a record's body states a key class with both backup flags as booleans.
+fn states_a_key_class(record: &Value) -> bool {
+    let Some(body) = record.get("body") else {
+        return false;
+    };
+    matches!(body.get("key_class"), Some(Value::Text(t)) if ["hardware", "synced", "unknown"].contains(&t.as_str()))
+        && matches!(body.get("backup_eligible"), Some(Value::Bool(_)))
+        && matches!(body.get("backup_state"), Some(Value::Bool(_)))
 }
 
 #[test]

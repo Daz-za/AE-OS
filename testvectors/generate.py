@@ -612,15 +612,19 @@ def passkey_vectors():
         assertion_case("cross-origin client data", ps.A, extra_client={"crossOrigin": True}),
     ]
     cases = []
-    for name, trail, pr, expect in ps.scenarios():
+    scenarios = ps.scenarios()          # fills ps.AUTHENTICATORS
+    for name, trail, pr, expect in scenarios:
+        trust = ps.AUTHENTICATORS.get(name)
         findings, problems, notes = audit.check_approvals(trail.triples(), pr,
-                                                          demo=name in ps.DEMO_CASES)
+                                                          demo=name in ps.DEMO_CASES,
+                                                          authenticators=trust)
         assert len(problems) == len(expect) and all(x in y for x, y in zip(expect, problems)), \
             (name, expect, problems)
         cases.append({"name": name, "principals": pr,
                       "records": [{"cid": cid_str(c), "cbor": hx(dag_cbor(r))}
                                   for _, c, r in trail.triples()],
                       **({"demo": True} if name in ps.DEMO_CASES else {}),
+                      **({"authenticators": trust} if trust is not None else {}),
                       "expect_problems": problems, "expect_notes": notes})
     return {
         "format": "aeos-passkey-approvals/test-vectors/v1",
@@ -631,8 +635,65 @@ def passkey_vectors():
                  "each with its CID), the principals file the auditor trusts, and the problems "
                  "a verifier must report, in order (none means the approvals verify), and the notes it makes.",
         "public_suffixes": sorted(webauthn.PUBLIC_SUFFIXES),
-        "constructions": cons, "cose_keys": keys_, "assertions": assertions, "cases": cases,
+        "constructions": cons, "cose_keys": keys_, "assertions": assertions,
+        "authenticator_trust": ps.TRUST, "attestations": _attestation_cases(ps, ws),
+        "cases": cases,
     }
+
+
+def _attestation_cases(ps, ws):
+    """Single registration responses: the error a verifier gives, or the key class it finds
+    with `authenticator_trust` at the time `at_ms`."""
+    import attestation_support as ats
+    from aeos import attestation, webauthn
+
+    trust = attestation.AuthenticatorTrust.load(ps.TRUST)
+    ch = webauthn.enrol_challenge(ws.APPROVER, ws.sign_in_of("a@acme.example").sha256)
+    be = webauthn.FLAG_BE | webauthn.FLAG_BS
+
+    def case(name, auth, reg):
+        try:
+            r = webauthn.verify_registration(
+                reg["client_data_json"], reg["attestation_object"], rp_id=auth.rp_id,
+                origin=auth.origin, challenge=ch, credential_id=auth.credential_id,
+                public_key=auth.cose_key)
+            got = attestation.key_class(r.statement, r.flags, r.aaguid, trust, ws.T0)
+            out = {"expect_error": None, "expect_key_class": got[0], "expect_reason": got[1]}
+        except webauthn.WebAuthnError as e:
+            out = {"expect_error": str(e)}
+        return {"name": name, "rp_id": auth.rp_id, "origin": auth.origin, "challenge": ch.hex(),
+                "credential_id": auth.credential_id.hex(), "public_key": auth.cose_key.hex(),
+                "client_data_json": reg["client_data_json"].hex(),
+                "attestation_object": reg["attestation_object"].hex(), "at_ms": ws.T0, **out}
+
+    K, S = ps.K, ps.S
+    reg = ps._root_registration
+    return [
+        case("none attestation", K, K.registration(ch)),
+        case("packed full attestation of a device-bound model", K, reg(K)),
+        case("packed self attestation", K, reg(K, self_attested=True)),
+        case("tpm attestation of a device-bound model", K, reg(K, "tpm")),
+        case("android-key attestation from the trusted execution environment", K,
+             reg(K, "android-key", model=ats.PHONE_MODEL)),
+        case("apple anonymous attestation of a synced passkey", S,
+             reg(S, "apple", flags=be, model=ats.CLOUD_MODEL)),
+        case("fido-u2f attestation listed by key identifier", K, reg(K, "fido-u2f")),
+        case("packed attestation, backup eligible", K, reg(K, flags=be)),
+        case("packed attestation with a forged chain", K, reg(K, forged=True)),
+        case("tpm attestation with a forged chain", K, reg(K, "tpm", forged=True)),
+        case("fido-u2f attestation with a forged certificate", K, reg(K, "fido-u2f",
+                                                                       forged=True)),
+        case("packed attestation of a model not in the trust", K, reg(K, model="Key 9")),
+        case("packed attestation certificate expired at the enrolment", K, reg(K, expired=True)),
+        case("packed attestation certificate naming another AAGUID", K,
+             reg(K, aaguid_ext=ats.aaguid("Key 9"))),
+        case("android-key attestation outside the trusted execution environment", K,
+             reg(K, "android-key", tee=False)),
+        case("packed attestation signed over another registration", K, K.registration(
+            ch, fmt="packed", attest=lambda ad, cdh: ats.attester("packed", K)(ad, bytes(32)),
+            aaguid=ats.aaguid(ats.KEY_MODEL))),
+        case("unsupported attestation format", K, K.registration(ch, fmt="android-safetynet")),
+    ]
 
 
 def _key_cases(ps, ws):

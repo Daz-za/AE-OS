@@ -20,7 +20,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from .canon import cid_of_bytes, cid_parse, dag_cbor, json_digest
 from .log import Entry, ActionLog, make_record, now_ms
-from .passkeys import Commit, Evidence, escalation_cid
+from .passkeys import KIND_ENROLLED, Commit, Evidence, escalation_cid, requirement_of
 from .webauthn import WebAuthnError
 
 _MISSING: Any = object()
@@ -159,7 +159,9 @@ class Recorder:
         A passkey assertion is judged by the passkey directory at the position the approval
         takes, with the directory brought up to the trail under the trail's lock, so a change
         any process wrote first is seen; a refusal raises WebAuthnError and writes nothing.
-        Its use is recorded in the directory as soon as the batch is on the disk.
+        Its use is recorded in the directory as soon as the batch is on the disk. The child
+        states the assertion's key class, and an escalation that requires a hardware security
+        key (`requires`) is answered only by one.
 
         Takes the directory's lock, then the recorder's, then the trail's (lock order:
         directory, gateway, recorder, file)."""
@@ -181,9 +183,9 @@ class Recorder:
             records = [rec]
             judge = None
             if assertion:
-                records.append(self._evidence_record(rec, approval.approver, approval.tool,
-                                                     approval.evidence))
-                judge = self._approval_judge(approval)
+                ev = approval.evidence.claimed(self.passkeys.assertion_class(approval.evidence))
+                records.append(self._evidence_record(rec, approval.approver, approval.tool, ev))
+                judge = self._approval_judge(approval, ev, self.requirement(approval.escalation))
             entries, commit = self.log._append_judged(records, judge=judge,
                                                       directory=self.passkeys)
             if commit is not None:
@@ -191,7 +193,15 @@ class Recorder:
             self._maybe_checkpoint()
             return entries[0]
 
-    def _approval_judge(self, approval: Any) -> Callable[[int], Commit]:
+    def requirement(self, escalation: str) -> Any:
+        """The step-up requirement the escalating decision recorded, if it is in this trail."""
+        try:
+            return requirement_of(self.log.record(self.log.entry(escalation)))
+        except (KeyError, ValueError):
+            return None
+
+    def _approval_judge(self, approval: Any, ev: Evidence, requires: Any = None
+                        ) -> Callable[[int], Commit]:
         """The passkey directory's judgement of an approval's assertion at a trail position."""
         directory = self.passkeys
         escalation = escalation_cid(approval.escalation)
@@ -200,7 +210,7 @@ class Recorder:
             errs, commit = directory.judge(
                 approver=approval.approver, position=position, key=approval.escalation,
                 tool=approval.tool, args_sha256=approval.args_sha256, escalation=escalation,
-                ev=approval.evidence)
+                ev=ev, requires=requires)
             if errs or commit is None:
                 raise WebAuthnError("the passkey's assertion was refused: " + errs[0])
             return commit
@@ -209,7 +219,10 @@ class Recorder:
 
     def _evidence_record(self, parent: Dict[str, Any], approver: str, subject: Optional[str],
                          evidence: Any) -> Dict[str, Any]:
-        """The `x-approval-evidence` child that carries a passkey assertion."""
+        """The `x-approval-evidence` child that carries a passkey assertion and states its key
+        class, as the passkey directory holds it."""
+        if self.passkeys is not None and evidence.key_class is None:
+            evidence = evidence.claimed(self.passkeys.assertion_class(evidence))
         return make_record("x-approval-evidence", approver, on_behalf_of=self.obo,
                            subject=subject, body=evidence.body(),
                            parents=[cid_of_bytes(dag_cbor(parent))], ts=parent["ts"])
@@ -221,7 +234,9 @@ class Recorder:
         """A passkey joins an approver's registry. The approver's first passkey cites the
         sign-in that identified the person (`passkeys.SignIn`) and its registration response
         (`client_data_json` and `attestation_object`); every later one is confirmed by an
-        assertion (`passkeys.Evidence`) from a registered passkey."""
+        assertion (`passkeys.Evidence`) from a registered passkey, and carries its own
+        registration response when it has one, for its key class. The record states the key
+        class the passkey directory finds."""
         body: Dict[str, Any] = {"approver": approver, "identity": identity,
                                 "credential_id": credential_id, "public_key": public_key,
                                 "rp_id": rp_id, "origin": origin}
@@ -262,13 +277,17 @@ class Recorder:
         with self.passkeys.lock, self._lock:
             if identity_evidence is not None:
                 body["identity_evidence"] = identity_evidence.summary()
+            stamp = now_ms() if ts is None else ts
+            if kind == KIND_ENROLLED:
+                body["key_class"] = self.passkeys.registration_class(body, stamp)
             if confirmation is not None:
                 body["evidence"] = confirmation.summary()
             rec = make_record(kind, approver, on_behalf_of=self.obo, subject=None, body=body,
-                              parents=[], ts=now_ms() if ts is None else ts)
+                              parents=[], ts=stamp)
             cid = cid_of_bytes(dag_cbor(rec))
             records = [rec]
             if confirmation is not None:
+                confirmation = confirmation.claimed(self.passkeys.assertion_class(confirmation))
                 records.append(self._evidence_record(rec, approver, None, confirmation))
             found = [confirmation] if confirmation is not None else []
             entries, commit = self.log._append_judged(

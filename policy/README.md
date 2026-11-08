@@ -16,6 +16,7 @@ The payment rules:
 - a payment must match an invoice that is approved for payment, for the invoice's amount;
 - the supplier must not be on the sanctions list;
 - a payment above the threshold is escalated until someone on the approvers list approves it, and the person who authorized the agent may not approve it;
+- a payment above `hardware_key_above_minor`, when the data sets it, is escalated with `"requires": "hardware-key"`, so only an approval made with a hardware security key answers it;
 - a person's rejection refuses the payment.
 
 The thresholds, the lists and the approvers come from each policy's data, which the gateway is given when it starts.

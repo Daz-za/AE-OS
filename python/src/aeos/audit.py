@@ -14,6 +14,9 @@ An evidence folder holds an audit trail plus what is needed to check who acted:
     books           when the log holds books of account: the books service's SPIFFE ID,
                     the controllers who may open and close periods, and the chart of
                     accounts; people's keys are in the principals file
+    authenticators  optionally, the authenticator trust file (aeos-authenticator-trust/v1)
+                    that decides which passkeys are hardware security keys; an auditor
+                    gives their own with --authenticators
 
 The audit recomputes the whole log, then checks that each session was opened with an SVID whose
 fingerprint the gateway recorded, and that this SVID was valid for the recorded identity
@@ -41,7 +44,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import books, delegation, identity, passkeys, policy, witness
+from . import attestation, books, delegation, identity, passkeys, policy, witness
 from .canon import cid_str
 from .log import ActionLog
 
@@ -58,9 +61,11 @@ def _load_svids(folder: Path) -> Dict[str, List[Any]]:
 
 def run(folder: Path, *, bundle: Optional[Path] = None, public_key: Optional[str] = None,
         witnesses: Optional[Path] = None, authority_key: Optional[str] = None,
-        principals: Optional[Path] = None, demo: bool = False) -> Tuple[List[str], List[str]]:
+        principals: Optional[Path] = None, demo: bool = False,
+        authenticators: Optional[Path] = None) -> Tuple[List[str], List[str]]:
     """Return (findings, problems). No problems means the evidence holds together. `demo`
-    accepts a passkey made for http://localhost, with a note."""
+    accepts a passkey made for http://localhost, with a note. `authenticators` is the
+    authenticator trust file that decides which passkeys are hardware security keys."""
     folder = Path(folder)
     manifest = json.loads((folder / "evidence.json").read_text())
     findings: List[str] = []
@@ -96,7 +101,15 @@ def run(folder: Path, *, bundle: Optional[Path] = None, public_key: Optional[str
         pdoc = json.loads((Path(principals) if principals else folder / manifest["principals"])
                           .read_text())
         pkeys, pk_principals = passkeys.load_principals(pdoc)
-    directory = passkeys.Directory(pk_principals, demo=demo)
+    trust = None
+    tfile = Path(authenticators) if authenticators else (
+        folder / manifest["authenticators"] if manifest.get("authenticators") else None)
+    if tfile is not None:
+        try:
+            trust = attestation.AuthenticatorTrust.load(json.loads(tfile.read_text()))
+        except (OSError, ValueError) as ex:
+            problems.append(f"the authenticator trust file could not be read: {ex}")
+    directory = passkeys.Directory(pk_principals, demo=demo, authenticators=trust)
     results: Dict[int, List[str]] = {}
     try:                                 # registry and approvals, in one pass over the trail
         results = _walk([(e.index, bytes(e.cid), r) for e, r in records], pkeys, directory)
@@ -277,7 +290,17 @@ def _check_passkeys(records: List[Tuple[Any, Dict[str, Any]]], directory: "passk
             "each passkey is valid only in the epoch it was enrolled in, between its enrolment "
             "and its revocation" + "".join("; " + t for k, t in directory.notes
                                            if k == "binding"))
-    findings += [t for k, t in directory.notes if k in ("clone", "demo")]
+        trust = directory.authenticators
+        findings.append(
+            "Each passkey's key class was decided from its registration response: hardware "
+            "only when its attestation chains to a root trusted for a device-bound model and "
+            "it is not backup eligible, synced when it is backup eligible, otherwise unknown; "
+            + (f"the authenticator trust used lists {len(trust.models)} model"
+               f"{'' if len(trust.models) == 1 else 's'}"
+               + (f" ({trust.source})" if trust.source else "") if trust is not None else
+               "no authenticator trust file was given, so no passkey counts as a hardware "
+               "security key"))
+    findings += [t for k, t in directory.notes if k in ("clone", "demo", "key")]
 
 
 def _check_policies(records: List[Tuple[Any, Dict[str, Any]]], folder: Path,
@@ -323,6 +346,10 @@ def _check_policies(records: List[Tuple[Any, Dict[str, Any]]], folder: Path,
         elif again["decision"] != recorded:
             problems.append(f"record {e.index}: the gateway recorded {recorded}, but the "
                             f"policy gives {again['decision']} on the recorded input")
+        elif again.get("requires") != body.get("requires"):
+            problems.append(f"record {e.index}: the gateway recorded the requirement "
+                            f"{body.get('requires')!r}, but the policy gives "
+                            f"{again.get('requires')!r} on the recorded input")
         if recorded == "allow":
             allowed.add(cid_str(rec["parents"][0]) if rec["parents"] else "")
     for e, rec in records:
@@ -417,15 +444,19 @@ def _walk(triples: List[Tuple[int, bytes, Dict[str, Any]]], ed_keys: Dict[str, b
 
 
 def check_approvals(triples: List[Tuple[int, bytes, Dict[str, Any]]],
-                    principals_doc: Dict[str, Any], demo: bool = False
+                    principals_doc: Dict[str, Any], demo: bool = False,
+                    authenticators: Optional[Dict[str, Any]] = None
                     ) -> Tuple[List[str], List[str], List[str]]:
     """Check the passkey registry, every approval and every decision that rests on an approval
     in a list of (position, binary CID, record), against a principals document, as `run` does
     for a whole evidence folder. Returns (findings, problems, notes); the test vectors in
     testvectors/passkey-approvals-v1.json use it. The notes are one line per record that
-    something was observed about without being a problem."""
+    something was observed about without being a problem. `authenticators` is an
+    authenticator trust document (`aeos-authenticator-trust/v1`)."""
     ed, pk = passkeys.load_principals(principals_doc)
-    directory = passkeys.Directory(pk, demo=demo)
+    trust = None if authenticators is None else attestation.AuthenticatorTrust.load(
+        authenticators)
+    directory = passkeys.Directory(pk, demo=demo, authenticators=trust)
     results = _walk(triples, ed, directory)
     problems = [f"passkeys: {p}" for p in directory.problems]
     for i in sorted(results):
@@ -509,6 +540,16 @@ def _passkey_findings(d: "passkeys.Directory") -> List[str]:
         if n_open:
             out.append(f"{n_open} of them rest{'s' if n_open == 1 else ''} on a first passkey "
                        "that is not pinned; the trail's writer could have created it")
+        kinds = [(sum(1 for v in d.verified if v[5] == k), w) for k, w in (
+            (attestation.HARDWARE, "a hardware security key"),
+            (attestation.SYNCED, "a synced passkey"),
+            (attestation.UNKNOWN, "a passkey of unknown kind"))]
+        out.append("By key class: " + ", ".join(f"{k} made with {w}" for k, w in kinds if k))
+        stepped = sum(1 for v in d.verified if v[6] == attestation.HARDWARE_KEY)
+        if stepped:
+            out.append(f"{stepped} of them answer{'s' if stepped == 1 else ''} an escalation "
+                       "that required a hardware security key, and "
+                       + ("it was" if stepped == 1 else "each was") + " made with one")
     if d.witness_checked:
         out.append(f"{d.witness_checked} of them also carr"
                    f"{'ies' if d.witness_checked == 1 else 'y'} the gateway's own signature, "
@@ -549,11 +590,15 @@ def _approval_problems(e: Any, rec: Dict[str, Any], by_cid: Dict[str, Dict[str, 
         return ["the approval record is incomplete"]
     pk = directory.principals.get(a.approver)
     out = []
+    esc = by_cid.get(a.escalation)
+    requires = passkeys.requirement_of(esc)
+    if pk is None and requires is not None and a.decision == "approve":
+        out.append(f"the escalation requires {requires!r}, which only a passkey approval "
+                   "can meet")
     if rec["agent"] != a.approver:
         out.append(f"the approval is not recorded by {a.approver}")
     elif pk is None and not a.verify(principal_keys.get(a.approver, b"")):
         out.append(f"the approval is not signed by {a.approver}")
-    esc = by_cid.get(a.escalation)
     if esc is None or esc["body"].get("decision") != "escalate" or esc.get("subject") != a.tool:
         out.append("the approval does not answer an escalation in this log")
     else:

@@ -44,7 +44,7 @@ import logging
 
 from cryptography import x509
 
-from . import books, delegation, identity, passkeys, policy as policy_mod
+from . import attestation, books, delegation, identity, passkeys, policy as policy_mod
 from .canon import canonical_json, cid_str, json_digest
 from .log import ActionLog, now_ms
 from .recorder import Recorder
@@ -256,7 +256,8 @@ class Gateway:
                                    "policy_sha256": self.policy.sha256,
                                    "data_sha256": self.policy.data_sha256,
                                    "entrypoint": self.policy.entrypoint,
-                                   "input_json": canonical_json(doc)},
+                                   "input_json": canonical_json(doc),
+                                   **({"requires": d["requires"]} if "requires" in d else {})},
                              on_behalf_of=obo, ts=at)
         if approval and d["decision"] == "allow":
             with self._lock:      # settled only now: a failed write above keeps the approval
@@ -268,11 +269,14 @@ class Gateway:
         escalation = cid_str(entry.cid)
         with self._lock:
             self.escalations[escalation] = (peer, tool, json_digest(args))
+        step_up = d.get("requires") == attestation.HARDWARE_KEY
         return _ok(rid, {"isError": True, "structuredContent": {
-            "escalation": escalation, "reasons": d["reasons"]},
+            "escalation": escalation, "reasons": d["reasons"],
+            **({"requires": d["requires"]} if "requires" in d else {})},
             "content": [{"type": "text", "text": "Escalated: " + "; ".join(d["reasons"])
                          + f". Repeat the call with an approval of escalation {escalation}, "
-                         "signed by an approver."}]})
+                         + ("made by an approver with a hardware security key."
+                            if step_up else "signed by an approver.")}]})
 
     def _approval(self, rec: Recorder, call: Any, text: str, peer: str, tool: str,
                   args: Dict[str, Any], at: int) -> Tuple[Dict[str, Any], Optional[str]]:
@@ -304,6 +308,9 @@ class Gateway:
                 problem = self._passkey_problem(a, args)
                 if problem:
                     return {}, problem
+            elif a.decision == "approve" and rec.requirement(a.escalation) is not None:
+                return {}, ("the escalation requires a hardware security key, so only a "
+                            "passkey approver can approve it")
             elif not a.verify(self.principal_keys.get(a.approver, b"")):
                 return {}, "the approval's signature does not verify"
         try:

@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import struct
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -99,18 +99,22 @@ class SoftAuthenticator:
     def registration(self, challenge: bytes, *, rp_id: Optional[str] = None,
                      origin: Optional[str] = None, uv: bool = True,
                      credential_id: Optional[bytes] = None, public_key: Optional[bytes] = None,
-                     client_type: str = "webauthn.create", fmt: str = "none"
-                     ) -> Dict[str, bytes]:
-        """The registration response of a "none" attestation for this credential."""
+                     client_type: str = "webauthn.create", fmt: str = "none",
+                     attest: Optional[Callable[[bytes, bytes], Dict[str, Any]]] = None,
+                     flags: int = 0, aaguid: bytes = bytes(16)) -> Dict[str, bytes]:
+        """The registration response for this credential: a "none" attestation, or with `fmt`
+        and `attest(authenticator_data, client_data_hash)` giving the attestation statement.
+        `flags` adds BE (0x08) and BS (0x10); `aaguid` names the model."""
         cdj = json.dumps({"type": client_type, "challenge": webauthn.b64url(challenge),
                           "origin": origin or self.origin, "crossOrigin": False},
                          separators=(",", ":")).encode()
         cid = credential_id or self.credential_id
         ad = (hashlib.sha256((rp_id or self.rp_id).encode()).digest()
-              + bytes([0x01 | (0x04 if uv else 0) | 0x40]) + struct.pack(">I", 0) + bytes(16)
-              + struct.pack(">H", len(cid)) + cid + (public_key or self.cose_key))
+              + bytes([0x01 | (0x04 if uv else 0) | 0x40 | flags]) + struct.pack(">I", 0)
+              + aaguid + struct.pack(">H", len(cid)) + cid + (public_key or self.cose_key))
+        stmt = attest(ad, hashlib.sha256(cdj).digest()) if attest is not None else {}
         return {"client_data_json": cdj,
-                "attestation_object": dag_cbor({"fmt": fmt, "attStmt": {}, "authData": ad})}
+                "attestation_object": dag_cbor({"fmt": fmt, "attStmt": stmt, "authData": ad})}
 
     def evidence(self, nonce: bytes, tool: str, args_sha256: bytes,
                  escalation: Optional[bytes] = None, *,
@@ -165,9 +169,12 @@ class Trail:
     def enrol(self, auth: SoftAuthenticator, *, who: str = APPROVER,
               identity: str = "a@acme.example", confirmed_by: Optional[SoftAuthenticator] = None,
               n: int = 0, sign_in: Optional[passkeys.SignIn] = None,
-              registration: Optional[Dict[str, bytes]] = None, **over: Any) -> bytes:
+              registration: Optional[Dict[str, bytes]] = None, claim: Optional[str] = None,
+              **over: Any) -> bytes:
         """A passkey joins the registry: a root (with its sign-in and registration response)
-        when `confirmed_by` is None, otherwise confirmed by an assertion from that passkey."""
+        when `confirmed_by` is None, otherwise confirmed by an assertion from that passkey
+        (with a registration response too, if given). `claim` is the key class the writer
+        states for the confirming assertion; `key_class=` in `over` states the enrolment's."""
         body: Dict[str, Any] = {"approver": who, "identity": identity,
                                 "credential_id": auth.credential_id, "public_key": auth.cose_key,
                                 "rp_id": auth.rp_id, "origin": auth.origin, **over}
@@ -181,7 +188,11 @@ class Trail:
             args = passkeys.enrol_args_sha256(who, identity, auth.credential_id, auth.cose_key,
                                               auth.rp_id, auth.origin)
             ev = confirmed_by.evidence(nonce(n), passkeys.ENROL_TOOL, args)
+            if claim:
+                ev = ev.claimed(claim)
             body["evidence"] = ev.summary()
+            if registration is not None:
+                body["registration"] = registration
         cid = self.add(passkeys.KIND_ENROLLED, who, body=body)
         if ev is not None:
             self.evidence_child(cid, who, ev)
@@ -214,16 +225,18 @@ class Trail:
 
     # -- a call that is escalated, and the approval of it --
 
-    def escalated_call(self, args: Dict[str, Any], tool: str = "erp.invoice.pay"
-                       ) -> Tuple[bytes, bytes, bytes]:
-        """(session, call, escalation) for a call with these arguments."""
+    def escalated_call(self, args: Dict[str, Any], tool: str = "erp.invoice.pay",
+                       requires: Optional[str] = None) -> Tuple[bytes, bytes, bytes]:
+        """(session, call, escalation) for a call with these arguments; `requires` is the
+        escalation's step-up requirement."""
         s = self.add("session.start", AGENT, body={"session_id": "s%d" % len(self.cids)})
         c = self.add("tool.call", AGENT, subject=tool, body={
             "args_sha256": json_digest(args), "call_id": "c%d" % len(self.cids)}, parents=[s])
         e = self.add("policy.decision", AGENT, subject=tool, body={
             "decision": "escalate", "policy": "aeos-policy/v0", "reasons": ["above-limit"],
             "input_json": json.dumps({"tool": tool, "arguments": args},
-                                     separators=(",", ":"), sort_keys=True)}, parents=[c])
+                                     separators=(",", ":"), sort_keys=True),
+            **({"requires": requires} if requires is not None else {})}, parents=[c])
         return s, c, e
 
     def decide(self, call: bytes, tool: str, args: Dict[str, Any], decision: str, *,
