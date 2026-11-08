@@ -514,9 +514,9 @@ def stepped(tmp_path):
     rec.passkey_enrolled(APPROVER, identity=tp.IDENTITY, credential_id=K.credential_id,
                          public_key=K.cose_key, rp_id=K.rp_id, origin=K.origin,
                          registration=K.registration(
-                             webauthn.add_challenge(APPROVER, tp.IDENTITY), fmt="tpm",
-                             attest=ats.attester("tpm", K, model=ats.TPM_MODEL),
-                             aaguid=ats.aaguid(ats.TPM_MODEL)),
+                             webauthn.add_challenge(APPROVER, tp.IDENTITY), fmt="packed",
+                             attest=ats.attester("packed", K),
+                             aaguid=ats.aaguid(ats.KEY_MODEL)),
                          confirmation=S.evidence(nonce(50), passkeys.ENROL_TOOL, args,
                                                  flags=BE_BS))
     rules = policy.Policy.load(fulldemo.POLICY_WASM, DATA, "aeos/payments/decision")
@@ -584,15 +584,27 @@ def test_the_gateway_asks_for_a_hardware_key_and_takes_only_one(stepped, tmp_pat
     assert problems == []
     text = " | ".join(findings)
     assert "the authenticator trust used lists 5 models (synthetic test roots" in text
-    assert "is a hardware security key: its tpm attestation chains to a root you trust" in text
+    assert "is a hardware security key: its packed attestation chains to a root you trust" in text
     # the same folder names its own trust file in evidence.json
     manifest = json.loads((folder / "evidence.json").read_text())
     (folder / "trust" / "authenticators.json").write_text(json.dumps(TRUST))
     manifest["authenticators"] = "trust/authenticators.json"
     (folder / "evidence.json").write_text(json.dumps(manifest))
-    assert audit.run(folder)[1] == []
+    # ... which the audit never reads on its own: the folder is what is under review
+    findings, problems = audit.run(folder)
+    assert any("given no authenticator trust file" in p for p in problems)
+    assert any("did not read: give your own with --authenticators" in f for f in findings)
+    findings, problems = audit.run(folder, accept_folder_authenticators=True)
+    assert problems == []
+    assert any("only on the word of whoever wrote that file" in f for f in findings)
+    assert cli.main(["audit", str(folder), "--accept-folder-authenticators"]) == 0
+    # the auditor's own file wins over the folder's
+    findings = audit.run(folder, authenticators=tmp_path / "trust.json",
+                         accept_folder_authenticators=True)[0]
+    assert not any("whoever wrote that file" in f for f in findings)
     (folder / "trust" / "authenticators.json").write_text("{}")
-    assert any("authenticator trust file could not be read" in p for p in audit.run(folder)[1])
+    assert any("authenticator trust file could not be read" in p
+               for p in audit.run(folder, accept_folder_authenticators=True)[1])
     assert cli.main(["audit", str(folder), "--authenticators", str(tmp_path / "trust.json")]) == 0
 
 
@@ -658,72 +670,149 @@ def _jwt(payload, *, key=SIGNER_KEY, chain=(SIGNER,), alg="ES256"):
     return signing + b"." + enc(r.to_bytes(32, "big") + s.to_bytes(32, "big"))
 
 
-def _mds_entry(model, *, protection=("hardware", "secure_element"), status="FIDO_CERTIFIED_L2",
-               u2f=False):
-    st = {"description": f"{model} (synthetic)", "keyProtection": list(protection),
+def _mds_entry(model, *, protection=("hardware", "secure_element"),
+               statuses=("FIDO_CERTIFIED", "FIDO_CERTIFIED_L2"), u2f=False, hint=("external",)):
+    """An entry shaped like the FIDO Metadata Service's own, for a synthetic model under
+    Keyworks' root."""
+    st = {"legalHeader": "synthetic", "description": f"{model} (synthetic)",
+          "authenticatorVersion": 50100, "protocolFamily": "u2f" if u2f else "fido2",
+          "schema": 3, "upv": [{"major": 1, "minor": 1}],
+          "authenticationAlgorithms": ["secp256r1_ecdsa_sha256_raw"],
+          "publicKeyAlgAndEncodings": ["cose"], "attestationTypes": ["basic_full"],
+          "userVerificationDetails": [[{"userVerificationMethod": "presence_internal"}]],
+          "keyProtection": list(protection), "matcherProtection": ["on_chip"],
+          "attachmentHint": list(hint), "tcDisplay": [],
           "attestationRootCertificates": [ats.b64(M.root)]}
-    e = {"metadataStatement": st, "statusReports": [
-        {"status": "FIDO_CERTIFIED", "effectiveDate": "2024-01-01"},
-        {"status": status, "effectiveDate": "2025-01-01"}]}
+    e = {"metadataStatement": st, "timeOfLastStatusChange": "2025-01-01", "statusReports": [
+        {"status": s, "effectiveDate": f"{2023 + i}-01-01", "certificationDescriptor": model}
+        for i, s in enumerate(statuses)]}
     if u2f:
-        e["attestationCertificateKeyIdentifiers"] = [ats.u2f_key_id().hex().upper()]
+        ids = [ats.u2f_key_id().hex()]
+        st["attestationCertificateKeyIdentifiers"] = ids
+        e["attestationCertificateKeyIdentifiers"] = ids
     else:
-        e["aaguid"] = str(__import__("uuid").UUID(bytes=ats.aaguid(model)))
+        e["aaguid"] = st["aaguid"] = str(__import__("uuid").UUID(bytes=ats.aaguid(model)))
     return e
 
 
+TEE = ("hardware", "tee")
 PAYLOAD = {"legalHeader": "synthetic", "no": 87, "nextUpdate": "2025-12-01", "entries": [
-    _mds_entry(ats.KEY_MODEL), _mds_entry(ats.TPM_MODEL, protection=["hardware", "tee"]),
+    _mds_entry(ats.KEY_MODEL),                                       # a YubiKey-like key
+    _mds_entry(ats.TPM_MODEL, protection=TEE, hint=("internal",)),   # Windows Hello's TPM
+    _mds_entry(ats.PHONE_MODEL, protection=TEE, hint=("internal",)),  # a phone's TEE
+    _mds_entry("U2F", u2f=True, protection=("hardware", "secure_element", "remote_handle"),
+               statuses=("FIDO_CERTIFIED",)),                        # a Yubico U2F key
     _mds_entry("Soft One", protection=["software"]),
-    _mds_entry("Leaky", status="ATTESTATION_KEY_COMPROMISE"),
-    _mds_entry("U2F", u2f=True),
+    _mds_entry("Half Soft", protection=["software", "secure_element"]),
+    _mds_entry("Self Said", statuses=("SELF_ASSERTION_SUBMITTED",)),
+    _mds_entry("Updated", statuses=("FIDO_CERTIFIED_L1", "UPDATE_AVAILABLE")),
+    _mds_entry("Leaky", statuses=("FIDO_CERTIFIED", "ATTESTATION_KEY_COMPROMISE",
+                                  "FIDO_CERTIFIED_L1")),
     {"metadataStatement": {"description": "no model"}}, "not an entry"]}
+ROOT_PEM = FIDO_ROOT.public_bytes(serialization.Encoding.PEM)
+
+
+@pytest.mark.parametrize("protection,bound", [
+    (["hardware", "secure_element"], True),                   # a FIDO2 security key
+    (["hardware", "secure_element", "remote_handle"], True),  # a U2F key wraps its keys
+    (["secure_element"], True),
+    (["hardware", "tee"], False),                             # a phone, or Windows Hello
+    (["hardware"], False), (["tee"], False), (["software"], False),
+    (["software", "secure_element"], False), ([], False), ("secure_element", False)])
+def test_only_a_secure_element_without_software_is_device_bound(protection, bound):
+    assert mds.device_bound(protection) is bound
 
 
 def test_a_metadata_blob_becomes_a_trust_file_that_classes_keys():
-    root_pem = FIDO_ROOT.public_bytes(serialization.Encoding.PEM)
-    doc, counts, warning = mds.import_blob(_jwt(PAYLOAD), root_pem, T0)
-    assert counts == {"kept": 4, "device_bound": 3, "withdrawn": 1, "unusable": 2}
+    doc, counts, warning = mds.import_blob(_jwt(PAYLOAD), ROOT_PEM, T0)
+    assert counts == {"kept": 8, "device_bound": 2, "not_certified": 2, "withdrawn": 1,
+                      "unusable": 2}
     assert warning is None and doc["source"].startswith("FIDO Metadata Service BLOB no. 87")
+    assert doc["mds_blob_no"] == 87
     trust = attestation.AuthenticatorTrust.load(doc)
+    assert trust.blob_no == 87
     bound = {m.description: m.device_bound for m in trust.models}
-    assert bound == {"Key 5 (synthetic)": True, "TPM 2 (synthetic)": True,
-                     "Soft One (synthetic)": False, "U2F (synthetic)": True}
+    assert bound == {"Key 5 (synthetic)": True, "TPM 2 (synthetic)": False,
+                     "Phone K (synthetic)": False, "U2F (synthetic)": True,
+                     "Soft One (synthetic)": False, "Half Soft (synthetic)": False,
+                     "Self Said (synthetic)": False, "Updated (synthetic)": False}
     reg = _register(K, _reg(K, "packed", ats.attester("packed", K)))
     assert attestation.key_class(reg.statement, reg.flags, reg.aaguid, trust, T0)[0] == \
         attestation.HARDWARE
     u2f = _register(K, _reg(K, "fido-u2f", ats.attester("fido-u2f", K), aaguid=bytes(16)))
     assert attestation.key_class(u2f.statement, u2f.flags, u2f.aaguid, trust, T0)[0] == \
         attestation.HARDWARE
+    tpm = _register(K, _reg(K, "tpm", ats.attester("tpm", K, model=ats.TPM_MODEL),
+                            aaguid=ats.aaguid(ats.TPM_MODEL)))
+    assert "does not list TPM 2 (synthetic) as device-bound" in attestation.key_class(
+        tpm.statement, tpm.flags, tpm.aaguid, trust, T0)[1]
+
+
+def test_a_stale_or_older_blob_is_refused_unless_allowed():
     late = int(dt.datetime(2026, 1, 5, tzinfo=dt.timezone.utc).timestamp() * 1000)
-    assert "next update was due on 2025-12-01" in mds.import_blob(_jwt(PAYLOAD), root_pem,
-                                                                  late)[2]
+    with pytest.raises(mds.MetadataError, match="next update was due on 2025-12-01"):
+        mds.import_blob(_jwt(PAYLOAD), ROOT_PEM, late)
+    doc, _, warning = mds.import_blob(_jwt(PAYLOAD), ROOT_PEM, late, allow_stale=True)
+    assert "due on 2025-12-01, and you allowed it" in warning and doc["authenticators"]
+    undated = {k: v for k, v in PAYLOAD.items() if k != "nextUpdate"}
+    with pytest.raises(mds.MetadataError, match="names no next update date"):
+        mds.import_blob(_jwt(undated), ROOT_PEM, T0)
+    with pytest.raises(mds.MetadataError, match="no serial number"):
+        mds.import_blob(_jwt({**PAYLOAD, "no": "87"}), ROOT_PEM, T0)
+    newer = mds.import_blob(_jwt({**PAYLOAD, "no": 88}), ROOT_PEM, T0)[0]
+    with pytest.raises(mds.MetadataError, match="no. 87, older than no. 88"):
+        mds.import_blob(_jwt(PAYLOAD), ROOT_PEM, T0, previous=newer)
+    again = mds.import_blob(_jwt({**PAYLOAD, "no": 88}), ROOT_PEM, T0, previous=newer)[0]
+    assert again["authenticators"] == newer["authenticators"]
+
+
+def _resigned(blob, sig):
+    head, body, _ = blob.split(b".")
+    return head + b"." + body + b"." + base64.urlsafe_b64encode(sig).rstrip(b"=")
 
 
 def test_a_metadata_blob_that_does_not_stand_is_refused():
     root = ats.der(FIDO_ROOT)
+    good = _jwt(PAYLOAD)
+    sig = base64.urlsafe_b64decode(good.split(b".")[2] + b"==")
     for blob, why in (
             (b"not a token", "not a JSON Web Token"),
-            (_jwt(PAYLOAD)[:-4] + b"AAAA", "signature does not verify"),
+            (good[:-4] + b"AAAA", "signature does not verify"),
+            (_resigned(good, sig + b"\x00\x00"), "ES256 signature is 66 bytes, not 64"),
+            (_resigned(good, sig[:32]), "ES256 signature is 32 bytes, not 64"),
+            (_resigned(good, b"\x00" + sig), "ES256 signature is 65 bytes, not 64"),
             (_jwt(PAYLOAD, chain=(M.ca,)), "signing certificate does not stand"),
             (_jwt(PAYLOAD, alg="none"), "no supported algorithm"),
             (_jwt({"no": 1}), "no entries")):
         with pytest.raises(mds.MetadataError, match=why):
             mds.import_blob(blob, root, T0)
     with pytest.raises(mds.MetadataError, match="not PEM or DER"):
-        mds.import_blob(_jwt(PAYLOAD), b"garbage", T0)
+        mds.import_blob(good, b"garbage", T0)
 
 
 def test_the_authenticator_trust_command_writes_the_file(tmp_path, capsys):
-    (tmp_path / "blob.jwt").write_bytes(_jwt(PAYLOAD))
-    (tmp_path / "root.pem").write_bytes(FIDO_ROOT.public_bytes(serialization.Encoding.PEM))
-    out = tmp_path / "trust.json"
-    assert cli.main(["authenticator-trust", str(tmp_path / "blob.jwt"), "--root",
-                     str(tmp_path / "root.pem"), "-o", str(out)]) == 0
-    assert attestation.AuthenticatorTrust.load(json.loads(out.read_text())).models
-    err = capsys.readouterr().err
-    assert "4 authenticator models, 3 of them device-bound; left out 1 whose trust was " \
-        "withdrawn" in err
-    (tmp_path / "blob.jwt").write_bytes(b"x.y.z")
-    assert cli.main(["authenticator-trust", str(tmp_path / "blob.jwt"), "--root",
-                     str(tmp_path / "root.pem")]) == 1
+    blob, root, out = tmp_path / "blob.jwt", tmp_path / "root.pem", tmp_path / "trust.json"
+    current = dict(PAYLOAD, nextUpdate="2044-12-01")     # the command checks against today
+    blob.write_bytes(_jwt({**current, "no": 88}))
+    root.write_bytes(ROOT_PEM)
+
+    def run(*extra):
+        return cli.main(["authenticator-trust", str(blob), "--root", str(root), *extra])
+    assert run("-o", str(out)) == 0
+    assert attestation.AuthenticatorTrust.load(json.loads(out.read_text())).blob_no == 88
+    assert "8 authenticator models, 2 of them device-bound (2 more have a secure element but " \
+        "no current FIDO certification); left out 1 whose trust was withdrawn" in \
+        capsys.readouterr().err
+    blob.write_bytes(_jwt(current))                    # no. 87 would replace no. 88
+    assert run("-o", str(out)) == 1
+    assert "older than no. 88" in capsys.readouterr().err
+    assert json.loads(out.read_text())["mds_blob_no"] == 88
+    stale = dict(PAYLOAD, nextUpdate="2020-01-01")
+    blob.write_bytes(_jwt(stale))
+    assert run() == 1 and "download a current one" in capsys.readouterr().err
+    assert run("--allow-stale") == 0 and "you allowed it" in capsys.readouterr().err
+    (tmp_path / "other.json").write_text("not json")
+    assert run("-o", str(tmp_path / "other.json"), "--allow-stale") == 1
+    assert "is not an authenticator trust file" in capsys.readouterr().err
+    blob.write_bytes(b"x.y.z")
+    assert run() == 1

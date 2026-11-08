@@ -8,10 +8,18 @@ root certificate the deployer gives, and writes the `aeos-authenticator-trust/v1
 network; certificate revocation lists are not fetched.
 
 An entry is kept when it names a FIDO2 model (`aaguid`) or a FIDO U2F one (attestation
-certificate key identifiers) and has attestation root certificates, and its latest status
-report is not one that withdraws trust (a compromise, a user verification bypass, or a
-revocation). A model is **device-bound** when its key protection includes `hardware` or
-`secure_element` and neither `software` nor `remote_handle`.
+certificate key identifiers) and has attestation root certificates, and none of its status
+reports withdraws trust (a compromise, a user verification bypass, or a revocation). A kept
+model is **device-bound** only when its key protection includes `secure_element` and not
+`software` (`remote_handle`, which U2F keys list because they hand the relying party a
+wrapped key, is allowed), and its latest status report is a FIDO certification
+(`FIDO_CERTIFIED` or `FIDO_CERTIFIED_L1` and above). A key held only in a TPM or a phone's
+trusted execution environment (`tee`) is never device-bound: those are platform
+authenticators, not hardware security keys.
+
+A BLOB whose next update date has passed is refused unless the deployer allows a stale one,
+and the trust file records the BLOB's serial number (`mds_blob_no`) so that an import never
+replaces a newer BLOB's file with an older one.
 """
 from __future__ import annotations
 
@@ -30,7 +38,12 @@ from . import attestation
 WITHDRAWN = frozenset({"USER_VERIFICATION_BYPASS", "ATTESTATION_KEY_COMPROMISE",
                        "USER_KEY_REMOTE_COMPROMISE", "USER_KEY_PHYSICAL_COMPROMISE",
                        "REVOKED"})
+CERTIFIED = frozenset({"FIDO_CERTIFIED", "FIDO_CERTIFIED_L1", "FIDO_CERTIFIED_L1plus",
+                       "FIDO_CERTIFIED_L2", "FIDO_CERTIFIED_L2plus", "FIDO_CERTIFIED_L3",
+                       "FIDO_CERTIFIED_L3plus"})
 # JOSE algorithms the BLOB may be signed with, as the COSE numbers attestation.py checks
+# the length of a JOSE ECDSA signature (r || s, each the curve's size) per COSE algorithm
+_ECDSA_LEN = {-7: 64, -35: 96, -36: 132}
 _JOSE = {"ES256": -7, "ES384": -35, "ES512": -36, "RS256": -257, "RS384": -258,
          "RS512": -259, "PS256": -37, "PS384": -38, "PS512": -39}
 
@@ -79,10 +92,11 @@ def verify_blob(blob: bytes, root: x509.Certificate, now_ms: int) -> Dict[str, A
     if why:
         raise MetadataError(f"the BLOB's signing certificate does not stand: {why}")
     sig = _b64url(parts[2].decode("ascii"))
-    if alg in (-7, -35, -36):                 # JOSE carries r || s; convert to DER
+    if alg in _ECDSA_LEN:                     # JOSE carries r || s; convert to DER
+        if len(sig) != _ECDSA_LEN[alg]:
+            raise MetadataError(f"the BLOB's {header['alg']} signature is {len(sig)} bytes, "
+                                f"not {_ECDSA_LEN[alg]}")
         n = len(sig) // 2
-        if not sig or len(sig) % 2:
-            raise MetadataError("the BLOB's signature is malformed")
         sig = utils.encode_dss_signature(int.from_bytes(sig[:n], "big"),
                                          int.from_bytes(sig[n:], "big"))
     key = x509.load_der_x509_certificate(chain[0]).public_key()
@@ -95,39 +109,46 @@ def verify_blob(blob: bytes, root: x509.Certificate, now_ms: int) -> Dict[str, A
     return payload
 
 
-def _latest_status(entry: Dict[str, Any]) -> Optional[str]:
-    reports = [r for r in entry.get("statusReports") or [] if isinstance(r, dict)]
+def _statuses(entry: Dict[str, Any]) -> List[str]:
+    """The entry's status reports, oldest first (reports of one date keep their order)."""
+    raw = entry.get("statusReports")
+    reports = [r for r in raw if isinstance(r, dict)] if isinstance(raw, list) else []
     reports.sort(key=lambda r: str(r.get("effectiveDate", "")))
-    return reports[-1].get("status") if reports else None
+    return [str(r.get("status")) for r in reports]
 
 
 def device_bound(protection: Any) -> bool:
+    """Whether a metadata statement's keyProtection describes a hardware security key: a
+    secure element, and no software key store. TPM and TEE keys (`hardware` with `tee`, as
+    Windows Hello and phones list them) are not."""
     kinds = set(protection) if isinstance(protection, list) else set()
-    return bool(kinds & {"hardware", "secure_element"}) and \
-        not kinds & {"software", "remote_handle"}
+    return "secure_element" in kinds and "software" not in kinds
 
 
 def trust_from_payload(payload: Dict[str, Any], source: str
                        ) -> Tuple[Dict[str, Any], Dict[str, int]]:
     """The trust file for a verified payload, and counts of what was kept and left out."""
     out: List[Dict[str, Any]] = []
-    counts = {"kept": 0, "device_bound": 0, "withdrawn": 0, "unusable": 0}
+    counts = {"kept": 0, "device_bound": 0, "not_certified": 0, "withdrawn": 0, "unusable": 0}
     seen: set = set()
     for e in payload["entries"]:
         if not isinstance(e, dict):
             counts["unusable"] += 1
             continue
-        if _latest_status(e) in WITHDRAWN:
+        statuses = _statuses(e)
+        if WITHDRAWN & set(statuses):
             counts["withdrawn"] += 1
             continue
         raw = e.get("metadataStatement")
         st: Dict[str, Any] = raw if isinstance(raw, dict) else {}
+        protected = device_bound(st.get("keyProtection"))
+        certified = bool(statuses) and statuses[-1] in CERTIFIED
         aaguid = e.get("aaguid") or st.get("aaguid")
         ids = e.get("attestationCertificateKeyIdentifiers") or \
             st.get("attestationCertificateKeyIdentifiers") or []
         roots = st.get("attestationRootCertificates") or []
         entry: Dict[str, Any] = {"description": str(st.get("description", "")),
-                                 "device_bound": device_bound(st.get("keyProtection")),
+                                 "device_bound": protected and certified,
                                  "attestation_root_certificates": roots}
         if isinstance(aaguid, str) and aaguid.lower() != str(uuid.UUID(int=0)):
             entry["aaguid"] = aaguid.lower()
@@ -149,27 +170,41 @@ def trust_from_payload(payload: Dict[str, Any], source: str
         out.append(entry)
         counts["kept"] += 1
         counts["device_bound"] += entry["device_bound"]
+        counts["not_certified"] += protected and not certified
     out.sort(key=lambda m: (m.get("aaguid") or "", m.get(
         "attestation_certificate_key_identifiers", [""])[0]))
     return attestation.trust_doc(out, source), counts
 
 
-def import_blob(blob: bytes, root: bytes, now_ms: int) -> Tuple[Dict[str, Any], Dict[str, int],
-                                                                 Optional[str]]:
-    """(trust file, counts, warning) for a downloaded BLOB and the FIDO root certificate. The
-    warning says when the BLOB's next update date has passed."""
+def import_blob(blob: bytes, root: bytes, now_ms: int, *, allow_stale: bool = False,
+                previous: Any = None) -> Tuple[Dict[str, Any], Dict[str, int], Optional[str]]:
+    """(trust file, counts, warning) for a downloaded BLOB and the FIDO root certificate.
+
+    A BLOB whose next update date has passed, or that names none, is refused unless
+    `allow_stale`, and then the warning says so. `previous` is the trust file the new one
+    would replace, if any: a BLOB older than the one it was made from is refused."""
     payload = verify_blob(blob, load_root(root), now_ms)
+    no = payload.get("no")
+    if not isinstance(no, int) or isinstance(no, bool) or no < 0:
+        raise MetadataError("the BLOB has no serial number (no)")
+    before = previous.get("mds_blob_no") if isinstance(previous, dict) else None
+    if isinstance(before, int) and not isinstance(before, bool) and no < before:
+        raise MetadataError(f"the BLOB is no. {no}, older than no. {before}, which the trust "
+                            "file you would replace was made from")
     when = payload.get("nextUpdate")
-    source = (f"FIDO Metadata Service BLOB no. {payload.get('no')}, next update {when}, "
-              f"sha256 {hashlib.sha256(blob.strip()).hexdigest()}")
-    doc, counts = trust_from_payload(payload, source)
-    warning = None
+    stale = None
     try:
         due = dt.date.fromisoformat(str(when))
         today = dt.datetime.fromtimestamp(now_ms / 1000, tz=dt.timezone.utc).date()
         if due < today:
-            warning = (f"the BLOB's next update was due on {due}; download a current one from "
-                       "https://mds3.fidoalliance.org/")
+            stale = f"the BLOB's next update was due on {due}"
     except ValueError:
-        warning = "the BLOB names no next update date"
-    return doc, counts, warning
+        stale = "the BLOB names no next update date"
+    if stale and not allow_stale:
+        raise MetadataError(f"{stale}; download a current one from https://mds3.fidoalliance.org/"
+                            " (or allow a stale BLOB, if you must use this one)")
+    source = (f"FIDO Metadata Service BLOB no. {no}, next update {when}, "
+              f"sha256 {hashlib.sha256(blob.strip()).hexdigest()}")
+    doc, counts = trust_from_payload(payload, source)
+    doc["mds_blob_no"] = no
+    return doc, counts, (stale + ", and you allowed it") if stale else None

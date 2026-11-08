@@ -15,8 +15,9 @@ An evidence folder holds an audit trail plus what is needed to check who acted:
                     the controllers who may open and close periods, and the chart of
                     accounts; people's keys are in the principals file
     authenticators  optionally, the authenticator trust file (aeos-authenticator-trust/v1)
-                    that decides which passkeys are hardware security keys; an auditor
-                    gives their own with --authenticators
+                    the writer used to decide which passkeys are hardware security keys;
+                    the audit reads it only with --accept-folder-authenticators, since an
+                    auditor gives their own with --authenticators
 
 The audit recomputes the whole log, then checks that each session was opened with an SVID whose
 fingerprint the gateway recorded, and that this SVID was valid for the recorded identity
@@ -62,10 +63,13 @@ def _load_svids(folder: Path) -> Dict[str, List[Any]]:
 def run(folder: Path, *, bundle: Optional[Path] = None, public_key: Optional[str] = None,
         witnesses: Optional[Path] = None, authority_key: Optional[str] = None,
         principals: Optional[Path] = None, demo: bool = False,
-        authenticators: Optional[Path] = None) -> Tuple[List[str], List[str]]:
+        authenticators: Optional[Path] = None, accept_folder_authenticators: bool = False
+        ) -> Tuple[List[str], List[str]]:
     """Return (findings, problems). No problems means the evidence holds together. `demo`
     accepts a passkey made for http://localhost, with a note. `authenticators` is the
-    authenticator trust file that decides which passkeys are hardware security keys."""
+    authenticator trust file that decides which passkeys are hardware security keys; the one
+    in the folder is read in its place only when `accept_folder_authenticators` says so, and
+    the findings then say that a hardware key rests on the writer's word."""
     folder = Path(folder)
     manifest = json.loads((folder / "evidence.json").read_text())
     findings: List[str] = []
@@ -102,8 +106,17 @@ def run(folder: Path, *, bundle: Optional[Path] = None, public_key: Optional[str
                           .read_text())
         pkeys, pk_principals = passkeys.load_principals(pdoc)
     trust = None
-    tfile = Path(authenticators) if authenticators else (
-        folder / manifest["authenticators"] if manifest.get("authenticators") else None)
+    tfile = Path(authenticators) if authenticators else None
+    if tfile is None and manifest.get("authenticators"):
+        if accept_folder_authenticators:
+            tfile = folder / manifest["authenticators"]
+            findings.append("The authenticator trust file was taken from the folder under "
+                            "review, as you asked: a passkey counts as a hardware security key "
+                            "here only on the word of whoever wrote that file")
+        else:
+            findings.append("The folder holds an authenticator trust file, which this audit "
+                            "did not read: give your own with --authenticators, or accept the "
+                            "writer's with --accept-folder-authenticators")
     if tfile is not None:
         try:
             trust = attestation.AuthenticatorTrust.load(json.loads(tfile.read_text()))
