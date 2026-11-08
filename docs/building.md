@@ -132,7 +132,7 @@ The rules call a supplier a vendor: `invoice.vendor`, and `data.sanctioned_vendo
 {"decision": "allow" | "deny" | "escalate", "reasons": ["plain words for each reason"]}
 ```
 
-An escalation may add `"requires": "hardware-key"`: then only an approval made with a hardware security key answers it, never a synced passkey. The built-in payment rules do this above `hardware_key_above_minor` when the data sets it.
+An escalation may add `"requires": "hardware-key"`: then only an approval made with a hardware security key answers it, never a synced passkey. The built-in payment and close rules do this above `hardware_key_above_minor` when the data sets it. The gateway then needs an authenticator trust file to tell a hardware security key from any other passkey, and warns when it starts without one.
 
 Compile it and point the workspace at it:
 
