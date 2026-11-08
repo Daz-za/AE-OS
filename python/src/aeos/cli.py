@@ -19,6 +19,7 @@
     aeos build FOLDER [STEP] | aeos up FOLDER [--port N]
     aeos call FOLDER --as AGENT TOOL [key=value]... [--approve-as PERSON] [--json]
     aeos period FOLDER YYYY-MM open|close --as PERSON [--entity E] | aeos seal FOLDER
+    aeos authenticator-trust BLOB --root CERT [-o FILE]   (from the FIDO Metadata Service)
 """
 from __future__ import annotations
 
@@ -31,11 +32,11 @@ import threading
 from pathlib import Path
 from typing import List, Optional
 
-from . import (__version__, audit, demo, fulldemo, hooks, mcp_proxy, report, setup, sink,
+from . import (__version__, audit, demo, fulldemo, hooks, mcp_proxy, mds, report, setup, sink,
                status, ui, workspace)
 from .canon import cid_parse, cid_str
 from .keys import is_small_order
-from .log import (ISSUER_SIGNED, ActionLog, make_record, to_view, verify_action_record,
+from .log import (ISSUER_SIGNED, ActionLog, make_record, now_ms, to_view, verify_action_record,
                   verify_action_record_detail, verify_consistency_doc)
 from .recorder import Recorder
 from .status import MEANING
@@ -198,6 +199,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--authenticators", help="the authenticator trust file you trust, which "
                    "decides which passkeys are hardware security keys")
 
+    p = sub.add_parser("authenticator-trust", help="make an authenticator trust file from a "
+                       "FIDO Metadata Service BLOB you downloaded")
+    p.add_argument("blob", help="the MDS3 BLOB (a JSON Web Token) from mds3.fidoalliance.org")
+    p.add_argument("--root", required=True, help="the FIDO Alliance root certificate that "
+                   "signs the BLOB (PEM or DER)")
+    p.add_argument("-o", "--out", help="where to write the trust file (default: print it)")
+
     p = sub.add_parser("setup", help="answer a few questions and create a ready-to-use log")
     p.add_argument("--name", help="short name for the log")
     p.add_argument("--log", help="folder for the log")
@@ -292,6 +300,20 @@ def main(argv: Optional[List[str]] = None) -> int:
         for f in findings:
             print(f"  - {f}")
         return _report(problems, "the evidence holds together", "audit")
+    if a.cmd == "authenticator-trust":
+        try:
+            doc, counts, warning = mds.import_blob(Path(a.blob).read_bytes(),
+                                                   Path(a.root).read_bytes(), now_ms())
+        except (OSError, mds.MetadataError) as e:
+            print(f"aeos: {e}", file=sys.stderr)
+            return 1
+        _write(doc, a.out)
+        print(f"{counts['kept']} authenticator models, {counts['device_bound']} of them "
+              f"device-bound; left out {counts['withdrawn']} whose trust was withdrawn and "
+              f"{counts['unusable']} with no model or root", file=sys.stderr)
+        if warning:
+            print(f"warning: {warning}", file=sys.stderr)
+        return 0
     if a.cmd in ("agents", "decisions", "books"):
         folder, evidence = report.locate(Path(a.folder))
         if not (folder / "log.json").exists():

@@ -7,12 +7,12 @@ from pathlib import Path
 
 import pytest
 from cryptography import x509
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.asymmetric import padding, rsa
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa, utils
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 import attestation_support as ats
-from aeos import attestation, audit, cli, delegation, keys, passkeys, policy, webauthn
+from aeos import attestation, audit, cli, delegation, keys, mds, passkeys, policy, webauthn
 from aeos.canon import dag_cbor, json_digest
 from passkey_scenarios import ARGS, TOOL, TRUST, K, S, A
 from webauthn_support import APPROVER, T0, SoftAuthenticator, Trail, nonce, principals, sign_in_of
@@ -633,3 +633,97 @@ def test_an_ed25519_approver_cannot_answer_a_hardware_key_escalation_live(steppe
     a = delegation.Approval(esc, "spiffe://acme.example/human/cfo/ed", "approve", TOOL,
                             json_digest(args), now_ms()).sign(key)
     assert "only a passkey approver can approve it" in _text(c.call(TOOL, args, approval=a))
+
+
+# ---- the FIDO Metadata Service BLOB ---------------------------------------------------------
+
+
+FIDO_ROOT_KEY = ats.p256_key("synthetic FIDO metadata root")
+FIDO_ROOT_NAME = ats._name(C="ZA", O="Synthetic Metadata (test only)", CN="Metadata Root")
+FIDO_ROOT = ats.cert(FIDO_ROOT_NAME, FIDO_ROOT_KEY.public_key(), FIDO_ROOT_NAME, FIDO_ROOT_KEY,
+                     serial="mds root", ca=True)
+SIGNER_KEY = ats.p256_key("synthetic FIDO metadata signer")
+SIGNER = ats.cert(ats._name(CN="Metadata BLOB signer"), SIGNER_KEY.public_key(),
+                  FIDO_ROOT_NAME, FIDO_ROOT_KEY, serial="mds signer", ca=False)
+
+
+def _jwt(payload, *, key=SIGNER_KEY, chain=(SIGNER,), alg="ES256"):
+    def enc(b):
+        return base64.urlsafe_b64encode(b).rstrip(b"=")
+    header = {"alg": alg, "typ": "JWT", "x5c": [base64.b64encode(ats.der(c)).decode()
+                                                for c in chain]}
+    signing = enc(json.dumps(header).encode()) + b"." + enc(json.dumps(payload).encode())
+    der = key.sign(signing, ec.ECDSA(hashes.SHA256()))
+    r, s = utils.decode_dss_signature(der)
+    return signing + b"." + enc(r.to_bytes(32, "big") + s.to_bytes(32, "big"))
+
+
+def _mds_entry(model, *, protection=("hardware", "secure_element"), status="FIDO_CERTIFIED_L2",
+               u2f=False):
+    st = {"description": f"{model} (synthetic)", "keyProtection": list(protection),
+          "attestationRootCertificates": [ats.b64(M.root)]}
+    e = {"metadataStatement": st, "statusReports": [
+        {"status": "FIDO_CERTIFIED", "effectiveDate": "2024-01-01"},
+        {"status": status, "effectiveDate": "2025-01-01"}]}
+    if u2f:
+        e["attestationCertificateKeyIdentifiers"] = [ats.u2f_key_id().hex().upper()]
+    else:
+        e["aaguid"] = str(__import__("uuid").UUID(bytes=ats.aaguid(model)))
+    return e
+
+
+PAYLOAD = {"legalHeader": "synthetic", "no": 87, "nextUpdate": "2025-12-01", "entries": [
+    _mds_entry(ats.KEY_MODEL), _mds_entry(ats.TPM_MODEL, protection=["hardware", "tee"]),
+    _mds_entry("Soft One", protection=["software"]),
+    _mds_entry("Leaky", status="ATTESTATION_KEY_COMPROMISE"),
+    _mds_entry("U2F", u2f=True),
+    {"metadataStatement": {"description": "no model"}}, "not an entry"]}
+
+
+def test_a_metadata_blob_becomes_a_trust_file_that_classes_keys():
+    root_pem = FIDO_ROOT.public_bytes(serialization.Encoding.PEM)
+    doc, counts, warning = mds.import_blob(_jwt(PAYLOAD), root_pem, T0)
+    assert counts == {"kept": 4, "device_bound": 3, "withdrawn": 1, "unusable": 2}
+    assert warning is None and doc["source"].startswith("FIDO Metadata Service BLOB no. 87")
+    trust = attestation.AuthenticatorTrust.load(doc)
+    bound = {m.description: m.device_bound for m in trust.models}
+    assert bound == {"Key 5 (synthetic)": True, "TPM 2 (synthetic)": True,
+                     "Soft One (synthetic)": False, "U2F (synthetic)": True}
+    reg = _register(K, _reg(K, "packed", ats.attester("packed", K)))
+    assert attestation.key_class(reg.statement, reg.flags, reg.aaguid, trust, T0)[0] == \
+        attestation.HARDWARE
+    u2f = _register(K, _reg(K, "fido-u2f", ats.attester("fido-u2f", K), aaguid=bytes(16)))
+    assert attestation.key_class(u2f.statement, u2f.flags, u2f.aaguid, trust, T0)[0] == \
+        attestation.HARDWARE
+    late = int(dt.datetime(2026, 1, 5, tzinfo=dt.timezone.utc).timestamp() * 1000)
+    assert "next update was due on 2025-12-01" in mds.import_blob(_jwt(PAYLOAD), root_pem,
+                                                                  late)[2]
+
+
+def test_a_metadata_blob_that_does_not_stand_is_refused():
+    root = ats.der(FIDO_ROOT)
+    for blob, why in (
+            (b"not a token", "not a JSON Web Token"),
+            (_jwt(PAYLOAD)[:-4] + b"AAAA", "signature does not verify"),
+            (_jwt(PAYLOAD, chain=(M.ca,)), "signing certificate does not stand"),
+            (_jwt(PAYLOAD, alg="none"), "no supported algorithm"),
+            (_jwt({"no": 1}), "no entries")):
+        with pytest.raises(mds.MetadataError, match=why):
+            mds.import_blob(blob, root, T0)
+    with pytest.raises(mds.MetadataError, match="not PEM or DER"):
+        mds.import_blob(_jwt(PAYLOAD), b"garbage", T0)
+
+
+def test_the_authenticator_trust_command_writes_the_file(tmp_path, capsys):
+    (tmp_path / "blob.jwt").write_bytes(_jwt(PAYLOAD))
+    (tmp_path / "root.pem").write_bytes(FIDO_ROOT.public_bytes(serialization.Encoding.PEM))
+    out = tmp_path / "trust.json"
+    assert cli.main(["authenticator-trust", str(tmp_path / "blob.jwt"), "--root",
+                     str(tmp_path / "root.pem"), "-o", str(out)]) == 0
+    assert attestation.AuthenticatorTrust.load(json.loads(out.read_text())).models
+    err = capsys.readouterr().err
+    assert "4 authenticator models, 3 of them device-bound; left out 1 whose trust was " \
+        "withdrawn" in err
+    (tmp_path / "blob.jwt").write_bytes(b"x.y.z")
+    assert cli.main(["authenticator-trust", str(tmp_path / "blob.jwt"), "--root",
+                     str(tmp_path / "root.pem")]) == 1
