@@ -306,8 +306,9 @@ def _check_passkeys(records: List[Tuple[Any, Dict[str, Any]]], directory: "passk
         trust = directory.authenticators
         findings.append(
             "Each passkey's key class was decided from its registration response: hardware "
-            "only when its attestation chains to a root trusted for a device-bound model and "
-            "it is not backup eligible, synced when it is backup eligible, otherwise unknown; "
+            "only when its attestation chains to a root trusted for a device-bound model, its "
+            "certificate is bound to that model, and it is not backup eligible (never for an "
+            "android-key attestation), synced when it is backup eligible, otherwise unknown; "
             + (f"the authenticator trust used lists {len(trust.models)} model"
                f"{'' if len(trust.models) == 1 else 's'}"
                + (f" ({trust.source})" if trust.source else "") if trust is not None else

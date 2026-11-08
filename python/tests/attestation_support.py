@@ -191,12 +191,16 @@ def tpm(auth_data: bytes, cdh: bytes, credential: ec.EllipticCurvePrivateKey,
             "ver": "2.0", "x5c": [der(c) for c in chain]}
 
 
-def android_key_description(cdh: bytes, *, tee: bool = True) -> x509.UnrecognizedExtension:
-    """KeyDescription: generated in the TEE, for signing (or, with `tee` off, software only)."""
-    auth = (_der(0xA1, _der(0x31, _der(0x02, b"\x02")))            # purpose [1] SET {SIGN}
+def android_key_description(cdh: bytes, *, tee: bool = True, level: int = 2,
+                            keymaster: Optional[int] = None, purpose: int = 2
+                            ) -> x509.UnrecognizedExtension:
+    """KeyDescription: generated in secure hardware (`level` 2 StrongBox, 1 TEE, 0 software)
+    for `purpose` (2 is SIGN), listed as hardware-enforced (or, with `tee` off, software)."""
+    auth = (_der(0xA1, _der(0x31, _der(0x02, bytes([purpose]))))    # purpose [1] SET {..}
             + _der(b"\xbf\x85\x3e", _der(0x02, b"\x00")))           # origin [702] GENERATED
-    body = (_der(0x02, b"\x03") + _der(0x0A, b"\x01") + _der(0x02, b"\x04")
-            + _der(0x0A, b"\x01") + _der(0x04, cdh) + _der(0x04, b"")
+    km = level if keymaster is None else keymaster
+    body = (_der(0x02, b"\x03") + _der(0x0A, bytes([level])) + _der(0x02, b"\x04")
+            + _der(0x0A, bytes([km])) + _der(0x04, cdh) + _der(0x04, b"")
             + _der(0x30, b"" if tee else auth) + _der(0x30, auth if tee else b""))
     return x509.UnrecognizedExtension(attestation.OID_ANDROID_KEY, _der(0x30, body))
 
@@ -235,10 +239,11 @@ FORGER = (KEYWORKS.ca_name, ed_key("a forger, not Keyworks"))
 
 def attester(fmt: str, auth: Any, *, maker: Maker = KEYWORKS, model: str = KEY_MODEL,
              forged: bool = False, tee: bool = True, expired: bool = False,
-             self_attested: bool = False, aaguid_ext: Optional[bytes] = None
-             ) -> Any:
+             self_attested: bool = False, aaguid_ext: Optional[bytes] = None,
+             bind_aaguid: bool = True, android_level: int = 2) -> Any:
     """`attest(authenticator_data, client_data_hash)` for a SoftAuthenticator `auth`: the
-    statement a `maker`'s `model` makes in format `fmt`, or a bent one."""
+    statement a `maker`'s `model` makes in format `fmt`, or a bent one. Packed and TPM
+    certificates name the model's AAGUID unless `bind_aaguid` is off."""
     issuer = FORGER if forged else None
     until = dt.datetime(2025, 6, 1, tzinfo=dt.timezone.utc) if expired else UNTIL
 
@@ -248,17 +253,18 @@ def attester(fmt: str, auth: Any, *, maker: Maker = KEYWORKS, model: str = KEY_M
             if self_attested:
                 return packed(ad, cdh, auth.key)
             key = p256_key(f"{maker.name} {model} attestation")
-            leaf = maker.leaf(model, key, aaguid_=aaguid_ext or model_aaguid, issuer=issuer,
-                              not_after=until)
+            leaf = maker.leaf(model, key, aaguid_=(aaguid_ext or model_aaguid) if bind_aaguid
+                              else None, issuer=issuer, not_after=until)
             return packed(ad, cdh, key, [leaf, maker.ca])
         if fmt == "tpm":
             aik = p256_key(f"{maker.name} {model} aik")
-            leaf = maker.leaf(model, aik, aaguid_=model_aaguid, subject=x509.Name([]),
+            leaf = maker.leaf(model, aik, aaguid_=model_aaguid if bind_aaguid else None,
+                              subject=x509.Name([]),
                               extensions=tpm_aik_extensions(), issuer=issuer, not_after=until)
             return tpm(ad, cdh, auth.key, aik, [leaf, maker.ca])
         if fmt == "android-key":
             leaf = maker.leaf(model, auth.key, extensions=[(android_key_description(
-                cdh, tee=tee), False)], issuer=issuer, not_after=until)
+                cdh, tee=tee, level=android_level), False)], issuer=issuer, not_after=until)
             return {"alg": -7, "sig": es256(auth.key, ad + cdh), "x5c": [der(leaf), der(maker.ca)]}
         if fmt == "apple":
             leaf = maker.leaf(model, auth.key, extensions=[(apple_nonce(ad, cdh), False)],

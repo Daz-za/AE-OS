@@ -133,9 +133,20 @@ def _key_classes(add: Callable[..., None]) -> None:
         add(f"hardware key ({fmt} attestation) meets a hardware-key step-up",
             _keyed(K, _root_registration(K, fmt), enrolled=hw, asserted=hw,
                    requires=ats.attestation.HARDWARE_KEY), [], trust=TRUST)
-    add("hardware key (android-key attestation from the trusted execution environment)",
-        _keyed(K, _root_registration(K, "android-key", model=ats.PHONE_MODEL), enrolled=hw,
-               asserted=hw), [], trust=TRUST)
+    add("android-key attestation from a StrongBox cannot meet a hardware-key step-up",
+        _keyed(K, _root_registration(K, "android-key", model=ats.PHONE_MODEL),
+               enrolled="unknown", asserted="unknown", requires=ats.attestation.HARDWARE_KEY),
+        ["the approval was made with a passkey of unknown kind"], trust=TRUST)
+    add("android-key attestation from the trusted execution environment is of unknown kind",
+        _keyed(K, _root_registration(K, "android-key", model=ats.PHONE_MODEL, android_level=1),
+               enrolled="unknown", asserted="unknown"), [], trust=TRUST)
+    add("packed attestation without its AAGUID under a root shared by models is of unknown "
+        "kind",
+        _keyed(K, _root_registration(K, bind_aaguid=False), enrolled=hw, asserted=hw,
+               requires=ats.attestation.HARDWARE_KEY),
+        ["the enrolment says the passkey is a hardware security key, but it is a passkey of "
+         "unknown kind", "the evidence says a hardware security key made this assertion"],
+        trust=TRUST)
     add("synced passkey (backup eligible, apple attestation) approves with no step-up",
         _keyed(S, _root_registration(S, "apple", flags=BE | BS, model=ats.CLOUD_MODEL),
                enrolled="synced", asserted="synced", flags=BE | BS), [], trust=TRUST)
@@ -209,9 +220,12 @@ def _key_classes(add: Callable[..., None]) -> None:
         ["the attestation signature does not verify"], trust=TRUST)
     t = Trail()
     t.enrol(K, registration=_root_registration(K, "android-key", tee=False))
-    add("android-key attestation of a key outside the trusted execution environment", t,
-        ["not generated in, and for signing by, the trusted execution environment"],
-        trust=TRUST)
+    add("android-key attestation enforced only in software", t,
+        ["not generated in, and for signing by, secure hardware"], trust=TRUST)
+    t = Trail()
+    t.enrol(K, registration=_root_registration(K, "android-key", android_level=0))
+    add("android-key attestation of a key held in software", t,
+        ["the Android key is held in software"], trust=TRUST)
     t = Trail()
     t.enrol(K, registration=_root_registration(K, "tpm", flags=BE))
     _, c, e = t.escalated_call(ARGS)

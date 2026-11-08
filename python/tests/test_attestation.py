@@ -1,4 +1,5 @@
-"""Attestation statements, the authenticator trust file, key classes and the hardware-key step-up."""
+"""Attestation statements, the authenticator trust file, key classes and the hardware-key
+step-up."""
 import base64
 import datetime as dt
 import hashlib
@@ -61,6 +62,11 @@ def test_every_w3c_registration_example_verifies_and_chains_to_the_w3c_ca(v):
         alg, key = webauthn.parse_cose_key(cose)
     except webauthn.WebAuthnError:       # ES384, ES512, RS256 and Ed448 credentials
         alg, key = None, None
+    if obj["fmt"] == "android-key":      # the W3C made it with a key held in software
+        with pytest.raises(attestation.AttestationError, match="held in software"):
+            attestation.verify_statement(obj["fmt"], obj["attStmt"], ad,
+                                         hashlib.sha256(cdj).digest(), ad[37:53], alg, key)
+        return
     if obj["fmt"] == "packed" and "x5c" in obj["attStmt"] or alg is not None:
         st = attestation.verify_statement(obj["fmt"], obj["attStmt"], ad,
                                           hashlib.sha256(cdj).digest(), ad[37:53], alg, key)
@@ -104,18 +110,52 @@ def test_the_w3c_examples_get_the_key_class_their_flags_and_chains_give():
 # ---- each format, made by the synthetic makers ----------------------------------------------
 
 
-@pytest.mark.parametrize("fmt,kind", [("packed", "basic"), ("tpm", "attca"),
-                                      ("android-key", "basic"), ("apple", "anonca"),
-                                      ("fido-u2f", "basic")])
-def test_each_format_verifies_and_a_trusted_device_bound_model_is_a_hardware_key(fmt, kind):
+# Keyworks' root is listed for every Keyworks model in the test trust file; ONLY_KEY_MODEL lists
+# just one model under it.
+ONLY_KEY_MODEL = attestation.trust_doc([ats.trust_entry(ats.KEYWORKS, ats.KEY_MODEL,
+                                                       aaguid_=ats.aaguid(ats.KEY_MODEL))], "")
+
+
+@pytest.mark.parametrize("fmt,kind,cls", [
+    ("packed", "basic", "hardware"), ("tpm", "attca", "hardware"),
+    ("android-key", "basic", "unknown"), ("apple", "anonca", "unknown"),
+    ("fido-u2f", "basic", "hardware")])
+def test_each_format_verifies_and_a_trusted_device_bound_model_is_a_hardware_key(fmt, kind, cls):
     aaguid = bytes(16) if fmt == "fido-u2f" else ats.aaguid(ats.KEY_MODEL)
     reg = _register(K, _reg(K, fmt, ats.attester(fmt, K), aaguid=aaguid))
     assert (reg.statement.fmt, reg.statement.attestation) == (fmt, kind)
-    assert _class(reg)[0] == attestation.HARDWARE
+    assert _class(reg)[0] == cls
     assert _class(reg, trust=None) == (attestation.UNKNOWN,
                                        "no authenticator trust file was given to this audit")
     synced = _register(K, _reg(K, fmt, ats.attester(fmt, K), aaguid=aaguid, flags=BE_BS))
     assert _class(synced)[0] == attestation.SYNCED
+
+
+def test_a_root_shared_by_models_counts_only_a_certificate_that_names_its_aaguid():
+    for fmt in ("packed", "tpm"):
+        unbound = _register(K, _reg(K, fmt, ats.attester(fmt, K, bind_aaguid=False)))
+        assert not unbound.statement.aaguid_bound
+        cls, why = _class(unbound)
+        assert cls == attestation.UNKNOWN and "trusted for other models too" in why
+        assert _class(unbound, trust=ONLY_KEY_MODEL)[0] == attestation.HARDWARE
+        assert _register(K, _reg(K, fmt, ats.attester(fmt, K))).statement.aaguid_bound
+    # apple names no AAGUID in its certificate: only a root no other model shares will do
+    apple = _register(K, _reg(K, "apple", ats.attester("apple", K)))
+    assert "trusted for other models too" in _class(apple)[1]
+    assert _class(apple, trust=ONLY_KEY_MODEL)[0] == attestation.HARDWARE
+
+
+def test_an_android_key_is_refused_in_software_and_never_a_hardware_key():
+    with pytest.raises(webauthn.WebAuthnError, match="held in software"):
+        _register(K, _reg(K, "android-key", ats.attester("android-key", K, android_level=0)))
+    tee = _register(K, _reg(K, "android-key", ats.attester("android-key", K, android_level=1)))
+    assert tee.statement.security_level == attestation.ANDROID_TEE
+    assert "trusted execution environment, not in a secure element" in _class(tee)[1]
+    box = _register(K, _reg(K, "android-key", ats.attester("android-key", K)))
+    assert box.statement.security_level == attestation.ANDROID_STRONGBOX
+    for trust in (TRUST, ONLY_KEY_MODEL):        # even a root no other model shares
+        cls, why = _class(box, trust=trust)
+        assert cls == attestation.UNKNOWN and "no revocation list" in why
 
 
 def test_none_and_self_attestation_name_no_model():
@@ -212,6 +252,17 @@ BENT = [
         s, certInfo=ats.tpm_cert_info(ats.tpm_pub_area(b"\x01" * 32, b"\x02" * 32),
                                       hashlib.sha256(ad + cdh).digest()))),
      "does not name the pubArea"),
+    ("tpm pubArea of an RSA key", "tpm", _stmt("tpm", lambda s, ad, cdh: _set(
+        s, pubArea=b"\x00\x01" + s["pubArea"][2:])), "not an ECC key"),
+    ("tpm pubArea with a SHA-1 name algorithm", "tpm", _stmt("tpm", lambda s, ad, cdh: _set(
+        s, pubArea=s["pubArea"][:2] + b"\x00\x04" + s["pubArea"][4:])),
+     "name algorithm is not supported"),
+    ("tpm certInfo that is a quote", "tpm", _stmt("tpm", lambda s, ad, cdh: _set(
+        s, certInfo=s["certInfo"][:4] + b"\x80\x18" + s["certInfo"][6:])),
+     "not TPM_ST_ATTEST_CERTIFY"),
+    ("tpm certInfo with trailing bytes", "tpm",
+     _stmt("tpm", lambda s, ad, cdh: _set(s, certInfo=s["certInfo"] + b"\x00")),
+     "trailing bytes"),
     ("tpm truncated certInfo", "tpm",
      _stmt("tpm", lambda s, ad, cdh: _set(s, certInfo=s["certInfo"][:20])), "truncated"),
     ("tpm attestation certificate with a subject", "tpm", _leaf_stmt("tpm", lambda ad, cdh: (
@@ -232,6 +283,26 @@ BENT = [
         "android-key", lambda ad, cdh: (M.leaf("a", AK, extensions=[
             (ats.android_key_description(cdh), False)]), AK)),
      "certificate's key is not the credential key"),
+    ("android-key for encryption, not signing", "android-key", _leaf_stmt(
+        "android-key", lambda ad, cdh: (M.leaf("a", K.key, extensions=[
+            (ats.android_key_description(cdh, purpose=0), False)]), K.key)),
+     "for signing by, secure hardware"),
+    ("android-key enforced only in software", "android-key", _leaf_stmt(
+        "android-key", lambda ad, cdh: (M.leaf("a", K.key, extensions=[
+            (ats.android_key_description(cdh, tee=False), False)]), K.key)),
+     "for signing by, secure hardware"),
+    ("android-key with a keymaster in software", "android-key", _leaf_stmt(
+        "android-key", lambda ad, cdh: (M.leaf("a", K.key, extensions=[
+            (ats.android_key_description(cdh, keymaster=0), False)]), K.key)),
+     "held in software"),
+    ("android-key whose security levels disagree", "android-key", _leaf_stmt(
+        "android-key", lambda ad, cdh: (M.leaf("a", K.key, extensions=[
+            (ats.android_key_description(cdh, level=2, keymaster=1), False)]), K.key)),
+     "do not agree"),
+    ("android-key with an unknown security level", "android-key", _leaf_stmt(
+        "android-key", lambda ad, cdh: (M.leaf("a", K.key, extensions=[
+            (ats.android_key_description(cdh, level=7), False)]), K.key)),
+     "do not agree"),
     ("android-key without a key description", "android-key", _leaf_stmt(
         "android-key", lambda ad, cdh: (M.leaf("a", K.key), K.key)),
      "no Android key description"),
@@ -245,6 +316,20 @@ BENT = [
      "certificate's key is not the credential key"),
     ("apple without a nonce", "apple", _leaf_stmt(
         "apple", lambda ad, cdh: (M.leaf("p", K.key), K.key)), "has no nonce"),
+    *[(f"apple nonce {what}", "apple", _leaf_stmt("apple", lambda ad, cdh, raw=raw: (
+        M.leaf("p", K.key, extensions=[(x509.UnrecognizedExtension(
+            attestation.OID_APPLE_NONCE, raw(hashlib.sha256(ad + cdh).digest())), False)]),
+        K.key)), "nonce is malformed") for what, raw in (
+        ("without its [1] tag", lambda n: ats._der(0x30, ats._der(0x04, n))),
+        ("that is not an octet string", lambda n: ats._der(0x30, ats._der(0xA1, ats._der(
+            0x02, n)))),
+        ("with two values", lambda n: ats._der(0x30, ats._der(0xA1, ats._der(0x04, n))
+                                               + ats._der(0xA1, ats._der(0x04, n)))),
+        ("with bytes after the octet string", lambda n: ats._der(0x30, ats._der(
+            0xA1, ats._der(0x04, n) + b"\x05\x00"))),
+        ("with bytes after the sequence", lambda n: ats._der(0x30, ats._der(
+            0xA1, ats._der(0x04, n))) + b"\x00"),
+        ("that is not a sequence", lambda n: ats._der(0x04, n)))],
     ("fido-u2f with two certificates", "fido-u2f", _stmt(
         "fido-u2f", lambda s, ad, cdh: _set(s, x5c=s["x5c"] + [ats.der(M.ca)])),
      "exactly one certificate"),
@@ -363,6 +448,81 @@ def test_the_chain_must_lead_to_a_trusted_root_through_cas_valid_at_the_time():
                          deep_key, serial="deep leaf", ca=False)
     assert "path length" in attestation.chain_problem(
         [ats.der(deep_leaf), ats.der(deep), ats.der(M.ca)], [M.root], T0)
+
+
+def _ca(name, key, *, ku=True, critical=(), sign_hash=None, issuer=None):
+    """An intermediate under Keyworks' root (or `issuer`, a (name, key) pair)."""
+    iname, ikey = issuer or (M.root_name, M.root_key)
+    b = (x509.CertificateBuilder().subject_name(ats._name(CN=name)).issuer_name(iname)
+         .public_key(key.public_key()).serial_number(7).not_valid_before(ats.FROM)
+         .not_valid_after(ats.UNTIL)
+         .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+         .add_extension(x509.KeyUsage(True, False, False, False, False, ku, ku, False, False),
+                        critical=True))
+    for ext in critical:
+        b = b.add_extension(ext, critical=True)
+    return b.sign(ikey, sign_hash)
+
+
+def _leaf_under(ca_name, ca_key, *, sign_hash=hashes.SHA256(), critical=()):
+    b = (x509.CertificateBuilder().subject_name(ats._name(CN="leaf")).issuer_name(
+        ats._name(CN=ca_name)).public_key(ats.p256_key("chain leaf").public_key())
+        .serial_number(8).not_valid_before(ats.FROM).not_valid_after(ats.UNTIL)
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True))
+    for ext in critical:
+        b = b.add_extension(ext, critical=True)
+    return b.sign(ca_key, sign_hash)
+
+
+def test_the_path_refuses_what_this_verifier_does_not_check_and_weak_crypto():
+    good_key = ats.p256_key("good intermediate")
+    good = _ca("good", good_key)
+    assert attestation.chain_problem([ats.der(_leaf_under("good", good_key)), ats.der(good)],
+                                     [M.root], T0) is None
+    # a CA whose key usage does not allow signing certificates
+    no_sign = _ca("no sign", good_key, ku=False)
+    assert "not a CA" in attestation.chain_problem(
+        [ats.der(_leaf_under("no sign", good_key)), ats.der(no_sign)], [M.root], T0)
+    # a critical extension the verifier does not understand, on the leaf or an issuer
+    policies = x509.CertificatePolicies([x509.PolicyInformation(
+        x509.ObjectIdentifier("1.3.6.1.4.1.99999.1"), None)])
+    assert "critical extension this verifier does not check (2.5.29.32)" in \
+        attestation.chain_problem([ats.der(_leaf_under("good", good_key, critical=[policies])),
+                                   ats.der(good)], [M.root], T0)
+    strict = _ca("strict", good_key, critical=[policies])
+    assert "critical extension" in attestation.chain_problem(
+        [ats.der(_leaf_under("strict", good_key)), ats.der(strict)], [M.root], T0)
+    # a hash outside SHA-256, SHA-384 and SHA-512 (OpenSSL no longer signs with SHA-1)
+    assert "signed with SHA224" in attestation.chain_problem(
+        [ats.der(_leaf_under("good", good_key, sign_hash=hashes.SHA224())), ats.der(good)],
+        [M.root], T0)
+    rsa_root_key = rsa.generate_private_key(65537, 2048)
+    rsa_root_name = ats._name(CN="rsa root")
+    rsa_root = (x509.CertificateBuilder().subject_name(rsa_root_name).issuer_name(rsa_root_name)
+                .public_key(rsa_root_key.public_key()).serial_number(9)
+                .not_valid_before(ats.FROM).not_valid_after(ats.UNTIL)
+                .add_extension(x509.BasicConstraints(ca=True, path_length=1), critical=True)
+                .sign(rsa_root_key, hashes.SHA256()))
+    sha224_ca = _ca("sha224", good_key, sign_hash=hashes.SHA224(),
+                    issuer=(rsa_root_name, rsa_root_key))
+    assert "signed with SHA224" in attestation.chain_problem(
+        [ats.der(_leaf_under("sha224", good_key)), ats.der(sha224_ca)], [rsa_root], T0)
+    # weak keys on an issuer: a short RSA key, a curve outside P-256, P-384 and P-521
+    for weak in (rsa.generate_private_key(65537, 1024), ec.generate_private_key(ec.SECP256K1())):
+        ca = _ca("weak", weak, sign_hash=hashes.SHA256(), issuer=(rsa_root_name, rsa_root_key))
+        assert "weak or unsupported key" in attestation.chain_problem(
+            [ats.der(_leaf_under("weak", weak)), ats.der(ca)], [rsa_root], T0)
+    # ... and on the root
+    weak_root_key = rsa.generate_private_key(65537, 1024)
+    weak_root = (x509.CertificateBuilder().subject_name(rsa_root_name).issuer_name(rsa_root_name)
+                 .public_key(weak_root_key.public_key()).serial_number(10)
+                 .not_valid_before(ats.FROM).not_valid_after(ats.UNTIL)
+                 .add_extension(x509.BasicConstraints(ca=True, path_length=1), critical=True)
+                 .sign(weak_root_key, hashes.SHA256()))
+    under_weak = _ca("under weak", good_key, sign_hash=hashes.SHA256(),
+                     issuer=(rsa_root_name, weak_root_key))
+    assert "does not lead to a root" in attestation.chain_problem(
+        [ats.der(_leaf_under("under weak", good_key)), ats.der(under_weak)], [weak_root], T0)
 
 
 @pytest.mark.parametrize("doc,why", [

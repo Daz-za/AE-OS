@@ -7,7 +7,8 @@ verifies the statement formats of W3C WebAuthn Level 3, section 8 (`packed`, `tp
 `cryptography` only, and then decides the credential's **key class**, deterministically:
 
     hardware   the attestation chains to a root the auditor trusts for an authenticator model
-               listed as device-bound, and the credential is not backup eligible (BE is 0)
+               listed as device-bound, the certificate is bound to that model, and the
+               credential is not backup eligible (BE is 0)
     synced     the credential is backup eligible (BE is 1): it can be copied to other devices
     unknown    anything else: no attestation, self attestation, a model or root not trusted
 
@@ -15,6 +16,14 @@ The roots and models come from an **authenticator trust file** the auditor suppl
 (`aeos-authenticator-trust/v1`, usually exported from the FIDO Metadata Service with
 `aeos authenticator-trust`); nothing is fetched at audit time. Certificates are checked for
 validity at the time the enrolment record states.
+
+A certificate is bound to its model when it names the model's AAGUID in its extension, or,
+for a fido-u2f key, when the model is listed by that certificate's key identifier. Without
+that, a root that the trust file lists for more than one model would let one model pass for
+another, so the class is `hardware` only when no other model shares the root. An
+`android-key` attestation is never `hardware`: a key from a leaked Android attestation key
+looks the same as a genuine one unless Google's revocation list is checked, which this
+offline verifier does not do.
 """
 from __future__ import annotations
 
@@ -30,7 +39,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from cryptography import x509
 from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec, ed25519, padding, rsa
+from cryptography.hazmat.primitives.asymmetric import ec, ed448, ed25519, padding, rsa
 from cryptography.x509.oid import NameOID
 
 TRUST_FORMAT = "aeos-authenticator-trust/v1"
@@ -57,6 +66,19 @@ TPM_ST_ATTEST_CERTIFY = 0x8017
 TPM_ALG_ECC, TPM_ALG_NULL = 0x0023, 0x0010
 TPM_ECC_NIST_P256 = 0x0003
 TPM_HASH: Dict[int, Any] = {0x000B: hashes.SHA256, 0x000C: hashes.SHA384, 0x000D: hashes.SHA512}
+
+# Android KeyMint / Keymaster security levels (KeyDescription attestationSecurityLevel)
+ANDROID_SOFTWARE, ANDROID_TEE, ANDROID_STRONGBOX = 0, 1, 2
+
+# What a certificate path may hold: critical extensions this verifier understands, the
+# signature hashes it accepts, and the curves and RSA size an issuer's key must have.
+_CRITICAL_OK = frozenset({x509.oid.ExtensionOID.BASIC_CONSTRAINTS,
+                          x509.oid.ExtensionOID.KEY_USAGE,
+                          x509.oid.ExtensionOID.EXTENDED_KEY_USAGE,
+                          x509.oid.ExtensionOID.SUBJECT_ALTERNATIVE_NAME})
+_SIGNATURE_HASHES = (hashes.SHA256, hashes.SHA384, hashes.SHA512)
+_CURVES = (ec.SECP256R1, ec.SECP384R1, ec.SECP521R1)
+MIN_RSA_BITS = 2048
 
 # COSE algorithms an attestation statement may be signed with (IANA COSE Algorithms).
 _EC = {-7: (ec.SECP256R1, hashes.SHA256), -35: (ec.SECP384R1, hashes.SHA384),
@@ -201,12 +223,12 @@ def _leaf_key(cert: x509.Certificate) -> Any:
         raise AttestationError("the attestation certificate's key is not supported") from None
 
 
-def _check_aaguid_extension(cert: x509.Certificate, aaguid: bytes) -> None:
+def _check_aaguid_extension(cert: x509.Certificate, aaguid: bytes) -> bool:
     """If the certificate names an AAGUID it must be the authenticator data's, and the
-    extension must not be critical (WebAuthn section 8.2.1)."""
+    extension must not be critical (WebAuthn section 8.2.1). True when it names one."""
     ext = _extension(cert, OID_AAGUID)
     if ext is None:
-        return
+        return False
     if ext.critical:
         raise AttestationError("the certificate's AAGUID extension is marked critical")
     raw = _raw(ext)
@@ -216,6 +238,7 @@ def _check_aaguid_extension(cert: x509.Certificate, aaguid: bytes) -> None:
     if raw[vs:ve] != aaguid:
         raise AttestationError("the certificate names another AAGUID from the authenticator "
                                "data")
+    return True
 
 
 def _not_ca(cert: x509.Certificate) -> None:
@@ -250,15 +273,62 @@ def _issued(child: x509.Certificate, issuer: x509.Certificate) -> bool:
         return False
 
 
+def _named(c: x509.Certificate) -> str:
+    return c.subject.rfc4514_string() or "(no subject)"
+
+
+def _cert_problem(c: x509.Certificate) -> Optional[str]:
+    """What this verifier cannot accept in a certificate on a path: a critical extension it
+    does not check, or a weak key."""
+    for ext in c.extensions:
+        if ext.critical and ext.oid not in _CRITICAL_OK:
+            return (f"the certificate {_named(c)} has a critical extension this verifier does "
+                    f"not check ({ext.oid.dotted_string})")
+    try:
+        key = c.public_key()
+    except (ValueError, UnsupportedAlgorithm):
+        return f"the certificate {_named(c)} has a key this verifier does not support"
+    if isinstance(key, rsa.RSAPublicKey) and key.key_size >= MIN_RSA_BITS or \
+            isinstance(key, ec.EllipticCurvePublicKey) and isinstance(key.curve, _CURVES) or \
+            isinstance(key, (ed25519.Ed25519PublicKey, ed448.Ed448PublicKey)):
+        return None
+    return (f"the certificate {_named(c)} has a weak or unsupported key (RSA of at least "
+            f"{MIN_RSA_BITS} bits, P-256, P-384, P-521, Ed25519 or Ed448 are accepted)")
+
+
+def _signature_problem(c: x509.Certificate) -> Optional[str]:
+    """A certificate must be signed with SHA-2 (or by an Edwards key, which names none)."""
+    try:
+        h = c.signature_hash_algorithm
+    except UnsupportedAlgorithm:
+        h = None
+        if c.signature_algorithm_oid not in (x509.oid.SignatureAlgorithmOID.ED25519,
+                                             x509.oid.SignatureAlgorithmOID.ED448):
+            return f"the certificate {_named(c)} is signed with an unsupported algorithm"
+    if h is None or isinstance(h, _SIGNATURE_HASHES):
+        return None
+    return (f"the certificate {_named(c)} is signed with {h.name.upper()}, which is not "
+            "accepted (SHA-256, SHA-384 or SHA-512 are)")
+
+
 def chain_problem(x5c: Sequence[bytes], roots: Sequence[x509.Certificate],
                   at_ms: int) -> Optional[str]:
     """Why the chain `x5c` (leaf first) does not lead to one of `roots`, valid at `at_ms`, or
-    None if it does. Each issuer must be a CA certificate allowed to sign certificates, within
-    its path length, and every certificate valid at that time."""
+    None if it does (see `chain_root`)."""
+    return chain_root(x5c, roots, at_ms)[1]
+
+
+def chain_root(x5c: Sequence[bytes], roots: Sequence[x509.Certificate], at_ms: int
+               ) -> Tuple[Optional[x509.Certificate], Optional[str]]:
+    """(the root the chain `x5c` (leaf first) leads to, None) when it leads to one of
+    `roots`, valid at `at_ms`; (None, why not) otherwise. Each issuer must be a CA
+    certificate allowed to sign certificates, within its path length; every certificate must
+    be valid at that time, signed with SHA-2 or an Edwards key, with a strong key and no
+    critical extension this verifier does not check."""
     try:
         path = load_certs(list(x5c))
     except AttestationError as e:
-        return str(e)
+        return None, str(e)
     when = _at(at_ms)
     root_der = {r.public_bytes(serialization.Encoding.DER) for r in roots}
     # the chain may end with the root itself; stop at the first certificate that is one
@@ -268,26 +338,34 @@ def chain_problem(x5c: Sequence[bytes], roots: Sequence[x509.Certificate],
             break
     for c in path:
         if not _valid_at(c, when):
-            return (f"the certificate {c.subject.rfc4514_string() or '(no subject)'} is not "
-                    "valid at the time of the enrolment")
+            return None, f"the certificate {_named(c)} is not valid at the time of the enrolment"
+        why = _cert_problem(c)
+        if why:
+            return None, why
     for i in range(len(path) - 1):
         child, parent = path[i], path[i + 1]
         ca, pathlen = _is_ca(parent)
         if not ca:
-            return "a certificate in the chain is signed by one that is not a CA"
+            return None, "a certificate in the chain is signed by one that is not a CA"
         if pathlen is not None and i > pathlen:
-            return "the chain is longer than a CA certificate's path length allows"
+            return None, "the chain is longer than a CA certificate's path length allows"
+        why = _signature_problem(child)
+        if why:
+            return None, why
         if not _issued(child, parent):
-            return "a certificate in the chain is not signed by the next one"
+            return None, "a certificate in the chain is not signed by the next one"
     last = path[-1]
     if last.public_bytes(serialization.Encoding.DER) in root_der and len(path) > 1:
-        return None
+        return last, None
+    why = _signature_problem(last)
+    if why:
+        return None, why
     for root in roots:
         ca, pathlen = _is_ca(root)
         if ca and (pathlen is None or len(path) - 1 <= pathlen) and _valid_at(root, when) \
-                and _issued(last, root):
-            return None
-    return "the chain does not lead to a root you trust for this authenticator model"
+                and _cert_problem(root) is None and _issued(last, root):
+            return root, None
+    return None, "the chain does not lead to a root you trust for this authenticator model"
 
 
 # ---- the statement formats (WebAuthn Level 3, section 8) ----------------------------------
@@ -300,6 +378,8 @@ class Statement:
     fmt: str
     attestation: str                 # none, self, basic, attca or anonca (section 6.5.4)
     x5c: Tuple[bytes, ...] = ()      # the certificate chain, leaf first
+    aaguid_bound: bool = False       # the leaf names the AAGUID in its extension
+    security_level: Optional[int] = None   # android-key: where the key is held
 
 
 def _x5c_leaf(att_stmt: Dict[str, Any]) -> Tuple[List[x509.Certificate], Any]:
@@ -335,9 +415,9 @@ def _packed(att: Dict[str, Any], auth_data: bytes, cdh: bytes, aaguid: bytes,
             and subject.get(NameOID.ORGANIZATIONAL_UNIT_NAME) == "Authenticator Attestation"):
         raise AttestationError("the attestation certificate's subject is not C, O, "
                                "OU=Authenticator Attestation and CN")
-    _check_aaguid_extension(leaf, aaguid)
+    bound = _check_aaguid_extension(leaf, aaguid)
     _not_ca(leaf)
-    return Statement("packed", "basic", tuple(att["x5c"]))
+    return Statement("packed", "basic", tuple(att["x5c"]), aaguid_bound=bound)
 
 
 def _u16(b: bytes, pos: int) -> Tuple[int, int]:
@@ -430,8 +510,8 @@ def _tpm(att: Dict[str, Any], auth_data: bytes, cdh: bytes, aaguid: bytes, cred_
         raise AttestationError("the TPM attestation certificate is not for attestation keys "
                                "(tcg-kp-AIKCertificate)")
     _not_ca(aik)
-    _check_aaguid_extension(aik, aaguid)
-    return Statement("tpm", "attca", tuple(att["x5c"]))
+    bound = _check_aaguid_extension(aik, aaguid)
+    return Statement("tpm", "attca", tuple(att["x5c"]), aaguid_bound=bound)
 
 
 def _android_key(att: Dict[str, Any], auth_data: bytes, cdh: bytes, aaguid: bytes,
@@ -447,9 +527,17 @@ def _android_key(att: Dict[str, Any], auth_data: bytes, cdh: bytes, aaguid: byte
     raw = _raw(ext)
     cls, tag, vs, ve = _tlv(raw, 0)
     fields = _items(raw, vs, ve) if (cls, tag) == (0x20, 16) and ve == len(raw) else []
-    if len(fields) < 8 or fields[4][:2] != (0, 4) or fields[6][:2] != (0x20, 16) or \
+    if len(fields) < 8 or fields[1][:2] != (0, 10) or fields[3][:2] != (0, 10) or \
+            fields[4][:2] != (0, 4) or fields[6][:2] != (0x20, 16) or \
             fields[7][:2] != (0x20, 16):
         raise AttestationError("the Android key description is malformed")
+    level = _der_int(raw, fields[1][2], fields[1][3])
+    keymaster = _der_int(raw, fields[3][2], fields[3][3])
+    if level == ANDROID_SOFTWARE or keymaster == ANDROID_SOFTWARE:
+        raise AttestationError("the Android key is held in software, not in secure hardware")
+    if level not in (ANDROID_TEE, ANDROID_STRONGBOX) or keymaster != level:
+        raise AttestationError("the Android key description's security levels are not ones "
+                               "this verifier knows, or do not agree")
     if raw[fields[4][2]:fields[4][3]] != cdh:
         raise AttestationError("the Android key description's challenge is not the client "
                                "data hash")
@@ -479,9 +567,9 @@ def _android_key(att: Dict[str, Any], auth_data: bytes, cdh: bytes, aaguid: byte
         return t == 17 and any(_der_int(raw, a, b) == 2 for _, _, a, b in _items(raw, s, e))
 
     if not (origin_generated(tee) and purpose_sign(tee)):
-        raise AttestationError("the Android key was not generated in, and for signing by, the "
-                               "trusted execution environment")
-    return Statement("android-key", "basic", tuple(att["x5c"]))
+        raise AttestationError("the Android key was not generated in, and for signing by, "
+                               "secure hardware")
+    return Statement("android-key", "basic", tuple(att["x5c"]), security_level=level)
 
 
 def _apple(att: Dict[str, Any], auth_data: bytes, cdh: bytes, aaguid: bytes, cred_alg: int,
@@ -570,6 +658,13 @@ class AuthenticatorTrust:
         self.source = source
         self._by_aaguid = {m.aaguid: m for m in self.models if m.aaguid is not None}
         self._by_key_id = {k: m for m in self.models for k in m.key_identifiers}
+        self.blob_no: Optional[int] = None
+
+    def shares_root(self, model: Authenticator, root: x509.Certificate) -> bool:
+        """Whether another model in the file lists `root` too."""
+        der = root.public_bytes(serialization.Encoding.DER)
+        return any(m is not model and any(r.public_bytes(serialization.Encoding.DER) == der
+                                          for r in m.roots) for m in self.models)
 
     @classmethod
     def load(cls, doc: Any) -> "AuthenticatorTrust":
@@ -621,21 +716,21 @@ class AuthenticatorTrust:
             models.append(Authenticator(desc if isinstance(desc, str) else "", e["device_bound"],
                                         certs, aaguid, tuple(bytes.fromhex(i) for i in ids)))
         src = doc.get("source", "")
-        return cls(models, src if isinstance(src, str) else "")
+        no = doc.get("mds_blob_no")
+        if no is not None and (not isinstance(no, int) or isinstance(no, bool) or no < 0):
+            raise ValueError("mds_blob_no must be the FIDO Metadata Service BLOB's serial number")
+        trust = cls(models, src if isinstance(src, str) else "")
+        trust.blob_no = no
+        return trust
 
     def model_for(self, fmt: str, aaguid: bytes, x5c: Sequence[bytes]
                   ) -> Optional[Authenticator]:
         if fmt != "fido-u2f":                 # a U2F key names its model by certificate only
             return self._by_aaguid.get(aaguid) if aaguid != ZERO_AAGUID else None
-        if x5c:
+        if x5c:           # the SHA-1 of the certificate's subjectPublicKey, as MDS lists it
             leaf = load_certs(list(x5c))[0]
-            ids = {x509.SubjectKeyIdentifier.from_public_key(_leaf_key(leaf)).digest}
-            ski = _extension(leaf, x509.oid.ExtensionOID.SUBJECT_KEY_IDENTIFIER)
-            if ski is not None:
-                ids.add(ski.value.digest)
-            for i in sorted(ids):
-                if i in self._by_key_id:
-                    return self._by_key_id[i]
+            return self._by_key_id.get(
+                x509.SubjectKeyIdentifier.from_public_key(_leaf_key(leaf)).digest)
         return None
 
 
@@ -672,15 +767,27 @@ def key_class(statement: Optional[Statement], flags: Optional[int], aaguid: byte
             statement.fmt != "fido-u2f" else "its attestation certificate"
         return UNKNOWN, f"its model ({named}) is not in the authenticator trust you gave"
     name = model.description or ("AAGUID " + aaguid_text(aaguid))
-    why = chain_problem(statement.x5c, model.roots, at_ms)
-    if why:
+    root, why = chain_root(statement.x5c, model.roots, at_ms)
+    if root is None:
         return UNKNOWN, f"its {statement.fmt} attestation for {name} does not stand: {why}"
     if not model.device_bound:
         return UNKNOWN, f"the authenticator trust you gave does not list {name} as device-bound"
+    if statement.fmt == "android-key":
+        if statement.security_level != ANDROID_STRONGBOX:
+            return UNKNOWN, (f"its android-key attestation for {name} says the key is held in "
+                             "the phone's trusted execution environment, not in a secure "
+                             "element")
+        return UNKNOWN, (f"its android-key attestation for {name} says the key is held in the "
+                         "phone's StrongBox secure element, but Android attestation keys have "
+                         "leaked, and this audit has no revocation list to rule that out")
+    if statement.fmt != "fido-u2f" and not statement.aaguid_bound and \
+            trust.shares_root(model, root):
+        return UNKNOWN, ("its attestation root is trusted for other models too, and its "
+                         f"certificate does not name its AAGUID, so nothing shows it is {name}")
     return HARDWARE, (f"its {statement.fmt} attestation chains to a root you trust for {name}, "
                       "a device-bound model, and it is not backup eligible")
 
 
 __all__ = ["AttestationError", "Authenticator", "AuthenticatorTrust", "HARDWARE", "HARDWARE_KEY",
            "KEY_CLASSES", "REQUIREMENTS", "SYNCED", "Statement", "TRUST_FORMAT", "UNKNOWN",
-           "chain_problem", "key_class", "trust_doc", "verify_statement"]
+           "chain_problem", "chain_root", "key_class", "trust_doc", "verify_statement"]
