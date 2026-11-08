@@ -12,10 +12,11 @@ certificate key identifiers) and has attestation root certificates, and none of 
 reports withdraws trust (a compromise, a user verification bypass, or a revocation). A kept
 model is **device-bound** only when its key protection includes `secure_element` and not
 `software` (`remote_handle`, which U2F keys list because they hand the relying party a
-wrapped key, is allowed), and its latest status report is a FIDO certification
-(`FIDO_CERTIFIED` or `FIDO_CERTIFIED_L1` and above). A key held only in a TPM or a phone's
-trusted execution environment (`tee`) is never device-bound: those are platform
-authenticators, not hardware security keys.
+wrapped key, is allowed), and its latest certification status is a FIDO certification
+(`FIDO_CERTIFIED` or `FIDO_CERTIFIED_L1` and above, not `NOT_FIDO_CERTIFIED` or
+`SELF_ASSERTION_SUBMITTED`); notices such as `UPDATE_AVAILABLE` do not change it. A key
+held only in a TPM or a phone's trusted execution environment (`tee`) is never
+device-bound: those are platform authenticators, not hardware security keys.
 
 A BLOB whose next update date has passed is refused unless the deployer allows a stale one,
 and the trust file records the BLOB's serial number (`mds_blob_no`) so that an import never
@@ -41,6 +42,9 @@ WITHDRAWN = frozenset({"USER_VERIFICATION_BYPASS", "ATTESTATION_KEY_COMPROMISE",
 CERTIFIED = frozenset({"FIDO_CERTIFIED", "FIDO_CERTIFIED_L1", "FIDO_CERTIFIED_L1plus",
                        "FIDO_CERTIFIED_L2", "FIDO_CERTIFIED_L2plus", "FIDO_CERTIFIED_L3",
                        "FIDO_CERTIFIED_L3plus"})
+# the statuses that say whether a model is certified; the others (UPDATE_AVAILABLE and the
+# like) are notices that do not change it
+CERTIFICATION = CERTIFIED | {"NOT_FIDO_CERTIFIED", "SELF_ASSERTION_SUBMITTED"}
 # JOSE algorithms the BLOB may be signed with, as the COSE numbers attestation.py checks
 # the length of a JOSE ECDSA signature (r || s, each the curve's size) per COSE algorithm
 _ECDSA_LEN = {-7: 64, -35: 96, -36: 132}
@@ -142,7 +146,8 @@ def trust_from_payload(payload: Dict[str, Any], source: str
         raw = e.get("metadataStatement")
         st: Dict[str, Any] = raw if isinstance(raw, dict) else {}
         protected = device_bound(st.get("keyProtection"))
-        certified = bool(statuses) and statuses[-1] in CERTIFIED
+        verdicts = [s for s in statuses if s in CERTIFICATION]
+        certified = bool(verdicts) and verdicts[-1] in CERTIFIED
         aaguid = e.get("aaguid") or st.get("aaguid")
         ids = e.get("attestationCertificateKeyIdentifiers") or \
             st.get("attestationCertificateKeyIdentifiers") or []

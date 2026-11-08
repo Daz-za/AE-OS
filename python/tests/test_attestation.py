@@ -938,7 +938,9 @@ PAYLOAD = {"legalHeader": "synthetic", "no": 87, "nextUpdate": "2025-12-01", "en
     _mds_entry("Soft One", protection=["software"]),
     _mds_entry("Half Soft", protection=["software", "secure_element"]),
     _mds_entry("Self Said", statuses=("SELF_ASSERTION_SUBMITTED",)),
-    _mds_entry("Updated", statuses=("FIDO_CERTIFIED_L1", "UPDATE_AVAILABLE")),
+    _mds_entry("Updated", statuses=("FIDO_CERTIFIED_L1", "UPDATE_AVAILABLE")),   # a notice
+    _mds_entry("Decertified", statuses=("FIDO_CERTIFIED_L1", "NOT_FIDO_CERTIFIED",
+                                        "UPDATE_AVAILABLE")),
     _mds_entry("Leaky", statuses=("FIDO_CERTIFIED", "ATTESTATION_KEY_COMPROMISE",
                                   "FIDO_CERTIFIED_L1")),
     {"metadataStatement": {"description": "no model"}}, "not an entry"]}
@@ -958,7 +960,7 @@ def test_only_a_secure_element_without_software_is_device_bound(protection, boun
 
 def test_a_metadata_blob_becomes_a_trust_file_that_classes_keys():
     doc, counts, warning = mds.import_blob(_jwt(PAYLOAD), ROOT_PEM, T0)
-    assert counts == {"kept": 8, "device_bound": 2, "not_certified": 2, "withdrawn": 1,
+    assert counts == {"kept": 9, "device_bound": 3, "not_certified": 2, "withdrawn": 1,
                       "unusable": 2}
     assert warning is None and doc["source"].startswith("FIDO Metadata Service BLOB no. 87")
     assert doc["mds_blob_no"] == 87
@@ -968,7 +970,8 @@ def test_a_metadata_blob_becomes_a_trust_file_that_classes_keys():
     assert bound == {"Key 5 (synthetic)": True, "TPM 2 (synthetic)": False,
                      "Phone K (synthetic)": False, "U2F (synthetic)": True,
                      "Soft One (synthetic)": False, "Half Soft (synthetic)": False,
-                     "Self Said (synthetic)": False, "Updated (synthetic)": False}
+                     "Self Said (synthetic)": False, "Updated (synthetic)": True,
+                     "Decertified (synthetic)": False}
     reg = _register(K, _reg(K, "packed", ats.attester("packed", K)))
     assert attestation.key_class(reg.statement, reg.flags, reg.aaguid, trust, T0)[0] == \
         attestation.HARDWARE
@@ -1033,7 +1036,7 @@ def test_the_authenticator_trust_command_writes_the_file(tmp_path, capsys):
         return cli.main(["authenticator-trust", str(blob), "--root", str(root), *extra])
     assert run("-o", str(out)) == 0
     assert attestation.AuthenticatorTrust.load(json.loads(out.read_text())).blob_no == 88
-    assert "8 authenticator models, 2 of them device-bound (2 more have a secure element but " \
+    assert "9 authenticator models, 3 of them device-bound (2 more have a secure element but " \
         "no current FIDO certification); left out 1 whose trust was withdrawn" in \
         capsys.readouterr().err
     blob.write_bytes(_jwt(current))                    # no. 87 would replace no. 88
