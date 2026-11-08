@@ -6,10 +6,12 @@
 # data:  {"escalate_above_minor", "escalate_reason", "approvers": [...],
 #         "blocked_tools": {"<tool>": "<reason>"},
 #         "agent_entities": {"<agent SPIFFE ID>": ["<entity>", ...]},
-#         "default_entity"}
+#         "default_entity", "hardware_key_above_minor" (optional)}
 #
 # The amount of a call is its amount_minor argument or, for a journal entry, its total
-# debits. The decision is "allow", "deny" or "escalate", with reasons in plain language.
+# debits. The decision is "allow", "deny" or "escalate", with reasons in plain language. An
+# escalated call above hardware_key_above_minor also says "requires": "hardware-key": only an
+# approval made with a hardware security key answers it.
 package aeos.close
 
 import rego.v1
@@ -55,7 +57,13 @@ default decision := {"decision": "allow", "reasons": []}
 
 decision := {"decision": "deny", "reasons": sort(deny_reasons)} if count(deny_reasons) > 0
 
-decision := {"decision": "escalate", "reasons": [data.escalate_reason]} if {
+needs_hardware_key if amount > data.hardware_key_above_minor
+
+escalation := {"decision": "escalate", "reasons": [data.escalate_reason]} if not needs_hardware_key
+
+escalation := {"decision": "escalate", "reasons": [data.escalate_reason, "amounts this large need that approval made with a hardware security key"], "requires": "hardware-key"} if needs_hardware_key
+
+decision := escalation if {
 	count(deny_reasons) == 0
 	amount > data.escalate_above_minor
 	not approved

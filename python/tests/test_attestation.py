@@ -630,6 +630,27 @@ def test_a_policy_may_require_a_hardware_key_only_on_an_escalation():
     small = {"invoice": "I2", "amount_minor": 700}
     assert "requires" not in rules.evaluate({"tool": TOOL, "arguments": small,
                                              "invoice": dict(inv, amount_minor=700)})
+    # the quarter-end close rules take the same threshold, on a journal entry's debits
+    from aeos import workspace
+    close = {"escalate_above_minor": 500, "escalate_reason": "above the CFO's limit",
+             "approvers": [APPROVER], "blocked_tools": {}, "agent_entities": {},
+             "default_entity": "KF-US"}
+
+    def entry(debit):
+        return {"tool": "ledger.post", "arguments": {"lines": [
+            {"account": "5300", "debit_minor": debit},
+            {"account": "1300", "credit_minor": debit}]}}
+    plain = policy.Policy.load(workspace.CLOSE_WASM, close, workspace.CLOSE_ENTRYPOINT)
+    assert plain.evaluate(entry(900)) == {"decision": "escalate",
+                                          "reasons": ["above the CFO's limit"]}
+    stepped_close = policy.Policy.load(workspace.CLOSE_WASM, dict(
+        close, hardware_key_above_minor=800), workspace.CLOSE_ENTRYPOINT)
+    d = stepped_close.evaluate(entry(900))
+    assert d["decision"] == "escalate" and d["requires"] == attestation.HARDWARE_KEY
+    assert "hardware security key" in d["reasons"][1]
+    assert "requires" not in stepped_close.evaluate(entry(700))
+    assert "requires" not in stepped_close.evaluate(dict(entry(900), approval={
+        "approver": APPROVER, "decision": "approve"}))
     for bad in ({"decision": "allow", "requires": "hardware-key"},
                 {"decision": "escalate", "requires": "smart-card"}):
         with pytest.raises(policy.PolicyError, match="requires something other"):
@@ -805,6 +826,58 @@ def test_an_ed25519_approver_cannot_answer_a_hardware_key_escalation_live(steppe
     a = delegation.Approval(esc, "spiffe://acme.example/human/cfo/ed", "approve", TOOL,
                             json_digest(args), now_ms()).sign(key)
     assert "only a passkey approver can approve it" in _text(c.call(TOOL, args, approval=a))
+
+
+def test_a_gateway_with_a_hardware_key_threshold_and_no_trust_file_warns_at_start(stepped,
+                                                                                 caplog):
+    gw = stepped[0]
+    assert gw.warnings() == []
+    gw.stop()
+    trust, gw.passkey_directory.authenticators = gw.passkey_directory.authenticators, None
+    try:
+        with caplog.at_level("WARNING", logger="aeos.gateway"):
+            gw.start()
+        assert any("asks for a hardware security key above 800 minor units, but the gateway "
+                   "has no authenticator trust file" in r.getMessage() for r in caplog.records)
+    finally:
+        gw.passkey_directory.authenticators = trust
+
+
+def test_an_approval_whose_escalation_requirement_cannot_be_read_is_refused(stepped):
+    gw, log, c, rec, ctx = stepped
+    from aeos import Recorder
+    from aeos.log import now_ms
+    args = {"invoice": "I2", "amount_minor": 900}
+    esc = c.call(TOOL, args)["result"]["structuredContent"]["escalation"]
+    writer = gw.recorder(next(iter(gw._recorders)))
+    # the requirement is kept with the escalation when it is recorded, not read back later
+    reads = []
+    real = log.record
+    log.record = lambda e: reads.append(e) or real(e)
+    assert writer.requirement(esc) == attestation.HARDWARE_KEY and reads == []
+    log.record = real
+    # a recorder in another process finds it in the trail
+    other = Recorder(log, agent=APPROVER, passkeys=gw.passkey_directory)
+    assert other.requirement(esc) == attestation.HARDWARE_KEY
+    # an approval of an escalation that is not in the trail is refused, passkey or not
+    call = log.entries()[-1]
+    ghost = "b" + "a" * 58
+    size = len(log)
+    with pytest.raises(webauthn.WebAuthnError, match="not in the trail"):
+        other.approval(call, _approval(ghost, K, 60, args))
+    key = Ed25519PrivateKey.generate()
+    signed = delegation.Approval(ghost, APPROVER, "approve", TOOL, json_digest(args),
+                                 now_ms()).sign(key)
+    with pytest.raises(webauthn.WebAuthnError, match="not in the trail"):
+        other.approval(call, signed)
+    # the recorder itself refuses an Ed25519 approval of a hardware-key escalation
+    signed = delegation.Approval(esc, APPROVER, "approve", TOOL, json_digest(args),
+                                 now_ms()).sign(key)
+    with pytest.raises(webauthn.WebAuthnError, match="only a passkey approver"):
+        other.approval(call, signed)
+    assert len(log) == size
+    # and the gateway treats an unreadable requirement as a hardware-key one
+    assert gw._requirement(other, ghost) == attestation.HARDWARE_KEY
 
 
 # ---- the FIDO Metadata Service BLOB ---------------------------------------------------------

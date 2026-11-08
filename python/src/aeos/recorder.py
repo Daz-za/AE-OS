@@ -18,9 +18,9 @@ import contextlib
 import threading
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
-from .canon import cid_of_bytes, cid_parse, dag_cbor, json_digest
+from .canon import cid_of_bytes, cid_parse, cid_str, dag_cbor, json_digest
 from .log import Entry, ActionLog, make_record, now_ms
-from .passkeys import KIND_ENROLLED, Commit, Evidence, escalation_cid, requirement_of
+from .passkeys import KIND_ENROLLED, Commit, Evidence, escalation_cid
 from .webauthn import WebAuthnError
 
 _MISSING: Any = object()
@@ -44,6 +44,7 @@ class Recorder:
         self._calls: Dict[Tuple[Optional[str], str], Entry] = {}    # (session, call) -> call
         self._results: Dict[Tuple[Optional[str], str], Entry] = {}
         self._ended: Dict[str, Entry] = {}
+        self._requires: Dict[str, Any] = {}     # escalation CID -> its step-up requirement
         self._scanned = 0
         self._checkpoint_size: Optional[int] = None
 
@@ -65,6 +66,9 @@ class Recorder:
                 self._calls.setdefault((sid, cid), e)
             elif kind == "tool.result" and isinstance(cid, str):
                 self._results.setdefault((sid, cid), e)
+            elif kind == "policy.decision" and isinstance(body, dict) and \
+                    body.get("decision") == "escalate":
+                self._requires.setdefault(cid_str(e.cid), body.get("requires"))
         self._scanned = len(entries)
 
     def _append(self, kind: str, *, agent: Optional[str], obo: Optional[str],
@@ -144,11 +148,15 @@ class Recorder:
     def decision(self, call: Entry, tool: str, *, decision: str, policy: str,
                  body: Optional[Dict[str, Any]] = None, agent: Optional[str] = None,
                  on_behalf_of: Optional[str] = None, ts: Optional[int] = None) -> Entry:
-        """Record a policy decision about a call, linked to the call's record."""
+        """Record a policy decision about a call, linked to the call's record. An escalation's
+        step-up requirement (`requires`) is kept with it, for the approval that answers it."""
         with self._lock:
-            return self._append("policy.decision", agent=agent, obo=on_behalf_of, subject=tool,
-                                body={"decision": decision, "policy": policy, **(body or {})},
-                                parents=[call.cid], ts=ts)
+            e = self._append("policy.decision", agent=agent, obo=on_behalf_of, subject=tool,
+                             body={"decision": decision, "policy": policy, **(body or {})},
+                             parents=[call.cid], ts=ts)
+            if decision == "escalate":
+                self._requires[cid_str(e.cid)] = (body or {}).get("requires")
+            return e
 
     def approval(self, call: Entry, approval: Any, ts: Optional[int] = None) -> Entry:
         """Record a person's signed approval, linked to the escalation and the call. A passkey
@@ -161,7 +169,8 @@ class Recorder:
         any process wrote first is seen; a refusal raises WebAuthnError and writes nothing.
         Its use is recorded in the directory as soon as the batch is on the disk. The child
         states the assertion's key class, and an escalation that requires a hardware security
-        key (`requires`) is answered only by one.
+        key (`requires`) is approved only by one. An approval of an escalation whose
+        requirement cannot be read (it is not in the trail) is refused.
 
         Takes the directory's lock, then the recorder's, then the trail's (lock order:
         directory, gateway, recorder, file)."""
@@ -171,6 +180,16 @@ class Recorder:
                              "passkey directory")
         guard = self.passkeys.lock if self.passkeys is not None else contextlib.nullcontext()
         with guard, self._lock:
+            requires = None
+            if approval.decision == "approve":
+                try:
+                    requires = self.requirement(approval.escalation)
+                except LookupError as e:
+                    raise WebAuthnError(f"the approval was refused: {e}") from None
+                if requires is not None and not assertion:
+                    raise WebAuthnError("the approval was refused: the escalation requires a "
+                                        "hardware security key, so only a passkey approver "
+                                        "can approve it")
             body = dict(approval.fields())
             if approval.signature:
                 body["signature"] = approval.signature
@@ -185,7 +204,7 @@ class Recorder:
             if assertion:
                 ev = approval.evidence.claimed(self.passkeys.assertion_class(approval.evidence))
                 records.append(self._evidence_record(rec, approval.approver, approval.tool, ev))
-                judge = self._approval_judge(approval, ev, self.requirement(approval.escalation))
+                judge = self._approval_judge(approval, ev, requires)
             entries, commit = self.log._append_judged(records, judge=judge,
                                                       directory=self.passkeys)
             if commit is not None:
@@ -194,11 +213,16 @@ class Recorder:
             return entries[0]
 
     def requirement(self, escalation: str) -> Any:
-        """The step-up requirement the escalating decision recorded, if it is in this trail."""
-        try:
-            return requirement_of(self.log.record(self.log.entry(escalation)))
-        except (KeyError, ValueError):
-            return None
+        """The step-up requirement the escalating decision recorded (None when it set none).
+        Raises LookupError when no escalating decision with that CID is in the trail, so the
+        caller refuses rather than approve without knowing what was required."""
+        with self._lock:
+            if escalation not in self._requires:
+                self._refresh()
+            if escalation not in self._requires:
+                raise LookupError("the escalation it answers is not in the trail, so what it "
+                                  "requires cannot be read")
+            return self._requires[escalation]
 
     def _approval_judge(self, approval: Any, ev: Evidence, requires: Any = None
                         ) -> Callable[[int], Commit]:

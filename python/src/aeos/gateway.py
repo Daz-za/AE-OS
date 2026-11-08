@@ -38,7 +38,7 @@ import time
 import datetime as dt
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import logging
 
@@ -308,7 +308,7 @@ class Gateway:
                 problem = self._passkey_problem(a, args)
                 if problem:
                     return {}, problem
-            elif a.decision == "approve" and rec.requirement(a.escalation) is not None:
+            elif a.decision == "approve" and self._requirement(rec, a.escalation) is not None:
                 return {}, ("the escalation requires a hardware security key, so only a "
                             "passkey approver can approve it")
             elif not a.verify(self.principal_keys.get(a.approver, b"")):
@@ -319,6 +319,15 @@ class Gateway:
             return {}, str(e)
         return {"approver": a.approver, "decision": a.decision, "escalation": a.escalation}, \
             None
+
+    @staticmethod
+    def _requirement(rec: Recorder, escalation: str) -> Any:
+        """The escalation's step-up requirement; an unreadable one counts as required, so an
+        approval that cannot be checked against it is refused."""
+        try:
+            return rec.requirement(escalation)
+        except LookupError:
+            return attestation.HARDWARE_KEY
 
     def _passkey_problem(self, a: Any, args: Dict[str, Any]) -> Optional[str]:
         """What is wrong with a passkey approver's answer before its assertion is judged: an
@@ -378,8 +387,22 @@ class Gateway:
         if known:
             self.recorder(known[0]).end(session)
 
+    def warnings(self) -> List[str]:
+        """What in the gateway's setup will keep calls from going through, in plain words."""
+        out = []
+        data = self.policy.data if self.policy is not None else {}
+        if isinstance(data, dict) and data.get("hardware_key_above_minor") is not None and (
+                self.passkey_directory is None or self.passkey_directory.authenticators is None):
+            out.append("the policy asks for a hardware security key above "
+                       f"{data['hardware_key_above_minor']} minor units, but the gateway has no "
+                       "authenticator trust file, so no passkey counts as one and those calls "
+                       "can never be approved")
+        return out
+
     def start(self, host: str = "127.0.0.1", port: int = 0) -> int:
-        """Serve in a background thread; returns the port."""
+        """Serve in a background thread; returns the port. Logs each of `warnings()` first."""
+        for w in self.warnings():
+            LOG.warning("%s", w)
         gw = self
 
         class Handler(BaseHTTPRequestHandler):

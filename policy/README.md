@@ -7,6 +7,7 @@ The rules here are written in [Rego](https://www.openpolicyagent.org/docs/policy
 - a tool on the blocked list, such as a payment, is refused;
 - an agent may post only to the books of the entities it is given;
 - a journal entry above the threshold, counted as the sum of its debits, waits until someone on the approvers list approves it;
+- an entry above `hardware_key_above_minor`, when the data sets it, is escalated with `"requires": "hardware-key"`, so only an approval made with a hardware security key answers it;
 - a person's rejection refuses the entry.
 
 `payments.rego` holds the example payment rules used by `aeos demo --full` and the Acme workspace.
@@ -19,7 +20,7 @@ The payment rules:
 - a payment above `hardware_key_above_minor`, when the data sets it, is escalated with `"requires": "hardware-key"`, so only an approval made with a hardware security key answers it;
 - a person's rejection refuses the payment.
 
-The thresholds, the lists and the approvers come from each policy's data, which the gateway is given when it starts.
+The thresholds, the lists and the approvers come from each policy's data, which the gateway is given when it starts. A gateway given a `hardware_key_above_minor` threshold but no authenticator trust file warns when it starts: without one no passkey is a hardware security key, so every escalation above the threshold stays unanswered.
 
 To rebuild the modules in `python/src/aeos/policies/` after changing the rules, install OPA and run:
 
