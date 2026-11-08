@@ -661,10 +661,15 @@ class AuthenticatorTrust:
         self.blob_no: Optional[int] = None
 
     def shares_root(self, model: Authenticator, root: x509.Certificate) -> bool:
-        """Whether another model in the file lists `root` too."""
-        der = root.public_bytes(serialization.Encoding.DER)
-        return any(m is not model and any(r.public_bytes(serialization.Encoding.DER) == der
-                                          for r in m.roots) for m in self.models)
+        """Whether another model in the file lists `root` too: the same subject and key, so a
+        re-issued copy of one root still counts as shared."""
+        def ident(c: x509.Certificate) -> tuple:
+            key = c.public_key().public_bytes(serialization.Encoding.DER,
+                                              serialization.PublicFormat.SubjectPublicKeyInfo)
+            return (c.subject.public_bytes(), key)
+        mine = ident(root)
+        return any(m is not model and any(ident(r) == mine for r in m.roots)
+                   for m in self.models)
 
     @classmethod
     def load(cls, doc: Any) -> "AuthenticatorTrust":
