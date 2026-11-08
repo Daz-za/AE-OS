@@ -3,9 +3,12 @@
 # input: {"tool", "agent", "principal", "arguments": {...},
 #         "invoice": {...} (when the call names one), "approval": {"approver", "decision"}
 #         (when the agent repeats an escalated call with a person's signed answer)}
-# data:  {"escalate_above_minor", "sanctioned_vendors": [...], "approvers": [...]}
+# data:  {"escalate_above_minor", "sanctioned_vendors": [...], "approvers": [...],
+#         "hardware_key_above_minor" (optional)}
 #
-# The decision is "allow", "deny" or "escalate", with reasons in plain language.
+# The decision is "allow", "deny" or "escalate", with reasons in plain language. An
+# escalated payment above hardware_key_above_minor also says "requires": "hardware-key": only
+# an approval made with a hardware security key answers it.
 package aeos.payments
 
 import rego.v1
@@ -61,7 +64,16 @@ default decision := {"decision": "allow", "reasons": []}
 
 decision := {"decision": "deny", "reasons": sort(deny_reasons)} if count(deny_reasons) > 0
 
-decision := {"decision": "escalate", "reasons": ["payments above the threshold need approval from someone on the approvers list"]} if {
+needs_hardware_key if {
+	payment
+	amount > data.hardware_key_above_minor
+}
+
+escalation := {"decision": "escalate", "reasons": ["payments above the threshold need approval from someone on the approvers list"]} if not needs_hardware_key
+
+escalation := {"decision": "escalate", "reasons": ["payments above the threshold need approval from someone on the approvers list", "payments this large need that approval made with a hardware security key"], "requires": "hardware-key"} if needs_hardware_key
+
+decision := escalation if {
 	count(deny_reasons) == 0
 	needs_approval
 	not approved

@@ -14,6 +14,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from aeos import passkeys, webauthn
 from aeos.canon import cid_of_bytes, dag_cbor, json_digest
 from aeos.webauthn import DOCUMENT_TOOL
+import attestation_support as ats
 from webauthn_support import (APPROVER, ORIGIN, RP_ID, WITNESS, WITNESS_PUBLIC, SoftAuthenticator,
                               Trail, cose_eddsa, cose_es256, nonce, pin, principals, sign_in_of)
 
@@ -26,6 +27,11 @@ E = SoftAuthenticator("cfo-ed25519", alg=webauthn.COSE_EDDSA)
 Scenario = Tuple[str, Trail, Dict[str, Any], List[str]]
 LOCAL = SoftAuthenticator("cfo-laptop", rp_id="localhost", origin="http://localhost:8443")
 DEMO_CASES = {"demo: approval for a passkey made at http://localhost"}   # run with --demo
+K = SoftAuthenticator("cfo-security-key")          # a device-bound security key
+S = SoftAuthenticator("cfo-synced-passkey")        # a passkey synced by a provider
+TRUST = ats.trust()
+AUTHENTICATORS: Dict[str, Dict[str, Any]] = {}     # case -> the authenticator trust it is given
+BE, BS = webauthn.FLAG_BE, webauthn.FLAG_BS
 
 
 def flip(b: bytes, i: int = 0) -> bytes:
@@ -99,13 +105,145 @@ def _decided(allow_twice: bool = False, omit_approval: bool = False,
     return t
 
 
+def _root_registration(auth: SoftAuthenticator, fmt: str = "packed", *, flags: int = 0,
+                       model: str = ats.KEY_MODEL, **bent: Any) -> Dict[str, bytes]:
+    """The registration response of a first passkey with an attestation in `fmt`."""
+    return auth.registration(
+        webauthn.enrol_challenge(APPROVER, sign_in_of("a@acme.example").sha256), fmt=fmt,
+        attest=ats.attester(fmt, auth, model=model, **bent), flags=flags,
+        aaguid=bytes(16) if fmt == "fido-u2f" else ats.aaguid(model))
+
+
+def _keyed(auth: SoftAuthenticator, registration: Dict[str, bytes], *, enrolled: str = None,
+           asserted: str = None, flags: int = 0, requires: str = None) -> Trail:
+    """A first passkey with an attestation, approving one escalation (which may require a
+    hardware key). `enrolled` and `asserted` are the key classes the writer states."""
+    t = Trail()
+    t.enrol(auth, registration=registration, **({"key_class": enrolled} if enrolled else {}))
+    _, c, e = t.escalated_call(ARGS, requires=requires)
+    ev = ev_for(auth, 1, e, flags=flags)
+    t.approve(c, e, TOOL, ARGS, ev.claimed(asserted) if asserted else ev)
+    return t
+
+
+def _key_classes(add: Callable[..., None]) -> None:
+    """Hardware keys, synced passkeys and keys of unknown kind, and the step-up (spec 10.9)."""
+    hw = "hardware"
+    for fmt in ("packed", "tpm", "fido-u2f"):
+        add(f"hardware key ({fmt} attestation) meets a hardware-key step-up",
+            _keyed(K, _root_registration(K, fmt), enrolled=hw, asserted=hw,
+                   requires=ats.attestation.HARDWARE_KEY), [], trust=TRUST)
+    add("android-key attestation from a StrongBox cannot meet a hardware-key step-up",
+        _keyed(K, _root_registration(K, "android-key", model=ats.PHONE_MODEL),
+               enrolled="unknown", asserted="unknown", requires=ats.attestation.HARDWARE_KEY),
+        ["the approval was made with a passkey of unknown kind"], trust=TRUST)
+    add("android-key attestation from the trusted execution environment is of unknown kind",
+        _keyed(K, _root_registration(K, "android-key", model=ats.PHONE_MODEL, android_level=1),
+               enrolled="unknown", asserted="unknown"), [], trust=TRUST)
+    add("packed attestation without its AAGUID under a root shared by models is of unknown "
+        "kind",
+        _keyed(K, _root_registration(K, bind_aaguid=False), enrolled=hw, asserted=hw,
+               requires=ats.attestation.HARDWARE_KEY),
+        ["the enrolment says the passkey is a hardware security key, but it is a passkey of "
+         "unknown kind", "the evidence says a hardware security key made this assertion"],
+        trust=TRUST)
+    add("synced passkey (backup eligible, apple attestation) approves with no step-up",
+        _keyed(S, _root_registration(S, "apple", flags=BE | BS, model=ats.CLOUD_MODEL),
+               enrolled="synced", asserted="synced", flags=BE | BS), [], trust=TRUST)
+    add("synced passkey cannot meet a hardware-key step-up",
+        _keyed(S, _root_registration(S, flags=BE | BS, model=ats.CLOUD_MODEL),
+               enrolled="synced", asserted="synced", flags=BE | BS,
+               requires=ats.attestation.HARDWARE_KEY),
+        ["the approval was made with a synced passkey"], trust=TRUST)
+    add("forged attestation chain stated as a hardware key",
+        _keyed(K, _root_registration(K, forged=True), enrolled=hw, asserted=hw,
+               requires=ats.attestation.HARDWARE_KEY),
+        ["the enrolment says the passkey is a hardware security key, but it is a passkey of "
+         "unknown kind", "the evidence says a hardware security key made this assertion"],
+        trust=TRUST)
+    add("forged attestation chain stated honestly cannot meet a step-up",
+        _keyed(K, _root_registration(K, forged=True), enrolled="unknown", asserted="unknown",
+               requires=ats.attestation.HARDWARE_KEY),
+        ["the approval was made with a passkey of unknown kind"], trust=TRUST)
+    add("hardware key whose later assertion says it is backup eligible",
+        _keyed(K, _root_registration(K), enrolled=hw, asserted="synced", flags=BE),
+        ["registered as a hardware security key that cannot be backed up"], trust=TRUST)
+    t = Trail()
+    t.enrol(A)
+    t.enrol(K, confirmed_by=A, n=2, key_class=hw, registration=K.registration(
+        webauthn.add_challenge(APPROVER, "a@acme.example"), fmt="packed",
+        attest=ats.attester("packed", K), aaguid=ats.aaguid(ats.KEY_MODEL)))
+    _, c, e = t.escalated_call(ARGS, requires=ats.attestation.HARDWARE_KEY)
+    t.approve(c, e, TOOL, ARGS, ev_for(K, 3, e).claimed(hw))
+    add("hardware key added by a registered passkey meets a hardware-key step-up", t, [],
+        trust=TRUST)
+    t = Trail()
+    t.enrol(A)
+    t.enrol(K, confirmed_by=A, n=2, key_class=hw, registration=K.registration(
+        webauthn.enrol_challenge(APPROVER, sign_in_of("a@acme.example").sha256),
+        fmt="packed", attest=ats.attester("packed", K), aaguid=ats.aaguid(ats.KEY_MODEL)))
+    add("added passkey whose registration was made for a first passkey's challenge", t,
+        ["the challenge is not the one for this request"], trust=TRUST)
+    add("hardware attestation with no authenticator trust given is of unknown kind",
+        _keyed(K, _root_registration(K), enrolled="unknown", asserted="unknown",
+               requires=ats.attestation.HARDWARE_KEY),
+        ["the approval was made with a passkey of unknown kind"])
+    add("authenticator model not in the trust file",
+        _keyed(K, _root_registration(K, model="Key 9"), enrolled="unknown",
+               asserted="unknown"), [], trust=TRUST)
+    add("model the trust file does not list as device-bound",
+        _keyed(K, _root_registration(K), enrolled="unknown", asserted="unknown",
+               requires=ats.attestation.HARDWARE_KEY),
+        ["the approval was made with a passkey of unknown kind"],
+        trust=ats.trust(device_bound=False))
+    add("packed self attestation is of unknown kind",
+        _keyed(K, _root_registration(K, self_attested=True), enrolled="unknown",
+               asserted="unknown", requires=ats.attestation.HARDWARE_KEY),
+        ["the approval was made with a passkey of unknown kind"], trust=TRUST)
+    add("attestation certificate expired before the enrolment",
+        _keyed(K, _root_registration(K, expired=True), enrolled="unknown", asserted="unknown",
+               requires=ats.attestation.HARDWARE_KEY),
+        ["the approval was made with a passkey of unknown kind"], trust=TRUST)
+    add("escalation requires a step-up this verifier does not know",
+        _keyed(K, _root_registration(K), enrolled=hw, asserted=hw, requires="smart-card"),
+        ["requires 'smart-card', which this verifier cannot check"], trust=TRUST)
+    t = _keyed(K, _root_registration(K), enrolled=hw, asserted=hw)
+    t.records[-1]["body"]["backup_eligible"] = True
+    add("evidence states backup flags its authenticator data does not carry", t,
+        ["states backup flags its authenticator data does not carry"], trust=TRUST)
+    t = Trail()
+    t.enrol(K, registration=K.registration(
+        webauthn.enrol_challenge(APPROVER, sign_in_of("a@acme.example").sha256), fmt="packed",
+        attest=lambda ad, cdh: ats.attester("packed", K)(ad, b"\x00" * 32),
+        aaguid=ats.aaguid(ats.KEY_MODEL)))
+    add("attestation signed over another registration", t,
+        ["the attestation signature does not verify"], trust=TRUST)
+    t = Trail()
+    t.enrol(K, registration=_root_registration(K, "android-key", tee=False))
+    add("android-key attestation enforced only in software", t,
+        ["not generated in, and for signing by, secure hardware"], trust=TRUST)
+    t = Trail()
+    t.enrol(K, registration=_root_registration(K, "android-key", android_level=0))
+    add("android-key attestation of a key held in software", t,
+        ["the Android key is held in software"], trust=TRUST)
+    t = Trail()
+    t.enrol(K, registration=_root_registration(K, "tpm", flags=BE))
+    _, c, e = t.escalated_call(ARGS)
+    t.approve(c, e, TOOL, ARGS, ev_for(K, 1, e).claimed("unknown"))
+    add("assertion of a backup-eligible registration that says it is not", t,
+        ["backup eligibility changed since it was registered"], trust=TRUST)
+
+
 def scenarios() -> List[Scenario]:
     out: List[Scenario] = []
     p = principals()
 
-    def add(name: str, trail: Trail, expect: Sequence[str], pr: Dict[str, Any] = None) -> None:
+    def add(name: str, trail: Trail, expect: Sequence[str], pr: Dict[str, Any] = None,
+            trust: Dict[str, Any] = None) -> None:
         assert name not in {o[0] for o in out}, name
         out.append((name, trail, pr if pr is not None else p, list(expect)))
+        if trust is not None:
+            AUTHENTICATORS[name] = trust
 
     # 1. a valid approval
     add("valid single approval (ES256)", _single(), [])
@@ -425,9 +563,14 @@ def scenarios() -> List[Scenario]:
             ("first passkey registered as a create, not a get", lambda: A.registration(
                 webauthn.enrol_challenge(APPROVER, sign_in_of("a@acme.example").sha256),
                 client_type="webauthn.get"), "client data type is not webauthn.create"),
-            ("first passkey registered with an attestation format", lambda: A.registration(
-                webauthn.enrol_challenge(APPROVER, sign_in_of("a@acme.example").sha256),
-                fmt="packed"), "format is not none")):
+            ("first passkey registered with an attestation format this verifier does not "
+             "support", lambda: A.registration(
+                 webauthn.enrol_challenge(APPROVER, sign_in_of("a@acme.example").sha256),
+                 fmt="android-safetynet"), "'android-safetynet' is not supported"),
+            ("first passkey registered with a packed attestation that has no signature",
+             lambda: A.registration(
+                 webauthn.enrol_challenge(APPROVER, sign_in_of("a@acme.example").sha256),
+                 fmt="packed"), "self attestation's algorithm is not the credential's")):
         t = Trail()
         t.enrol(A, registration=reg())
         add(name, t, [why])
@@ -599,6 +742,7 @@ def scenarios() -> List[Scenario]:
     t.approve(c1, e, TOOL, ARGS, ev_for(A, 1, e))
     add("decision recorded before the approval it rests on", t,
         ["not an earlier, verified approval of this call"])
+    _key_classes(add)
     return out
 
 

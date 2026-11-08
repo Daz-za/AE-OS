@@ -16,6 +16,9 @@ the nonce's job, checked by the caller.
 Public keys are COSE_Key maps in the CTAP2 canonical encoding (WebAuthn section 6.5.1.1) and are
 parsed strictly: a key that is not canonical, is on another curve, is off the curve, or is of
 small order is refused.
+
+A registration response (section 7.1) is checked the same way, and its attestation statement is
+verified by `attestation.verify_statement` in any of the formats of section 8.
 """
 from __future__ import annotations
 
@@ -41,11 +44,13 @@ ESCALATED_CONTEXT = b"aeos/request/v2\n"          # a request that answers one e
 BATCH_CONTEXT = b"aeos/approval-batch/v2\n"
 BATCH_CONTEXT_NAME = "aeos/approval-batch/v2"
 ENROL_CONTEXT = b"aeos/enrol-challenge/v1\n"
+ADD_CONTEXT = b"aeos/add-challenge/v1\n"         # a passkey added by a registered one
 RESERVED = "aeos/"                                 # tool names no approval may be for
 CID_LEN = 36                                       # a binary CIDv1 (dag-cbor, sha2-256)
 DOCUMENT_TOOL = "aeos/document"          # the leading item of a batch that signs a document
 MIN_NONCE = 16
 MAX_BATCH = 256
+MAX_ATTESTATION = 16384                  # an attestation object, with its certificate chain
 
 COSE_ES256, COSE_EDDSA = -7, -8
 FLAG_UP, FLAG_BE, FLAG_BS, FLAG_UV, FLAG_AT, FLAG_ED = 0x01, 0x08, 0x10, 0x04, 0x40, 0x80
@@ -108,6 +113,13 @@ def enrol_challenge(approver: str, identity_evidence_sha256: bytes) -> bytes:
                           + identity_evidence_sha256).digest()
 
 
+def add_challenge(approver: str, identity: str) -> bytes:
+    """The challenge of the registration response of a passkey added by a registered one:
+    SHA-256(b"aeos/add-challenge/v1\\n" || approver || b"\\n" || identity)."""
+    return hashlib.sha256(ADD_CONTEXT + approver.encode("utf-8") + b"\n"
+                          + identity.encode("utf-8")).digest()
+
+
 def assertion_sha256(authenticator_data: bytes, client_data_json: bytes, signature: bytes) -> bytes:
     """SHA-256(authenticator_data || SHA-256(client_data_json) || signature)."""
     return hashlib.sha256(authenticator_data + hashlib.sha256(client_data_json).digest()
@@ -150,10 +162,13 @@ def _head(data: bytes, pos: int) -> Tuple[int, int, int]:
     return major, n, pos + width
 
 
-def decode_cbor(data: bytes, pos: int = 0, depth: int = 0) -> Tuple[Any, int]:
+def decode_cbor(data: bytes, pos: int = 0, depth: int = 0, *,
+                canonical: bool = True) -> Tuple[Any, int]:
     """(value, next position) of one CTAP2 canonical CBOR item: integers, byte and text strings,
     arrays, maps with integer or text keys in canonical order (length first, then bytewise, no
-    repeats), booleans and null. Floats, tags and indefinite lengths are refused."""
+    repeats), booleans and null. Floats, tags and indefinite lengths are refused. With
+    `canonical` false, map keys may come in any order but still never repeat (for an
+    attestation object, which a browser encodes)."""
     if depth > 8:
         raise WebAuthnError("the CBOR is nested too deeply")
     major, n, pos = _head(data, pos)
@@ -174,7 +189,7 @@ def decode_cbor(data: bytes, pos: int = 0, depth: int = 0) -> Tuple[Any, int]:
     if major == 4:
         out: List[Any] = []
         for _ in range(n):
-            v, pos = decode_cbor(data, pos, depth + 1)
+            v, pos = decode_cbor(data, pos, depth + 1, canonical=canonical)
             out.append(v)
         return out, pos
     if major == 5:
@@ -187,10 +202,12 @@ def decode_cbor(data: bytes, pos: int = 0, depth: int = 0) -> Tuple[Any, int]:
                 raise WebAuthnError("a CBOR map key is not an integer or text")
             k, pos = decode_cbor(data, pos, depth + 1)
             raw = data[start:pos]
-            if last is not None and not (len(raw), raw) > (len(last), last):
+            if canonical and last is not None and not (len(raw), raw) > (len(last), last):
                 raise WebAuthnError("the CBOR map is not in canonical key order (or repeats a key)")
+            if k in m:
+                raise WebAuthnError("the CBOR map repeats a key")
             last = raw
-            m[k], pos = decode_cbor(data, pos, depth + 1)
+            m[k], pos = decode_cbor(data, pos, depth + 1, canonical=canonical)
         return m, pos
     if major == 7 and n in (20, 21, 22):
         return {20: False, 21: True, 22: None}[n], pos
@@ -412,25 +429,37 @@ def verify_assertion(public_key: Tuple[int, Any], authenticator_data: bytes,
     return Assertion(flags, int.from_bytes(ad[33:37], "big"))
 
 
+@dataclass(frozen=True)
+class Registration:
+    """A registration response that stands: its verified attestation statement, the flags of
+    its authenticator data and the authenticator model it names (AAGUID)."""
+    statement: Any                  # attestation.Statement
+    flags: int
+    aaguid: bytes
+    sign_count: int
+
+
 def verify_registration(client_data_json: bytes, attestation_object: bytes, *, rp_id: str,
                         origin: str, challenge: bytes, credential_id: bytes,
-                        public_key: bytes) -> None:
-    """Check the registration response ("none" attestation) of a root passkey: made with user
-    presence and verification, at the enrolled relying party and origin, for this challenge,
-    and holding the credential id and public key being enrolled. A "none" attestation carries
-    no signature: this ties the pieces together, it does not prove possession of the key."""
+                        public_key: bytes) -> Registration:
+    """Check the registration response of a passkey: made with user presence and
+    verification, at the enrolled relying party and origin, for this challenge, holding the
+    credential id and public key being enrolled, with an attestation statement in one of the
+    formats of WebAuthn section 8 that verifies (`attestation.verify_statement`). A `none`
+    attestation carries no signature: it ties the pieces together, it does not prove
+    possession of the key. Whether the attestation's chain is trusted is a separate question
+    (`attestation.key_class`)."""
+    from . import attestation
     if not (isinstance(client_data_json, bytes) and isinstance(attestation_object, bytes)):
         raise WebAuthnError("the registration response is incomplete")
-    if len(client_data_json) > 8192 or len(attestation_object) > 4096:
+    if len(client_data_json) > 8192 or len(attestation_object) > MAX_ATTESTATION:
         raise WebAuthnError("the registration response is oversized")
     _check_client(_client_data(client_data_json), type_="webauthn.create", origin=origin,
                   challenge=challenge)
-    obj, end = decode_cbor(attestation_object)
+    obj, end = decode_cbor(attestation_object, canonical=False)
     if end != len(attestation_object) or not isinstance(obj, dict) or \
             set(obj) != {"fmt", "attStmt", "authData"}:
         raise WebAuthnError("the attestation object is not exactly fmt, attStmt and authData")
-    if obj["fmt"] != "none" or obj["attStmt"] != {}:
-        raise WebAuthnError("the attestation format is not none")
     ad = obj["authData"]
     if not isinstance(ad, bytes):
         raise WebAuthnError("the attestation object holds no authenticator data")
@@ -447,9 +476,18 @@ def verify_registration(client_data_json: bytes, attestation_object: bytes, *, r
     if ad[start:key_end] != public_key:
         raise WebAuthnError("the registered public key is not the one enrolled")
     _check_extensions(ad[key_end:], flags)
+    alg, key = parse_cose_key(public_key)
+    try:
+        statement = attestation.verify_statement(
+            obj["fmt"], obj["attStmt"], ad, hashlib.sha256(client_data_json).digest(),
+            ad[37:53], alg, key)
+    except attestation.AttestationError as e:
+        raise WebAuthnError(f"the attestation statement does not verify: {e}") from None
+    return Registration(statement, flags, ad[37:53], int.from_bytes(ad[33:37], "big"))
 
 
-__all__: List[str] = ["Assertion", "WebAuthnError", "assertion_sha256", "batch_digest",
+__all__: List[str] = ["Assertion", "Registration", "WebAuthnError", "add_challenge",
+                      "assertion_sha256", "batch_digest",
                       "challenge_for", "check_origin", "decode_cbor", "enrol_challenge",
                       "parse_cose_key", "request_digest", "verify_assertion",
                       "verify_registration"]

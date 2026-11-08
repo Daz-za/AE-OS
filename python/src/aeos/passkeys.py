@@ -10,6 +10,11 @@ Records that carry it (spec/action-records-v1.md, section 10):
     x-passkey-revoked     a passkey leaves it
     x-approver-rebound    the approver's identity changed, which ends every earlier passkey
 
+Each passkey has a key class (`attestation.key_class`): `hardware`, `synced` or `unknown`,
+decided from its registration response and the authenticator trust the auditor gives. Each
+assertion record states the class and the backup flags of its authenticator data, and an
+escalation can require a hardware security key (`requires: "hardware-key"`).
+
 The registry is rebuilt from those records in trail order, in the same pass that checks the
 approvals, so "was this passkey the approver's when the approval was recorded" is answered by
 position in the trail, which the checkpoints commit to, not by a timestamp the writer chose. The
@@ -18,16 +23,20 @@ passkey, never the ones the evidence claims.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from .attestation import (HARDWARE, KEY_CLASSES, REQUIREMENTS, SYNCED, UNKNOWN,
+                          AuthenticatorTrust, key_class)
 from .canon import cid_parse, cid_str, json_digest
-from .webauthn import (BATCH_CONTEXT_NAME, CID_LEN, DOCUMENT_TOOL, MAX_BATCH, RESERVED,
-                       WebAuthnError, assertion_sha256, b64url, batch_digest, challenge_for,
-                       check_origin, enrol_challenge, parse_cose_key, request_digest, unb64url,
-                       verify_assertion, verify_registration)
+from .webauthn import (BATCH_CONTEXT_NAME, CID_LEN, DOCUMENT_TOOL, FLAG_BE, FLAG_BS, MAX_BATCH,
+                       RESERVED, WebAuthnError, add_challenge, assertion_sha256, b64url,
+                       batch_digest, challenge_for, check_origin, enrol_challenge,
+                       parse_cose_key, request_digest, unb64url, verify_assertion,
+                       verify_registration)
 
 KIND_ENROLLED = "x-passkey-enrolled"
 KIND_REVOKED = "x-passkey-revoked"
@@ -38,6 +47,8 @@ ENROL_TOOL = "aeos/passkey-enrol"          # the "tool" a confirmation of a regi
 REVOKE_TOOL = "aeos/passkey-revoke"
 REBIND_TOOL = "aeos/approver-rebind"
 REGISTRY_KINDS = (KIND_ENROLLED, KIND_REVOKED, KIND_REBOUND)
+CLASS_WORDS = {HARDWARE: "a hardware security key", SYNCED: "a synced passkey",
+               UNKNOWN: "a passkey of unknown kind"}
 
 Commit = Callable[[], None]                     # applies what a judgement found, once
 Record = Tuple[int, bytes, Dict[str, Any]]      # (index in the trail, binary CID, record)
@@ -94,10 +105,20 @@ class Evidence:
     origin: str
     request_digest: bytes
     batch: Optional[Tuple[Item, ...]] = None
+    key_class: Optional[str] = None    # the writer's statement of the class (spec 10.9)
 
     @property
     def assertion_sha256(self) -> bytes:
         return assertion_sha256(self.authenticator_data, self.client_data_json, self.signature)
+
+    @property
+    def flags(self) -> int:
+        """The flags byte of the authenticator data (0 if it is too short to hold one)."""
+        return self.authenticator_data[32] if len(self.authenticator_data) > 32 else 0
+
+    def claimed(self, key_class_: str) -> "Evidence":
+        """This evidence stating `key_class_`, with the backup flags of its authenticator data."""
+        return dataclasses.replace(self, key_class=key_class_)
 
     def summary(self) -> Dict[str, Any]:
         """What the approval record itself holds."""
@@ -110,6 +131,10 @@ class Evidence:
             "client_data_json": self.client_data_json, "signature": self.signature,
             "nonce": self.nonce, "rp_id": self.rp_id, "origin": self.origin,
             "request_digest": self.request_digest, "assertion_sha256": self.assertion_sha256}
+        if self.key_class is not None:
+            out.update(key_class=self.key_class,
+                       backup_eligible=bool(self.flags & FLAG_BE),
+                       backup_state=bool(self.flags & FLAG_BS))
         if self.batch is not None:
             out["batch"] = {"context": BATCH_CONTEXT_NAME, "items": [
                 {"tool": t, "args_sha256": a, **({"escalation": e} if e else {})}
@@ -137,12 +162,25 @@ class Evidence:
                     raise WebAuthnError("a batch item is malformed")
                 parsed.append((it["tool"], it["args_sha256"], esc))
             batch = tuple(parsed)
+        claim = [body.get(k) for k in ("key_class", "backup_eligible", "backup_state")]
+        if any(c is not None for c in claim) and (
+                claim[0] not in KEY_CLASSES or not all(isinstance(c, bool) for c in claim[1:])):
+            raise WebAuthnError("the evidence's key_class, backup_eligible and backup_state are "
+                                "not all there, or are malformed")
         ev = cls(_bytes(body, "credential_id"), _bytes(body, "authenticator_data"),
                  _bytes(body, "client_data_json"), _bytes(body, "signature"),
                  _bytes(body, "nonce"), _text(body, "rp_id"), _text(body, "origin"),
-                 _bytes(body, "request_digest", 32), batch)
+                 _bytes(body, "request_digest", 32), batch, claim[0])
         if _bytes(body, "assertion_sha256", 32) != ev.assertion_sha256:
             raise WebAuthnError("the assertion does not match its digest")
+        if claim[0] is not None:
+            if (claim[1], claim[2]) != (bool(ev.flags & FLAG_BE), bool(ev.flags & FLAG_BS)):
+                raise WebAuthnError("the evidence states backup flags its authenticator data "
+                                    "does not carry")
+            if (claim[0] == SYNCED) != claim[1]:
+                raise WebAuthnError("the evidence's key class contradicts its backup "
+                                    "eligibility (a passkey is synced exactly when it is "
+                                    "backup eligible)")
         return ev
 
     def to_json(self) -> Dict[str, Any]:
@@ -243,6 +281,9 @@ class Credential:
     basis: str                         # the identity evidence its epoch rests on
     revoked_at: Optional[int] = None
     sign_count: int = 0                # the highest counter seen
+    key_class: str = UNKNOWN           # from its registration and the authenticator trust
+    backup_eligible: Optional[bool] = None   # BE as registered, or as first asserted
+    registered: bool = False           # enrolled with a registration response
 
 
 @dataclass
@@ -323,9 +364,11 @@ class Directory:
     reads a trail that is already written.
     """
 
-    def __init__(self, principals: Dict[str, Principal], demo: bool = False) -> None:
+    def __init__(self, principals: Dict[str, Principal], demo: bool = False,
+                 authenticators: Optional[AuthenticatorTrust] = None) -> None:
         self.principals = principals
         self.demo = demo                   # accept http://localhost, and say so in a note
+        self.authenticators = authenticators   # the models and roots trusted for key classes
         self.lock = OwnedLock()
         self._version = 0                  # moves on with every change applied
         self.seen = 0                      # trail positions already brought in by sync()
@@ -337,8 +380,9 @@ class Directory:
         self.notes: List[Tuple[str, str]] = []      # (kind, text): binding, clone or reject
         self.ledger = UseLedger()
         self.children: Dict[bytes, List[Evidence]] = {}
-        # (assertion, was a batch, pinned, approver, basis) for each approval verified
-        self.verified: List[Tuple[bytes, bool, bool, str, str]] = []
+        # (assertion, was a batch, pinned, approver, basis, key class, step-up) for each
+        # approval verified
+        self.verified: List[Tuple[bytes, bool, bool, str, str, str, Optional[str]]] = []
         self.witness_checked = 0           # verified approvals whose gateway signature verified
         self.witness_unchecked = 0         # ... that carry one and no witness key was given
         self.rejections = 0
@@ -371,6 +415,53 @@ class Directory:
                 c.identity != self.identity_at(approver, position):
             return ("the passkey was enrolled for a different identity from the approver's "
                     "current one at this record")
+        return None
+
+    def assertion_class(self, ev: Evidence) -> str:
+        """The key class of an assertion: synced when its authenticator data says it is backup
+        eligible, hardware when its credential was registered as a hardware key, otherwise
+        unknown. This is what a writer states in the evidence (`Evidence.claimed`)."""
+        if ev.flags & FLAG_BE:
+            return SYNCED
+        c = self.creds.get(ev.credential_id)
+        return HARDWARE if c is not None and c.key_class == HARDWARE else UNKNOWN
+
+    def registration_class(self, body: Dict[str, Any], ts: int) -> str:
+        """The key class an enrolment body's registration response gives, for a writer to
+        state in the record before the trail judges it (UNKNOWN if it has none or it does not
+        stand; the judgement then refuses or corrects it)."""
+        reg, who, identity = body.get("registration"), body.get("approver"), body.get("identity")
+        if not isinstance(reg, dict) or not isinstance(who, str) or not isinstance(identity, str):
+            return UNKNOWN
+        try:
+            if self.has_valid(who, self.seen):
+                challenge = add_challenge(who, identity)
+            else:
+                challenge = enrol_challenge(who, SignIn.parse(body.get("identity_evidence")).sha256)
+            r = verify_registration(reg.get("client_data_json"), reg.get("attestation_object"),
+                                    rp_id=body.get("rp_id"), origin=body.get("origin"),
+                                    challenge=challenge, credential_id=body.get("credential_id"),
+                                    public_key=body.get("public_key"))
+        except (WebAuthnError, TypeError, ValueError):
+            return UNKNOWN
+        return key_class(r.statement, r.flags, r.aaguid, self.authenticators, ts)[0]
+
+    def _trust_words(self) -> str:
+        return ("(this audit was given no authenticator trust file; see aeos audit "
+                "--authenticators)" if self.authenticators is None
+                else "(with the authenticator trust you gave)")
+
+    def requirement_problem(self, requires: Any, ev: Evidence) -> Optional[str]:
+        """Why an assertion does not meet an escalation's step-up requirement, or None."""
+        if requires is None:
+            return None
+        if requires not in REQUIREMENTS:
+            return (f"the escalation requires {requires!r}, which this verifier cannot check, "
+                    "so no approval meets it")
+        got = self.assertion_class(ev)
+        if got != HARDWARE:
+            return ("the escalation requires a hardware security key, but the approval was "
+                    f"made with {CLASS_WORDS[got]}")
         return None
 
     # -- the checks --
@@ -410,7 +501,8 @@ class Directory:
             return errs
 
     def judge(self, *, approver: str, position: int, key: str, tool: str, args_sha256: bytes,
-              escalation: Optional[bytes], ev: Evidence) -> Tuple[List[str], Optional[Commit]]:
+              escalation: Optional[bytes], ev: Evidence, requires: Any = None
+              ) -> Tuple[List[str], Optional[Commit]]:
         """Check one assertion as `check` does, changing nothing: the problems, or none and the
         function that records the assertion's use, to call once the record is on disk.
         `escalation` is the escalation an approval answers, or None for a confirmation of a
@@ -418,10 +510,14 @@ class Directory:
         answers, so a retry of the same answer is not a replay.
 
         The calling thread must hold the directory lock from here until it commits (lock
-        order: directory, gateway, recorder, file)."""
+        order: directory, gateway, recorder, file). `requires` is the escalation's step-up
+        requirement, which the assertion must meet."""
         self._require_lock("judging an assertion")
         effects: List[Commit] = []
         errs = self._check(approver, position, key, tool, args_sha256, escalation, ev, effects)
+        why = None if errs else self.requirement_problem(requires, ev)
+        if why:
+            errs = [why]
         return (errs, None) if errs else ([], self._committer(effects))
 
     def _check(self, approver: str, position: int, key: str, tool: str, args_sha256: bytes,
@@ -470,6 +566,18 @@ class Directory:
                                    challenge=challenge_for(ev.nonce, expected))
         except WebAuthnError as e:
             return [f"the passkey's assertion does not stand: {e}"]
+        be = bool(got.flags & FLAG_BE)
+        if c.backup_eligible is not None and be != c.backup_eligible:
+            if c.key_class == HARDWARE:
+                return ["the passkey was registered as a hardware security key that cannot be "
+                        "backed up, but this assertion says it is backup eligible: it may "
+                        "have been copied"]
+            return ["the passkey's backup eligibility changed since it was "
+                    + ("registered" if c.registered else "first used")
+                    + ", which an authenticator never does"]
+        if ev.key_class == HARDWARE and self.assertion_class(ev) != HARDWARE:
+            return ["the evidence says a hardware security key made this assertion, but its "
+                    "passkey was not registered as one " + self._trust_words()]
         used, record_use = self.ledger.judge(position, ev, key, item)
         if used:
             return [used]
@@ -481,6 +589,8 @@ class Directory:
 
         def count() -> None:
             c.sign_count = max(c.sign_count, got.sign_count)
+            if c.backup_eligible is None:
+                c.backup_eligible = be
 
         effects.append(count)
         return []
@@ -560,10 +670,11 @@ class Directory:
 
     @classmethod
     def build(cls, records: List[Tuple[int, bytes, Any]], principals: Dict[str, Principal],
-              demo: bool = False) -> "Directory":
+              demo: bool = False, authenticators: Optional[AuthenticatorTrust] = None
+              ) -> "Directory":
         """The directory a live writer holds after these records: the registry, and the uses
         of every assertion an approval recorded, applied in trail order."""
-        d = cls(principals, demo=demo)
+        d = cls(principals, demo=demo, authenticators=authenticators)
         with d.lock:
             d.sync(records)
         return d
@@ -657,15 +768,30 @@ class Directory:
             self._note(effects, "demo", f"record {index}: the origin {origin} is accepted only "
                        "because this audit was run with --demo")
         root = not self.has_valid(who, index)
+        reg = b.get("registration")
+        if root and not isinstance(reg, dict):
+            raise WebAuthnError("a first passkey needs its registration response")
+        if reg is not None and not isinstance(reg, dict):
+            raise WebAuthnError("the registration response is malformed")
+        claim = b.get("key_class")
+        if claim is not None and claim not in KEY_CLASSES:
+            raise WebAuthnError(f"the key class {claim!r} is not hardware, synced or unknown")
         if root:
             sign_in = SignIn.parse(b.get("identity_evidence"))
-            reg = b.get("registration")
-            if not isinstance(reg, dict):
-                raise WebAuthnError("a first passkey needs its registration response")
-            verify_registration(reg.get("client_data_json"), reg.get("attestation_object"),
-                                rp_id=rp_id, origin=origin,
-                                challenge=enrol_challenge(who, sign_in.sha256),
-                                credential_id=cred_id, public_key=public_key)
+            challenge = enrol_challenge(who, sign_in.sha256)
+        else:
+            challenge = add_challenge(who, identity)
+        registration = None if reg is None else verify_registration(
+            reg.get("client_data_json"), reg.get("attestation_object"), rp_id=rp_id,
+            origin=origin, challenge=challenge, credential_id=cred_id, public_key=public_key)
+        ts = rec.get("ts")
+        if registration is None:
+            cls_, why = key_class(None, None, b"", self.authenticators, 0)
+        else:
+            cls_, why = key_class(registration.statement, registration.flags,
+                                  registration.aaguid, self.authenticators,
+                                  ts if isinstance(ts, int) and not isinstance(ts, bool) else 0)
+        if root:
             pinned = self._pinned(who, cred_id, public_key, rp_id, origin, identity)
             basis = sign_in.describe()
             epoch = self.epoch_at(who, index) + 1   # the epoch this enrolment begins
@@ -684,8 +810,20 @@ class Directory:
             pinned, basis = self.basis[who]
             epoch = self.epoch_at(who, index)
         credential = Credential(who, cred_id, public_key, key, rp_id, origin, identity, epoch,
-                                index, root, pinned, basis)
+                                index, root, pinned, basis, key_class=cls_,
+                                backup_eligible=None if registration is None
+                                else bool(registration.flags & FLAG_BE),
+                                registered=registration is not None)
         effects.append(lambda: self.creds.__setitem__(cred_id, credential))
+        self._note(effects, "key", f"record {index}: the passkey {b64url(cred_id)[:12]} of "
+                   f"{who} is {CLASS_WORDS[cls_]}: {why}")
+        if claim is not None and claim != cls_:
+            text = (f"record {index}: the enrolment says the passkey is {CLASS_WORDS[claim]}, "
+                    f"but it is {CLASS_WORDS[cls_]} " + self._trust_words())
+            if claim == HARDWARE or SYNCED in (claim, cls_):
+                effects.append(lambda: self.problems.append(text))
+            else:
+                self._note(effects, "key", text)
 
     def _note(self, effects: List[Commit], kind: str, text: str) -> None:
         effects.append(lambda: self.notes.append((kind, text)))
@@ -829,7 +967,22 @@ def check_approval(d: Directory, index: int, cid: bytes, rec: Dict[str, Any],
     why = document_problem(ev, arguments_of(escalation, b["args_sha256"]))
     if why:
         return [why]
+    requires = requirement_of(escalation)
+    why = d.requirement_problem(requires, ev)
+    if why:
+        return [why]
+    got = d.assertion_class(ev)
+    if ev.key_class is not None and ev.key_class != got:
+        d.notes.append(("key", f"record {index}: the evidence says {CLASS_WORDS[ev.key_class]} "
+                        f"made the approval, but it was {CLASS_WORDS[got]} "
+                        + d._trust_words()))
     c = d.creds[ev.credential_id]
     d.verified.append((ev.assertion_sha256, ev.batch is not None, c.pinned, b["approver"],
-                       c.basis))
+                       c.basis, got, requires))
     return []
+
+
+def requirement_of(escalation: Any) -> Any:
+    """The step-up requirement an escalating decision records (`requires`), or None."""
+    body = escalation.get("body") if isinstance(escalation, dict) else None
+    return body.get("requires") if isinstance(body, dict) else None

@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import wasmtime
 
+from .attestation import REQUIREMENTS
 from .canon import canonical_json
 
 POLICY = "aeos-policy/v0"
@@ -27,6 +28,7 @@ PAGES = 64                     # initial memory: 64 pages of 64 KiB (4 MiB)
 MAX_PAGES = 256                # at most 16 MiB
 FUEL = 50_000_000              # instructions a single decision may run
 DECISIONS = ("allow", "deny", "escalate")
+
 
 
 class PolicyError(Exception):
@@ -83,7 +85,8 @@ class Policy:
         return store, instance.exports(store), memory
 
     def evaluate(self, input_doc: Dict[str, Any]) -> Dict[str, Any]:
-        """The policy's decision for `input_doc`: {"decision", "reasons"}."""
+        """The policy's decision for `input_doc`: {"decision", "reasons"}, and for an
+        escalation that needs a hardware security key, "requires": "hardware-key"."""
         try:
             store, ex, memory = self._instance()
             if ex["opa_wasm_abi_version"].value(store) != 1 or \
@@ -111,10 +114,7 @@ class Policy:
             raise PolicyError(f"the policy failed to run: {str(e).splitlines()[0]}") from e
         if not result or "result" not in result[0]:
             raise PolicyError("the policy gave no decision for this input")
-        d = result[0]["result"]
-        if not isinstance(d, dict) or d.get("decision") not in DECISIONS:
-            raise PolicyError("the policy's answer is not a decision")
-        return {"decision": d["decision"], "reasons": list(d.get("reasons") or [])}
+        return answer(result[0]["result"])
 
     @staticmethod
     def _cstring(store: wasmtime.Store, memory: wasmtime.Memory, addr: int) -> bytes:
@@ -139,6 +139,20 @@ class Policy:
 
     def _read_json(self, store, ex, memory, value_addr: int) -> Any:
         return json.loads(self._cstring(store, memory, ex["opa_json_dump"](store, value_addr)))
+
+
+def answer(d: Any) -> Dict[str, Any]:
+    """The decision a policy's result stands for: {"decision", "reasons"}, and "requires"
+    when an escalation needs a hardware security key. PolicyError if it is not one."""
+    if not isinstance(d, dict) or d.get("decision") not in DECISIONS:
+        raise PolicyError("the policy's answer is not a decision")
+    out = {"decision": d["decision"], "reasons": list(d.get("reasons") or [])}
+    if d.get("requires") is not None:
+        if d["decision"] != "escalate" or d["requires"] not in REQUIREMENTS:
+            raise PolicyError("the policy's answer requires something other than a hardware "
+                              "key, or on a decision that is not an escalation")
+        out["requires"] = d["requires"]
+    return out
 
 
 def data_sha256(data: Dict[str, Any]) -> bytes:

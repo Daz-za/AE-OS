@@ -12,7 +12,7 @@ from aeos.canon import cid_of_bytes, cid_str, dag_cbor, decode_dag_cbor, json_di
 from aeos.gateway import AgentClient, Gateway
 from aeos.log import now_ms
 from crash_support import die_after, fork, start_child
-from passkey_scenarios import ARGS, DEMO_CASES, TOOL, A, B, E, scenarios
+from passkey_scenarios import ARGS, AUTHENTICATORS, DEMO_CASES, TOOL, A, B, E, scenarios
 from webauthn_support import (APPROVER, SoftAuthenticator, Trail, cose_es256, nonce, pin,
                               principals, sign_in_of)
 
@@ -23,7 +23,8 @@ CASES = scenarios()
 @pytest.mark.parametrize("name,trail,pr,expect", CASES, ids=[c[0] for c in CASES])
 def test_each_scenario_gives_its_verdict(name, trail, pr, expect):
     findings, problems, notes = audit.check_approvals(trail.triples(), pr,
-                                                      demo=name in DEMO_CASES)
+                                                      demo=name in DEMO_CASES,
+                                                      authenticators=AUTHENTICATORS.get(name))
     assert len(problems) == len(expect), problems
     for want, got in zip(expect, problems):
         assert want in got
@@ -55,7 +56,8 @@ def test_the_vectors_replay_from_their_bytes():
             assert cid_str(cid_of_bytes(raw)) == r["cid"]
             triples.append((i, cid_of_bytes(raw), decode_dag_cbor(raw)))
         _, problems, notes = audit.check_approvals(triples, c["principals"],
-                                                   demo=c.get("demo", False))
+                                                   demo=c.get("demo", False),
+                                                   authenticators=c.get("authenticators"))
         assert problems == c["expect_problems"] and notes == c["expect_notes"], c["name"]
     assert doc["public_suffixes"] == sorted(webauthn.PUBLIC_SUFFIXES) and \
         "co.za" in doc["public_suffixes"]
