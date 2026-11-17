@@ -57,6 +57,13 @@ class Policy:
 
     def _instance(self) -> Tuple[wasmtime.Store, Any, wasmtime.Memory]:
         store = wasmtime.Store(self._engine)
+        try:
+            return self._build(store)
+        except BaseException:
+            store.close()
+            raise
+
+    def _build(self, store: wasmtime.Store) -> Tuple[wasmtime.Store, Any, wasmtime.Memory]:
         store.set_fuel(FUEL)
         memory = wasmtime.Memory(store, wasmtime.MemoryType(wasmtime.Limits(PAGES, MAX_PAGES)))
 
@@ -87,6 +94,7 @@ class Policy:
     def evaluate(self, input_doc: Dict[str, Any]) -> Dict[str, Any]:
         """The policy's decision for `input_doc`: {"decision", "reasons"}, and for an
         escalation that needs a hardware security key, "requires": "hardware-key"."""
+        store = None
         try:
             store, ex, memory = self._instance()
             if ex["opa_wasm_abi_version"].value(store) != 1 or \
@@ -112,6 +120,10 @@ class Policy:
             raise PolicyError(f"the policy failed to run: {str(e).splitlines()[0]}") from e
         except wasmtime.Trap as e:
             raise PolicyError(f"the policy failed to run: {str(e).splitlines()[0]}") from e
+        finally:
+            # The store's callbacks hold the store itself, so only closing it frees its memory.
+            if store is not None:
+                store.close()
         if not result or "result" not in result[0]:
             raise PolicyError("the policy gave no decision for this input")
         return answer(result[0]["result"])

@@ -175,3 +175,18 @@ def test_audit_replays_policy_and_checks_approvals(tmp_path):
     (tmp_path / "p.json").write_text(json.dumps(stranger))
     assert any("approval is not signed" in p
                for p in audit.run(folder, principals=tmp_path / "p.json")[1])
+
+
+def test_evaluating_does_not_leak_memory_mappings(rules):
+    """Each evaluation frees its wasmtime store: a gateway decides for as long as it runs."""
+    def mappings():
+        with open("/proc/self/maps") as f:
+            return sum(1 for _ in f)
+
+    if not __import__("os").path.exists("/proc/self/maps"):
+        pytest.skip("needs /proc")
+    rules.evaluate(pay("I1", 100))
+    before = mappings()
+    for _ in range(500):
+        rules.evaluate(pay("I1", 100))
+    assert mappings() - before < 10
